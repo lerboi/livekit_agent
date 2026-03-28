@@ -1,0 +1,17 @@
+{
+  "agent": {
+    "default_greeting": "Hola, gracias por llamar. Como puedo ayudarle hoy?",
+    "recording_disclosure": "Esta llamada puede ser grabada por motivos de calidad.",
+    "language_clarification": "Prefiere ingles o espanol?",
+    "unsupported_language_apology": "Lo siento, todavia estoy aprendiendo {language}. Dejeme conseguirle ayuda.",
+    "call_wrap_up": "Quiero asegurarme de haberle atendido correctamente. Permitame resumir antes de finalizar.",
+    "transfer_attempt": "Le voy a transferir al equipo ahora.",
+    "capture_name": "Me puede dar su nombre, por favor?",
+    "capture_address": "Cual es la direccion del servicio?",
+    "capture_job_type": "Podria describir el problema que tiene?",
+    "fallback_no_booking": "He anotado su informacion y alguien de nuestro equipo se comunicara con usted pronto.",
+    "language_barrier_escalation": "Voy a asegurarme de que alguien que hable {language} se comunique con usted de inmediato.",
+    "greeting_onboarding": "Hola, gracias por llamar a {business_name}. Esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
+    "greeting_default": "Hola, esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "trunk": {
+    "name": "voco-twilio-inbound",
+    "numbers": [],
+    "krisp_enabled": true
+  }
+}

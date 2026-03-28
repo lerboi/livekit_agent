@@ -1,0 +1,9 @@
+{
+  "trunk": {
+    "name": "voco-twilio-outbound",
+    "address": "",
+    "numbers": [],
+    "auth_username": "",
+    "auth_password": ""
+  }
+}

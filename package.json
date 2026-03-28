@@ -1,0 +1,30 @@
+{
+  "name": "voco-livekit-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/agent.js",
+    "dev": "node --loader ts-node/esm src/agent.ts dev"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.1.0",
+    "@livekit/agents-plugin-google": "^1.2.0",
+    "@livekit/rtc-node": "^0.13.0",
+    "livekit-server-sdk": "^2.9.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "resend": "^6.9.4",
+    "stripe": "^21.0.0",
+    "twilio": "^5.13.0",
+    "openai": "^6.32.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.0"
+  }
+}

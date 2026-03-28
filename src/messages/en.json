@@ -1,0 +1,17 @@
+{
+  "agent": {
+    "default_greeting": "Hello, thank you for calling. How can I help you today?",
+    "recording_disclosure": "This call may be recorded for quality purposes.",
+    "language_clarification": "Would you prefer English or Spanish?",
+    "unsupported_language_apology": "I'm sorry, I am still learning {language}. Let me get someone to help you.",
+    "call_wrap_up": "I want to make sure I've captured everything you need. Let me summarize before we finish.",
+    "transfer_attempt": "Let me transfer you to the team now.",
+    "capture_name": "May I have your name, please?",
+    "capture_address": "What is the service address?",
+    "capture_job_type": "Could you describe the issue you're experiencing?",
+    "fallback_no_booking": "I've noted your information and someone from our team will follow up with you shortly.",
+    "language_barrier_escalation": "I'm going to make sure someone who speaks {language} gets back to you right away.",
+    "greeting_onboarding": "Hello, thank you for calling {business_name}. This call may be recorded for quality purposes. How can I help you today?",
+    "greeting_default": "Hello, this call may be recorded for quality purposes. How can I help you today?"
+  }
+}

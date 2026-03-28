@@ -1,0 +1,9 @@
+[agent]
+name = "voco-voice-agent"
+version = "1.0.0"
+
+[build]
+dockerfile = "Dockerfile"
+
+[runtime]
+entrypoint = "dist/agent.js"
