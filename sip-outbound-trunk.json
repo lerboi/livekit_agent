@@ -3,7 +3,7 @@
     "name": "voco-twilio-outbound",
     "address": "voco-livekit.pstn.twilio.com",
     "numbers": ["+14783755631"],
-    "auth_username": "voco_sip",
-    "auth_password": "Vocoloco3113!"
+    "auth_username": "DO_NOT_COMMIT",
+    "auth_password": "DO_NOT_COMMIT"
   }
 }
