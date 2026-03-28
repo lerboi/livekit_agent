@@ -16,7 +16,7 @@ const es = JSON.parse(readFileSync(join(__dirname, '..', 'messages', 'es.json'),
 
 // ─── Lazy-instantiated clients ────────────────────────────────────────────────
 
-let twilioClient: ReturnType<typeof twilio> | null = null;
+let twilioClient = null;
 function getTwilioClient() {
   if (!twilioClient) {
     twilioClient = twilio(
@@ -27,7 +27,7 @@ function getTwilioClient() {
   return twilioClient;
 }
 
-let resendClient: Resend | null = null;
+let resendClient = null;
 function getResendClient() {
   if (!resendClient) {
     resendClient = new Resend(process.env.RESEND_API_KEY);
@@ -37,7 +37,7 @@ function getResendClient() {
 
 // ─── Interpolation helper ────────────────────────────────────────────────────
 
-function interpolate(template: string, vars: Record<string, string>): string {
+function interpolate(template, vars) {
   return Object.entries(vars).reduce(
     (str, [key, val]) => str.replaceAll(`{${key}}`, val ?? ''),
     template,
@@ -55,15 +55,6 @@ export async function sendOwnerSMS({
   address,
   callbackLink,
   dashboardLink,
-}: {
-  to: string;
-  businessName: string;
-  callerName?: string;
-  jobType?: string;
-  urgency?: string;
-  address?: string;
-  callbackLink: string;
-  dashboardLink: string;
 }) {
   const isEmergency = urgency === 'emergency';
   const name = callerName || 'Unknown';
@@ -82,7 +73,7 @@ export async function sendOwnerSMS({
     });
     console.log('[notifications] Owner SMS sent:', result.sid);
     return result;
-  } catch (err: any) {
+  } catch (err) {
     console.error('[notifications] Owner SMS failed:', err?.message || err);
   }
 }
@@ -94,11 +85,6 @@ export async function sendOwnerEmail({
   lead,
   businessName,
   dashboardUrl,
-}: {
-  to: string;
-  lead: Record<string, any>;
-  businessName: string;
-  dashboardUrl: string;
 }) {
   const urgency = lead?.urgency_classification || lead?.urgency || 'routine';
   const isEmergency = urgency === 'emergency';
@@ -128,7 +114,7 @@ export async function sendOwnerEmail({
     });
     console.log('[notifications] Owner email sent:', result?.data?.id);
     return result;
-  } catch (err: any) {
+  } catch (err) {
     console.error('[notifications] Owner email failed:', err?.message || err);
   }
 }
@@ -141,13 +127,7 @@ export async function sendCallerRecoverySMS({
   businessName,
   locale,
   urgency,
-}: {
-  to: string | null;
-  callerName?: string | null;
-  businessName: string;
-  locale?: string;
-  urgency?: string;
-}): Promise<{ success: boolean; sid?: string; error?: { code: string | number; message: string } }> {
+}) {
   if (!to) {
     console.warn('[notifications] sendCallerRecoverySMS skipped: no phone number');
     return { success: false, error: { code: 'NO_PHONE', message: 'No phone number provided' } };
@@ -174,7 +154,7 @@ export async function sendCallerRecoverySMS({
     });
     console.log('[notifications] Caller recovery SMS sent:', result.sid);
     return { success: true, sid: result.sid };
-  } catch (err: any) {
+  } catch (err) {
     const code = err?.code || 'UNKNOWN';
     const message = err?.message || String(err);
     console.error('[notifications] Caller recovery SMS failed:', message);
@@ -191,13 +171,6 @@ export async function sendCallerSMS({
   time,
   address,
   locale,
-}: {
-  to: string | null;
-  businessName: string;
-  date: string;
-  time: string;
-  address: string;
-  locale: string;
 }) {
   if (!to) {
     console.warn('[notifications] sendCallerSMS skipped: no phone number');
@@ -220,7 +193,7 @@ export async function sendCallerSMS({
     });
     console.log('[notifications] Caller SMS sent:', result.sid);
     return result;
-  } catch (err: any) {
+  } catch (err) {
     console.error('[notifications] Caller SMS failed:', err?.message || err);
   }
 }

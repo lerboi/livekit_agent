@@ -7,9 +7,8 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { RoomServiceClient } from 'livekit-server-sdk';
-import type { ToolDeps } from './types.js';
 
-export function createEndCallTool(deps: ToolDeps) {
+export function createEndCallTool(deps) {
   return llm.tool({
     description:
       'End the call gracefully after all actions are complete. ' +
@@ -22,9 +21,9 @@ export function createEndCallTool(deps: ToolDeps) {
       setTimeout(async () => {
         try {
           const roomService = new RoomServiceClient(
-            process.env.LIVEKIT_URL!,
-            process.env.LIVEKIT_API_KEY!,
-            process.env.LIVEKIT_API_SECRET!,
+            process.env.LIVEKIT_URL,
+            process.env.LIVEKIT_API_KEY,
+            process.env.LIVEKIT_API_SECRET,
           );
           await roomService.removeParticipant(deps.roomName, deps.sipParticipantIdentity);
         } catch (err) {

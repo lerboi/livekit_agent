@@ -6,9 +6,8 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { createOrMergeLead } from '../lib/leads.js';
-import type { ToolDeps } from './types.js';
 
-export function createCaptureLeadTool(deps: ToolDeps) {
+export function createCaptureLeadTool(deps) {
   return llm.tool({
     description:
       'Capture caller information as a lead when they decline booking. ' +

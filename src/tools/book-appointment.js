@@ -12,12 +12,11 @@ import { atomicBookSlot } from '../lib/booking.js';
 import { calculateAvailableSlots } from '../lib/slot-calculator.js';
 import { sendCallerSMS, sendCallerRecoverySMS } from '../lib/notifications.js';
 import { formatSlotForSpeech, toLocalDateString, formatZonePairBuffers } from '../utils.js';
-import type { ToolDeps } from './types.js';
 
 // Google Calendar push — lazy import to avoid circular dependency
-let pushBookingToCalendar: ((tenantId: string, appointmentId: string) => Promise<void>) | null = null;
+let pushBookingToCalendar = null;
 
-export function createBookAppointmentTool(deps: ToolDeps) {
+export function createBookAppointmentTool(deps) {
   return llm.tool({
     description:
       'Book a confirmed appointment slot. Only use after: ' +
@@ -55,7 +54,7 @@ export function createBookAppointmentTool(deps: ToolDeps) {
       const endTime = new Date(slot_end);
 
       // Attempt atomic slot booking
-      let result: { success: boolean; appointment_id?: string; reason?: string };
+      let result;
       try {
         result = await atomicBookSlot(deps.supabase, {
           tenantId: deps.tenantId,
@@ -136,7 +135,7 @@ export function createBookAppointmentTool(deps: ToolDeps) {
       try {
         // Dynamic import to avoid circular dependency issues
         const { pushBookingToCalendar: pushFn } = await import('../lib/google-calendar.js');
-        pushFn(deps.tenantId!, result.appointment_id!).catch((err: Error) =>
+        pushFn(deps.tenantId, result.appointment_id).catch((err) =>
           console.error('[agent] Calendar push failed:', err),
         );
       } catch {
@@ -169,12 +168,7 @@ export function createBookAppointmentTool(deps: ToolDeps) {
 /**
  * Send recovery SMS on failed booking — same logic as handleBookAppointment after() blocks.
  */
-async function sendRecoverySMS(
-  deps: ToolDeps,
-  tenant: Record<string, any> | null,
-  urgency: string,
-  callerName: string | null,
-) {
+async function sendRecoverySMS(deps, tenant, urgency, callerName) {
   try {
     const locale = tenant?.default_locale || 'en';
 
@@ -203,23 +197,24 @@ async function sendRecoverySMS(
         recovery_sms_retry_count: deliveryResult.success ? 0 : 1,
         recovery_sms_last_error: deliveryResult.success
           ? null
-          : `${deliveryResult.error!.code}: ${deliveryResult.error!.message}`,
+          : `${deliveryResult.error.code}: ${deliveryResult.error.message}`,
         recovery_sms_last_attempt_at: new Date().toISOString(),
         recovery_sms_sent_at: deliveryResult.success ? new Date().toISOString() : null,
       })
       .eq('call_id', deps.callId);
-  } catch (err: any) {
+  } catch (err) {
     console.error('[agent] Recovery SMS pipeline failed:', err?.message || err);
     // Write error state for cron retry pickup
-    await deps.supabase
-      .from('calls')
-      .update({
-        recovery_sms_status: 'retrying',
-        recovery_sms_retry_count: 1,
-        recovery_sms_last_error: `AGENT_ERROR: ${err?.message || String(err)}`,
-        recovery_sms_last_attempt_at: new Date().toISOString(),
-      })
-      .eq('call_id', deps.callId)
-      .catch(() => {}); // last-resort swallow
+    try {
+      await deps.supabase
+        .from('calls')
+        .update({
+          recovery_sms_status: 'retrying',
+          recovery_sms_retry_count: 1,
+          recovery_sms_last_error: `AGENT_ERROR: ${err?.message || String(err)}`,
+          recovery_sms_last_attempt_at: new Date().toISOString(),
+        })
+        .eq('call_id', deps.callId);
+    } catch {} // last-resort swallow
   }
 }

@@ -1,5 +1,3 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
-
 /**
  * createOrMergeLead — creates a new lead or attaches a repeat caller to an existing open lead.
  * Adapted from src/lib/leads.js — accepts supabase client as parameter.
@@ -12,7 +10,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  *  - Every new lead creation logs an activity_log entry
  */
 export async function createOrMergeLead(
-  supabase: SupabaseClient,
+  supabase,
   {
     tenantId,
     callId,
@@ -23,18 +21,8 @@ export async function createOrMergeLead(
     triageResult,
     appointmentId,
     callDuration,
-  }: {
-    tenantId: string;
-    callId: string;
-    fromNumber: string;
-    callerName?: string | null;
-    jobType?: string | null;
-    serviceAddress?: string | null;
-    triageResult?: { urgency?: string };
-    appointmentId?: string | null;
-    callDuration: number;
   },
-): Promise<Record<string, unknown> | null> {
+) {
   // 1. Short call filter
   if (callDuration < 15) {
     return null;

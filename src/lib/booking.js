@@ -1,11 +1,9 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
-
 /**
  * Atomically book a slot by calling the book_appointment_atomic Supabase RPC.
  * Adapted from src/lib/scheduling/booking.js — accepts supabase client as parameter.
  */
 export async function atomicBookSlot(
-  supabase: SupabaseClient,
+  supabase,
   {
     tenantId,
     callId,
@@ -16,18 +14,8 @@ export async function atomicBookSlot(
     callerPhone,
     urgency,
     zoneId,
-  }: {
-    tenantId: string;
-    callId: string | null;
-    startTime: Date;
-    endTime: Date;
-    address: string;
-    callerName: string;
-    callerPhone: string | null;
-    urgency: string;
-    zoneId: string | null;
   },
-): Promise<{ success: boolean; appointment_id?: string; reason?: string }> {
+) {
   const { data, error } = await supabase.rpc('book_appointment_atomic', {
     p_tenant_id: tenantId,
     p_call_id: callId,

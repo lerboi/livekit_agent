@@ -4,34 +4,16 @@
  * Both stages run in-process immediately (no webhook delay).
  */
 
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { classifyCall } from './lib/triage/classifier.js';
 import { createOrMergeLead } from './lib/leads.js';
 import { sendOwnerSMS, sendOwnerEmail } from './lib/notifications.js';
 import { calculateAvailableSlots } from './lib/slot-calculator.js';
 import { toLocalDateString, formatZonePairBuffers } from './utils.js';
-import type { TenantRow } from './utils.js';
 
 // Supported languages — calls in other languages trigger language barrier tag
 const SUPPORTED_LANGUAGES = new Set(['en', 'es']);
 
-export interface PostCallParams {
-  supabase: SupabaseClient;
-  callId: string;
-  callUuid: string | null;
-  tenantId: string | null;
-  tenant: TenantRow | null;
-  fromNumber: string;
-  toNumber: string;
-  startTimestamp: number;
-  endTimestamp: number;
-  transcriptTurns: Array<{ role: string; content: string; timestamp: number }>;
-  recordingStoragePath: string | null;
-  isTestCall: boolean;
-  disconnectionReason?: string;
-}
-
-export async function runPostCallPipeline(params: PostCallParams): Promise<void> {
+export async function runPostCallPipeline(params) {
   const {
     supabase,
     callId,
@@ -127,7 +109,7 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
 
             if (sub?.overage_stripe_item_id) {
               const Stripe = (await import('stripe')).default;
-              const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+              const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
               await stripe.subscriptionItems.createUsageRecord(sub.overage_stripe_item_id, {
                 quantity: 1,
                 action: 'increment',
@@ -203,13 +185,14 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
     .is('booking_outcome', null);
 
   // ── 9. Create/merge lead ──
+  let lead = null;
   if (callUuid && durationSeconds >= 15) {
     try {
       const callerName = extractFieldFromTranscript(transcriptTurns, 'name');
       const jobType = extractFieldFromTranscript(transcriptTurns, 'job');
 
       // Look up appointmentId if a booking was made
-      let appointmentId: string | null = null;
+      let appointmentId = null;
       if (bookingOutcome === 'booked') {
         const { data: apptRow } = await supabase
           .from('appointments')
@@ -219,7 +202,7 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
         appointmentId = apptRow?.id || null;
       }
 
-      var lead = await createOrMergeLead(supabase, {
+      lead = await createOrMergeLead(supabase, {
         tenantId,
         callId: callUuid,
         fromNumber,
@@ -257,7 +240,7 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
         const prefs = tenantInfo.notification_preferences || {};
         const outcomePrefs = isEmergency
           ? { sms: true, email: true }
-          : (prefs as Record<string, { sms: boolean; email: boolean }>)[finalOutcome] || {
+          : prefs[finalOutcome] || {
               sms: true,
               email: true,
             };
@@ -266,17 +249,17 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
         const dashboardLink = `${process.env.NEXT_PUBLIC_APP_URL || 'https://localhost:3000'}/dashboard/leads`;
         const businessName = tenantInfo.business_name || 'Your Business';
 
-        const promises: Promise<any>[] = [];
+        const promises = [];
 
         if (outcomePrefs.sms && tenantInfo.owner_phone) {
           promises.push(
             sendOwnerSMS({
               to: tenantInfo.owner_phone,
               businessName,
-              callerName: (lead as any)?.caller_name,
-              jobType: (lead as any)?.job_type,
+              callerName: lead?.caller_name,
+              jobType: lead?.job_type,
               urgency: triageResult.urgency,
-              address: (lead as any)?.service_address,
+              address: lead?.service_address,
               callbackLink,
               dashboardLink,
             }),
@@ -287,7 +270,7 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
           promises.push(
             sendOwnerEmail({
               to: tenantInfo.owner_email,
-              lead: lead as Record<string, any>,
+              lead,
               businessName,
               dashboardUrl: dashboardLink,
             }),
@@ -320,9 +303,7 @@ export async function runPostCallPipeline(params: PostCallParams): Promise<void>
  * Detect the language from transcript turns.
  * Simple heuristic: check for Spanish markers in caller speech.
  */
-function detectLanguageFromTranscript(
-  turns: Array<{ role: string; content: string }>,
-): string | null {
+function detectLanguageFromTranscript(turns) {
   const callerText = turns
     .filter((t) => t.role === 'user')
     .map((t) => t.content)
@@ -356,10 +337,7 @@ function detectLanguageFromTranscript(
  * Extract a field from transcript turns (best-effort).
  * This is a simple heuristic — the AI tool calls capture this data more accurately.
  */
-function extractFieldFromTranscript(
-  turns: Array<{ role: string; content: string }>,
-  field: 'name' | 'job',
-): string | null {
+function extractFieldFromTranscript(turns, field) {
   // The AI should have already captured this via tool calls.
   // This is a fallback for the post-call pipeline.
   // In practice, the lead is usually already created mid-call via capture_lead or book_appointment.
@@ -369,10 +347,7 @@ function extractFieldFromTranscript(
 /**
  * Calculate suggested slots for unbooked calls (same as processCallAnalyzed).
  */
-async function calculateSuggestedSlots(
-  supabase: SupabaseClient,
-  tenant: TenantRow | null,
-): Promise<Array<{ start: string; end: string }> | null> {
+async function calculateSuggestedSlots(supabase, tenant) {
   if (!tenant?.working_hours) return null;
 
   const tenantTimezone = tenant.tenant_timezone || 'America/Chicago';
@@ -388,7 +363,7 @@ async function calculateSuggestedSlots(
     supabase.from('zone_travel_buffers').select('zone_a_id, zone_b_id, buffer_mins').eq('tenant_id', tenant.id),
   ]);
 
-  const collectedSlots: Array<{ start: string; end: string }> = [];
+  const collectedSlots = [];
   for (let d = 0; d < 3 && collectedSlots.length < 3; d++) {
     const targetDate = new Date();
     targetDate.setDate(targetDate.getDate() + d + 1);

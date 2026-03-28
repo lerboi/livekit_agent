@@ -10,9 +10,8 @@ import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import { calculateAvailableSlots } from '../lib/slot-calculator.js';
 import { toLocalDateString, formatZonePairBuffers } from '../utils.js';
-import type { ToolDeps } from './types.js';
 
-export function createCheckAvailabilityTool(deps: ToolDeps) {
+export function createCheckAvailabilityTool(deps) {
   return llm.tool({
     description:
       'Check real-time appointment availability for specific dates. ' +
@@ -65,7 +64,7 @@ export function createCheckAvailabilityTool(deps: ToolDeps) {
       ]);
 
       // Determine which dates to check
-      let datesToCheck: string[] = [];
+      let datesToCheck = [];
       if (date) {
         datesToCheck = [date];
       } else {
@@ -77,7 +76,7 @@ export function createCheckAvailabilityTool(deps: ToolDeps) {
       }
 
       // Calculate slots across requested dates (up to 6 total)
-      const allSlots: Array<{ start: string; end: string }> = [];
+      const allSlots = [];
       for (const dateStr of datesToCheck) {
         if (allSlots.length >= 6) break;
 

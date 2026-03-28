@@ -4,23 +4,18 @@
  * Pipeline: Layer 1 (regex) → Layer 2 (LLM, if ambiguous) → Layer 3 (owner rules).
  */
 
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { runKeywordClassifier } from './layer1-keywords.js';
 import { runLLMScorer } from './layer2-llm.js';
 import { applyOwnerRules } from './layer3-rules.js';
 
 export async function classifyCall(
-  supabase: SupabaseClient,
+  supabase,
   {
     transcript,
     tenant_id,
     detected_service = null,
-  }: {
-    transcript: string;
-    tenant_id: string;
-    detected_service?: string | null;
   },
-): Promise<{ urgency: string; confidence: string; layer: string; reason?: string }> {
+) {
   if (!transcript || transcript.length < 10) {
     return { urgency: 'routine', confidence: 'low', layer: 'layer1' };
   }

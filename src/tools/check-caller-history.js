@@ -7,9 +7,8 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { formatSlotForSpeech } from '../utils.js';
-import type { ToolDeps } from './types.js';
 
-export function createCheckCallerHistoryTool(deps: ToolDeps) {
+export function createCheckCallerHistoryTool(deps) {
   return llm.tool({
     description:
       'Check caller history for repeat caller awareness. No parameters needed. ' +

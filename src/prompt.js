@@ -18,9 +18,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const en = JSON.parse(readFileSync(join(__dirname, 'messages', 'en.json'), 'utf-8'));
 const es = JSON.parse(readFileSync(join(__dirname, 'messages', 'es.json'), 'utf-8'));
 
-const messages: Record<string, Record<string, unknown>> = { en, es };
+const messages = { en, es };
 
-const TONE_LABELS: Record<string, string> = {
+const TONE_LABELS = {
   professional: 'measured and formal',
   friendly: 'upbeat and warm',
   local_expert: 'relaxed and neighborly',
@@ -28,12 +28,12 @@ const TONE_LABELS: Record<string, string> = {
 
 // --- Section builders -------------------------------------------------------
 
-function buildIdentitySection(businessName: string, toneLabel: string): string {
+function buildIdentitySection(businessName, toneLabel) {
   return `You are the AI receptionist for ${businessName}. Style: ${toneLabel}.
 Keep responses concise — but never truncate booking confirmations, address recaps, or appointment details. This is a phone call: speak naturally, get to the point.`;
 }
 
-function buildVoiceBehaviorSection(): string {
+function buildVoiceBehaviorSection() {
   return `VOICE BEHAVIOR (native audio model):
 - You process audio directly. Your voice, pacing, and emotional tone are part of your response.
 - Match the caller's energy level — if they sound stressed, be calm and reassuring. If they sound casual, be relaxed and friendly.
@@ -42,12 +42,7 @@ function buildVoiceBehaviorSection(): string {
 - If the caller sounds confused or frustrated, adjust your tone to be more patient.`;
 }
 
-function buildGreetingSection(
-  locale: string,
-  businessName: string,
-  onboardingComplete: boolean,
-  t: (key: string) => string,
-): string {
+function buildGreetingSection(locale, businessName, onboardingComplete, t) {
   const disclosure = t('agent.recording_disclosure');
   const greetingInstruction = onboardingComplete
     ? `Greet with business name + recording disclosure + ask how to help. Example: "Hello, thank you for calling ${businessName}. ${disclosure} How can I help you today?"`
@@ -63,14 +58,14 @@ ECHO AWARENESS:
 - If the caller appears to repeat what you just said (e.g., your greeting or recording notice), treat it as audio echo — ignore it and respond as if they haven't spoken: "How can I help you today?"`;
 }
 
-function buildLanguageSection(t: (key: string) => string): string {
+function buildLanguageSection(t) {
   return `LANGUAGE:
 - Match the caller's language. If unsure, ask: "${t('agent.language_clarification')}"
 - Switch immediately if the caller switches.
 - Unsupported language: say "${t('agent.unsupported_language_apology').replace('{language}', '[the detected language]')}", gather name/phone/issue, tag as LANGUAGE_BARRIER, end call.`;
 }
 
-function buildRepeatCallerSection(onboardingComplete: boolean): string {
+function buildRepeatCallerSection(onboardingComplete) {
   if (!onboardingComplete) return '';
   return `REPEAT CALLER:
 - After greeting, invoke check_caller_history before your first question.
@@ -81,7 +76,7 @@ function buildRepeatCallerSection(onboardingComplete: boolean): string {
 - Use caller history to skip re-asking name/address you already have.`;
 }
 
-function buildInfoGatheringSection(t: (key: string) => string): string {
+function buildInfoGatheringSection(t) {
   return `INFO GATHERING:
 - ALWAYS collect the caller's name first before anything else. Ask: "${t('agent.capture_name')}"
 - Then collect service address and issue: "${t('agent.capture_address')}" | "${t('agent.capture_job_type')}"
@@ -92,14 +87,14 @@ URGENCY RULE:
 - Classify urgency silently from what they describe. Emergency cues: active water leak, flooding, no heat in winter, gas smell, sparks, sewage backup. Everything else is routine.`;
 }
 
-function buildIntakeQuestionsSection(intakeQuestions: string): string {
+function buildIntakeQuestionsSection(intakeQuestions) {
   if (!intakeQuestions) return '';
   return `INTAKE QUESTIONS:
 After identifying the issue, ask these naturally (skip any already answered):
 ${intakeQuestions}`;
 }
 
-function buildBookingSection(businessName: string, onboardingComplete: boolean): string {
+function buildBookingSection(businessName, onboardingComplete) {
   if (!onboardingComplete) {
     return `CAPABILITIES:
 - Capture caller info (name, phone, address, issue).
@@ -140,14 +135,14 @@ Goal: book every caller into an appointment.
 7. SLOT TAKEN: "That slot was just taken. The next available is [alternative]. Would you like me to book that instead?"`;
 }
 
-function buildDeclineHandlingSection(businessName: string): string {
+function buildDeclineHandlingSection(businessName) {
   return `DECLINE HANDLING:
 - First explicit decline: "No problem — if you change your mind, I can book anytime." Continue conversation.
 - Second explicit decline: save their information, then: "I've saved your info — ${businessName} will reach out. Anything else before I let you go?" If yes, answer then end the call. If no, farewell and end the call.
 - Passive non-engagement (silence, subject change) is NOT a decline — only explicit verbal refusal counts.`;
 }
 
-function buildTransferSection(businessName: string): string {
+function buildTransferSection(businessName) {
   return `TRANSFER (only 2 triggers):
 1. CALLER ASKS FOR HUMAN: "Absolutely, let me connect you now." Transfer them immediately.
 2. 3 FAILED CLARIFICATIONS: transfer with captured details.
@@ -163,7 +158,7 @@ If transfer is unavailable (no phone configured): "I can't connect you right now
 No other transfer triggers.`;
 }
 
-function buildCallDurationSection(t: (key: string) => string): string {
+function buildCallDurationSection(t) {
   return `TIMING:
 - At 9 minutes, wrap up: "${t('agent.call_wrap_up')}" Hard max: 10 minutes.`;
 }
@@ -171,22 +166,17 @@ function buildCallDurationSection(t: (key: string) => string): string {
 // --- Main builder -----------------------------------------------------------
 
 export function buildSystemPrompt(
-  locale: string,
+  locale,
   {
     business_name = 'Voco',
     onboarding_complete = false,
     tone_preset = 'professional',
     intake_questions = '',
-  }: {
-    business_name?: string;
-    onboarding_complete?: boolean;
-    tone_preset?: string;
-    intake_questions?: string;
   } = {},
-): string {
-  const t = (key: string): string => {
+) {
+  const t = (key) => {
     const parts = key.split('.');
-    let val: any = messages[locale] || messages['en'];
+    let val = messages[locale] || messages['en'];
     for (const part of parts) {
       val = val?.[part];
     }

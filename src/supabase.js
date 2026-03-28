@@ -1,12 +1,12 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 
-let _supabase: SupabaseClient | null = null;
+let _supabase = null;
 
 /**
  * Get a Supabase service-role client (bypasses RLS).
  * Same pattern as the Next.js app's src/lib/supabase.js.
  */
-export function getSupabaseAdmin(): SupabaseClient {
+export function getSupabaseAdmin() {
   if (!_supabase) {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY;

@@ -4,20 +4,18 @@
  * Never downgrades, only escalates.
  */
 
-import type { SupabaseClient } from '@supabase/supabase-js';
-
-const SEVERITY: Record<string, number> = {
+const SEVERITY = {
   emergency: 3,
   high_ticket: 2,
   routine: 1,
 };
 
 export async function applyOwnerRules(
-  supabase: SupabaseClient,
-  baseUrgency: string,
-  tenant_id: string,
-  detected_service: string | null = null,
-): Promise<{ urgency: string; escalated: boolean }> {
+  supabase,
+  baseUrgency,
+  tenant_id,
+  detected_service = null,
+) {
   const { data: services, error } = await supabase
     .from('services')
     .select('name, urgency_tag')
@@ -28,11 +26,11 @@ export async function applyOwnerRules(
     return { urgency: baseUrgency, escalated: false };
   }
 
-  let matchedTag: string | null = null;
+  let matchedTag = null;
   if (detected_service) {
     const normalizedDetected = detected_service.toLowerCase();
     const match = services.find(
-      (s: any) =>
+      (s) =>
         s.name.toLowerCase().includes(normalizedDetected) ||
         normalizedDetected.includes(s.name.toLowerCase()),
     );
@@ -50,10 +48,10 @@ export async function applyOwnerRules(
   }
 
   const baseSeverity = SEVERITY[baseUrgency] || 1;
-  const tagSeverity = SEVERITY[matchedTag!] || 1;
+  const tagSeverity = SEVERITY[matchedTag] || 1;
 
   if (tagSeverity > baseSeverity) {
-    return { urgency: matchedTag!, escalated: true };
+    return { urgency: matchedTag, escalated: true };
   }
 
   return { urgency: baseUrgency, escalated: false };

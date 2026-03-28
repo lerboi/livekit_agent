@@ -12,24 +12,24 @@
  * - Post-call pipeline runs immediately when the session closes
  */
 
-import { type JobContext, defineAgent, cli, llm } from '@livekit/agents';
+import { defineAgent, cli, ServerOptions, voice } from '@livekit/agents';
 import * as google from '@livekit/agents-plugin-google';
-import { EgressClient, EncodedFileOutput, RoomServiceClient } from 'livekit-server-sdk';
+import { EgressClient, RoomServiceClient } from 'livekit-server-sdk';
 import { buildSystemPrompt } from './prompt.js';
 import { createTools } from './tools/index.js';
 import { getSupabaseAdmin } from './supabase.js';
 import { runPostCallPipeline } from './post-call.js';
-import { calculateInitialSlots, type TenantRow } from './utils.js';
+import { calculateInitialSlots } from './utils.js';
 
 // Voice mapping: tone_preset → Gemini voice name
-const VOICE_MAP: Record<string, string> = {
+const VOICE_MAP = {
   professional: 'Kore',
   friendly: 'Aoede',
   local_expert: 'Achird',
 };
 
 export default defineAgent({
-  entry: async (ctx: JobContext) => {
+  entry: async (ctx) => {
     await ctx.connect();
 
     // Wait for the SIP participant (the caller) to join
@@ -44,7 +44,7 @@ export default defineAgent({
       participant.attributes?.['sip.callerNumber'] ||
       participant.attributes?.['sip.from'] ||
       '';
-    const callId = ctx.room.name!; // Room name = call identifier (replaces retell_call_id)
+    const callId = ctx.room.name; // Room name = call identifier
 
     // Check if this is a test call (metadata set by test-call route)
     let isTestCall = false;
@@ -75,7 +75,7 @@ export default defineAgent({
     let availableSlots = '';
     if (onboardingComplete && tenantId) {
       try {
-        availableSlots = await calculateInitialSlots(supabase, tenant as TenantRow);
+        availableSlots = await calculateInitialSlots(supabase, tenant);
       } catch (err) {
         console.error('[agent] Slot calculation failed:', err);
       }
@@ -91,8 +91,8 @@ export default defineAgent({
         .eq('is_active', true);
       if (services) {
         intakeQuestions = services
-          .flatMap((s: any) => s.intake_questions || [])
-          .filter((q: string, i: number, arr: string[]) => arr.indexOf(q) === i)
+          .flatMap((s) => s.intake_questions || [])
+          .filter((q, i, arr) => arr.indexOf(q) === i)
           .join('\n');
       }
     }
@@ -133,7 +133,7 @@ export default defineAgent({
     // ── Create tools (in-process, direct Supabase access) ──
     const tools = createTools({
       supabase,
-      tenant: tenant as TenantRow | null,
+      tenant,
       tenantId,
       callId,
       callUuid: callRecord?.id || null,
@@ -154,41 +154,30 @@ export default defineAgent({
     // ── Start Gemini Live session via LiveKit agent framework ──
     const model = new google.beta.realtime.RealtimeModel({
       model: 'gemini-3.1-flash-live-preview',
-      voice: voiceName as any,
+      voice: voiceName,
       temperature: 0.3,
       instructions: systemPrompt,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      contextWindowCompression: {
-        slidingWindow: {},
-        triggerTokens: 100000,
-      },
-      realtimeInputConfig: {
-        automaticActivityDetection: {
-          disabled: false,
-          startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH' as any,
-          endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH' as any,
-          prefixPaddingMs: 100,
-          silenceDurationMs: 700,
-        },
-        activityHandling: 'START_OF_ACTIVITY_INTERRUPTS' as any,
-      },
     });
 
-    const agent = new llm.Agent({ tools });
+    const agent = new voice.Agent({
+      instructions: systemPrompt,
+      tools: Object.values(tools),
+    });
 
-    const session = new llm.AgentSession({
+    const session = new voice.AgentSession({
       llm: model,
     });
 
     // ── Collect transcript in real-time ──
-    const transcriptTurns: Array<{ role: string; content: string; timestamp: number }> = [];
+    const transcriptTurns = [];
 
-    session.on('conversation_item_added', (event: any) => {
-      const text = event.item?.textContent || event.item?.text;
+    session.on('conversation_item_added', (event) => {
+      const text = event.item?.textContent || event.item?.text || event.text;
       if (text) {
         transcriptTurns.push({
-          role: event.item.role === 'user' ? 'user' : 'agent',
+          role: event.item?.role === 'user' ? 'user' : 'agent',
           content: text,
           timestamp: Date.now(),
         });
@@ -196,40 +185,38 @@ export default defineAgent({
     });
 
     // ── Start the session ──
-    await session.start(ctx.room, participant);
+    await session.start({ agent, room: ctx.room });
 
     // ── Generate greeting ──
     await session.say('', { allowInterruptions: false });
 
     // ── Start Egress recording ──
-    let egressId: string | undefined;
-    const recordingPath = `call-recordings/${callId}.mp4`;
+    let egressId;
+    const recordingPath = `${callId}.mp4`;
     try {
       const egressClient = new EgressClient(
-        process.env.LIVEKIT_URL!,
-        process.env.LIVEKIT_API_KEY!,
-        process.env.LIVEKIT_API_SECRET!,
+        process.env.LIVEKIT_URL,
+        process.env.LIVEKIT_API_KEY,
+        process.env.LIVEKIT_API_SECRET,
       );
-
-      const s3Config = {
-        accessKey: process.env.SUPABASE_S3_ACCESS_KEY!,
-        secret: process.env.SUPABASE_S3_SECRET_KEY!,
-        bucket: 'call-recordings',
-        region: process.env.SUPABASE_S3_REGION || 'us-east-1',
-        endpoint: process.env.SUPABASE_S3_ENDPOINT!,
-        forcePathStyle: true,
-      };
 
       const egressInfo = await egressClient.startRoomCompositeEgress(
         callId,
         {
           file: {
-            filepath: `${callId}.mp4`,
+            filepath: recordingPath,
             output: {
-              case: 's3' as const,
-              value: s3Config,
+              case: 's3',
+              value: {
+                accessKey: process.env.SUPABASE_S3_ACCESS_KEY,
+                secret: process.env.SUPABASE_S3_SECRET_KEY,
+                bucket: 'call-recordings',
+                region: process.env.SUPABASE_S3_REGION || 'ap-northeast-1',
+                endpoint: process.env.SUPABASE_S3_ENDPOINT,
+                forcePathStyle: true,
+              },
             },
-          } as any,
+          },
         },
         { audioOnly: true },
       );
@@ -251,9 +238,9 @@ export default defineAgent({
       if (egressId) {
         try {
           const egressClient = new EgressClient(
-            process.env.LIVEKIT_URL!,
-            process.env.LIVEKIT_API_KEY!,
-            process.env.LIVEKIT_API_SECRET!,
+            process.env.LIVEKIT_URL,
+            process.env.LIVEKIT_API_KEY,
+            process.env.LIVEKIT_API_SECRET,
           );
           await egressClient.stopEgress(egressId);
         } catch (err) {
@@ -268,7 +255,7 @@ export default defineAgent({
           callId,
           callUuid: callRecord?.id || null,
           tenantId,
-          tenant: tenant as TenantRow | null,
+          tenant,
           fromNumber,
           toNumber,
           startTimestamp,
@@ -285,4 +272,4 @@ export default defineAgent({
 });
 
 // ── CLI entry point ──
-cli.runApp(new cli.WorkerOptions({ agent: 'agent.js' }));
+cli.runApp(new ServerOptions({ agent: import.meta.filename }));

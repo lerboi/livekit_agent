@@ -8,9 +8,8 @@ import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { SipClient } from 'livekit-server-sdk';
 import { buildWhisperMessage } from '../lib/whisper-message.js';
-import type { ToolDeps } from './types.js';
 
-export function createTransferCallTool(deps: ToolDeps) {
+export function createTransferCallTool(deps) {
   return llm.tool({
     description:
       "Transfer the current call to the business owner's phone number. " +
@@ -56,9 +55,9 @@ export function createTransferCallTool(deps: ToolDeps) {
       // Perform SIP REFER transfer via LiveKit
       try {
         const sipClient = new SipClient(
-          process.env.LIVEKIT_URL!,
-          process.env.LIVEKIT_API_KEY!,
-          process.env.LIVEKIT_API_SECRET!,
+          process.env.LIVEKIT_URL,
+          process.env.LIVEKIT_API_KEY,
+          process.env.LIVEKIT_API_SECRET,
         );
 
         await sipClient.transferSipParticipant(

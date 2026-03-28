@@ -11,10 +11,7 @@ import { getSupabaseAdmin } from '../supabase.js';
  * Same logic as src/lib/scheduling/google-calendar.js pushBookingToCalendar().
  * This is a best-effort operation — failures are logged but never thrown.
  */
-export async function pushBookingToCalendar(
-  tenantId: string,
-  appointmentId: string,
-): Promise<void> {
+export async function pushBookingToCalendar(tenantId, appointmentId) {
   const supabase = getSupabaseAdmin();
 
   try {
@@ -93,7 +90,7 @@ export async function pushBookingToCalendar(
     }
 
     console.log(`[agent] Calendar event created: ${event.data.id}`);
-  } catch (err: any) {
+  } catch (err) {
     console.error('[agent] Calendar push failed (non-fatal):', err?.message || err);
   }
 }
