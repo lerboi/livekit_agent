@@ -1,11 +1,8 @@
 {
+  "name": "voco-inbound-dispatch",
   "rule": {
     "dispatchRuleIndividual": {
       "roomPrefix": "call-"
     }
-  },
-  "name": "voco-inbound-dispatch",
-  "attributes": {
-    "sip.inbound": "true"
   }
 }

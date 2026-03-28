@@ -1,9 +1,9 @@
 {
   "trunk": {
     "name": "voco-twilio-outbound",
-    "address": "",
-    "numbers": [],
-    "auth_username": "",
-    "auth_password": ""
+    "address": "voco-livekit.pstn.twilio.com",
+    "numbers": ["+14783755631"],
+    "auth_username": "voco_sip",
+    "auth_password": "Vocoloco3113!"
   }
 }

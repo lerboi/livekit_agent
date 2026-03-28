@@ -123,6 +123,7 @@ export async function sendOwnerEmail({
 
 export async function sendCallerRecoverySMS({
   to,
+  from,
   callerName,
   businessName,
   locale,
@@ -149,7 +150,7 @@ export async function sendCallerRecoverySMS({
   try {
     const result = await getTwilioClient().messages.create({
       body,
-      from: process.env.TWILIO_FROM_NUMBER,
+      from: from || process.env.TWILIO_FROM_NUMBER,
       to,
     });
     console.log('[notifications] Caller recovery SMS sent:', result.sid);
@@ -166,6 +167,7 @@ export async function sendCallerRecoverySMS({
 
 export async function sendCallerSMS({
   to,
+  from,
   businessName,
   date,
   time,
@@ -188,7 +190,7 @@ export async function sendCallerSMS({
   try {
     const result = await getTwilioClient().messages.create({
       body,
-      from: process.env.TWILIO_FROM_NUMBER,
+      from: from || process.env.TWILIO_FROM_NUMBER,
       to,
     });
     console.log('[notifications] Caller SMS sent:', result.sid);

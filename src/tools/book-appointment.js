@@ -152,6 +152,7 @@ export function createBookAppointmentTool(deps) {
       const smsLocale = tenant?.default_locale || 'en';
       sendCallerSMS({
         to: deps.fromNumber,
+        from: deps.toNumber,
         businessName: tenant?.business_name || 'Your service provider',
         date: format(toZonedTime(startTime, tenantTimezone), 'EEEE, MMMM do'),
         time: format(toZonedTime(startTime, tenantTimezone), 'h:mm a'),
@@ -183,6 +184,7 @@ async function sendRecoverySMS(deps, tenant, urgency, callerName) {
 
     const deliveryResult = await sendCallerRecoverySMS({
       to: deps.fromNumber,
+      from: deps.toNumber,
       callerName,
       businessName: tenant?.business_name || 'Your service provider',
       locale,
