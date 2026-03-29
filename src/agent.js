@@ -309,4 +309,4 @@ export default defineAgent({
 });
 
 // ── CLI entry point ──
-cli.runApp(new ServerOptions({ agent: import.meta.filename }));
+cli.runApp(new ServerOptions({ agent: import.meta.filename, agentName: 'voco-voice-agent' }));
