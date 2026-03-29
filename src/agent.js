@@ -12,6 +12,14 @@
  * - Post-call pipeline runs immediately when the session closes
  */
 
+import * as Sentry from '@sentry/node';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  tracesSampleRate: 0.1,
+  environment: process.env.NODE_ENV || 'production',
+});
+
 import { defineAgent, cli, ServerOptions, voice } from '@livekit/agents';
 import * as google from '@livekit/agents-plugin-google';
 import { EgressClient, RoomServiceClient } from 'livekit-server-sdk';
@@ -20,6 +28,10 @@ import { createTools } from './tools/index.js';
 import { getSupabaseAdmin } from './supabase.js';
 import { runPostCallPipeline } from './post-call.js';
 import { calculateInitialSlots } from './utils.js';
+import { startHealthServer } from './health.js';
+
+// Start health check server (non-blocking, separate port)
+startHealthServer();
 
 // Voice mapping: tone_preset → Gemini voice name
 const VOICE_MAP = {
@@ -231,6 +243,7 @@ export default defineAgent({
       // ── Session error handler (visibility into mid-call Gemini errors) ──
       session.on('error', (event) => {
         console.error(`[agent] Session error: room=${callId} tenant=${tenantId}`, event.error);
+        Sentry.captureException(event.error, { tags: { callId, tenantId } });
       });
 
       // ── Collect transcript in real-time ──
@@ -333,11 +346,13 @@ export default defineAgent({
           });
         } catch (err) {
           console.error('[agent] Post-call pipeline error:', err.message);
+          Sentry.captureException(err, { tags: { callId, tenantId, phase: 'post-call' } });
         }
       });
     } catch (err) {
       console.error('[agent] Entry function error:', err.message);
       console.error('[agent] Stack:', err?.stack);
+      Sentry.captureException(err);
       throw err;
     }
   },

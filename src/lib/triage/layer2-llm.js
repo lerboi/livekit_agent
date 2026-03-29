@@ -24,26 +24,30 @@ function getClient() {
  * @returns {Promise<{ urgency: 'emergency'|'routine'|'high_ticket', confidence: 'high'|'medium'|'low', reason: string }>}
  */
 export async function runLLMScorer(transcript) {
-  const response = await getClient().chat.completions.create({
-    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-    messages: [
-      {
-        role: 'system',
-        content: `You classify home service calls. Return ONLY a JSON object: {"urgency": "emergency"|"routine"|"high_ticket", "confidence": "high"|"medium"|"low", "reason": "one sentence"}
+  const TIMEOUT_MS = 5000;
+  try {
+    const response = await Promise.race([
+      getClient().chat.completions.create({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        messages: [
+          {
+            role: 'system',
+            content: `You classify home service calls. Return ONLY a JSON object: {"urgency": "emergency"|"routine"|"high_ticket", "confidence": "high"|"medium"|"low", "reason": "one sentence"}
 Emergency: immediate safety risk, happening right now, property damage ongoing.
 High-ticket: job likely > $500, complex install/replacement (not repair).
 Routine: future scheduling, quote requests, non-urgent repairs.`,
-      },
-      { role: 'user', content: `Call transcript:\n${transcript}` },
-    ],
-    response_format: { type: 'json_object' },
-    max_tokens: 100,
-    temperature: 0,
-  });
+          },
+          { role: 'user', content: `Call transcript:\n${transcript}` },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 100,
+        temperature: 0,
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('LLM timeout')), TIMEOUT_MS)),
+    ]);
 
-  try {
     return JSON.parse(response.choices[0].message.content);
   } catch {
-    return { urgency: 'routine', confidence: 'low', reason: 'parse error' };
+    return { urgency: 'routine', confidence: 'low', reason: 'timeout or error' };
   }
 }
