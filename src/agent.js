@@ -30,6 +30,7 @@ const VOICE_MAP = {
 
 export default defineAgent({
   entry: async (ctx) => {
+    try {
     // ── Phase 1: Connect to room ──
     console.log('[agent] Phase 1: Connecting to room...');
     await ctx.connect();
@@ -305,6 +306,11 @@ export default defineAgent({
         console.error('[agent] Post-call pipeline error:', err);
       }
     });
+    } catch (err) {
+      console.error('[agent] ENTRY FUNCTION ERROR:', err);
+      console.error('[agent] Error stack:', err?.stack);
+      throw err;
+    }
   },
 });
 
