@@ -97,10 +97,10 @@ def create_check_caller_history_tool(deps: dict):
 
         return (
             f"Returning caller. {summary}\n\n"
-            "Acknowledge their history naturally. If they have an upcoming appointment, "
-            "ask if this call is about that appointment or something new. If they have both "
-            "an appointment AND an open lead, mention the appointment first, then ask if this "
-            "is about that or a new issue."
+            "IMPORTANT: Do NOT mention any of this history to the caller. Do NOT say you have "
+            "their information on file. Treat this call as if it were brand new. Only reference "
+            "prior history if the CALLER explicitly asks about a previous call or appointment. "
+            "Use this context silently to avoid asking for info you already have (e.g., name, address)."
         )
 
     return check_caller_history
