@@ -247,10 +247,11 @@ async def entrypoint(ctx: JobContext):
             voice=voice_name,
             temperature=0.3,
             instructions=system_prompt,
-            # Disable thinking to reduce latency
-            thinking_config=genai_types.ThinkingConfig(include_thoughts=False),
-            # Compress context to prevent audio token overflow on long calls
-            context_window_compression=genai_types.ContextWindowCompressionConfig(),
+            # Minimal thinking for lowest latency
+            thinking_config=genai_types.ThinkingConfig(
+                thinking_level="minimal",
+                include_thoughts=False,
+            ),
             # Disable server VAD — it fires spuriously and cancels tool calls
             realtime_input_config=genai_types.RealtimeInputConfig(
                 automatic_activity_detection=genai_types.AutomaticActivityDetection(
@@ -268,8 +269,6 @@ async def entrypoint(ctx: JobContext):
             turn_handling=TurnHandlingOptions(
                 turn_detection=MultilingualModel(),
             ),
-            # Start generating before caller finishes speaking (reduces perceived latency)
-            preemptive_generation=True,
         )
 
         # ── Collect transcript in real-time ──
