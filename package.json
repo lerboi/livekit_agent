@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node patches/fix-gemini-audio.js",
     "start": "node src/agent.js start"
   },
   "dependencies": {
