@@ -222,9 +222,10 @@ export default defineAgent({
     console.log('[agent] Phase 10: Session started');
 
     // ── Phase 11: Generate greeting ──
+    // ── Phase 11: Generate greeting ──
     console.log('[agent] Phase 11: Generating greeting...');
-    await session.say('', { allowInterruptions: false });
-    console.log('[agent] Phase 11: Greeting sent');
+    session.generateReply();
+    console.log('[agent] Phase 11: Greeting triggered');
 
     // ── Start Egress recording ──
     let egressId;
