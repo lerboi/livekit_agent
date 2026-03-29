@@ -233,8 +233,7 @@ export default defineAgent({
 
       const agent = new voice.Agent({
         instructions: systemPrompt,
-        // tools temporarily disabled to isolate "invalid argument" error
-        // tools,
+        tools,
       });
 
       const session = new voice.AgentSession({
