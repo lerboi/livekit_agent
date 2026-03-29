@@ -25,7 +25,7 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
-from livekit.agents import AgentSession, Agent, cli, JobContext
+from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions
 from livekit.plugins import google
 from livekit import api
 
@@ -55,12 +55,8 @@ PARTICIPANT_TIMEOUT_S = 30
 class VocoAgent(Agent):
     """Voco AI receptionist agent with dynamic tools."""
 
-    def __init__(self, system_prompt: str, tools: list):
-        super().__init__(instructions=system_prompt, tools=tools)
-
-
-# Start health check server (non-blocking, separate port)
-start_health_server()
+    def __init__(self, tools: list):
+        super().__init__(tools=tools)
 
 
 async def entrypoint(ctx: JobContext):
@@ -176,12 +172,13 @@ async def entrypoint(ctx: JobContext):
                 pass
 
         # ── Build system prompt ──
-        system_prompt = build_system_prompt(locale, {
-            "business_name": business_name,
-            "onboarding_complete": onboarding_complete,
-            "tone_preset": tone_preset,
-            "intake_questions": intake_questions,
-        })
+        system_prompt = build_system_prompt(
+            locale,
+            business_name=business_name,
+            onboarding_complete=onboarding_complete,
+            tone_preset=tone_preset,
+            intake_questions=intake_questions,
+        )
         if available_slots:
             system_prompt += f"\n\nAVAILABLE APPOINTMENT SLOTS:\n{available_slots}"
 
@@ -243,7 +240,7 @@ async def entrypoint(ctx: JobContext):
             instructions=system_prompt,
         )
 
-        agent = VocoAgent(system_prompt=system_prompt, tools=tools)
+        agent = VocoAgent(tools=tools)
 
         session = AgentSession(llm=model)
 
@@ -252,7 +249,7 @@ async def entrypoint(ctx: JobContext):
 
         @session.on("conversation_item_added")
         def on_conversation_item(event):
-            text = getattr(event.item, "text_content", None) or getattr(event.item, "text", None) or getattr(event, "text", None)
+            text = getattr(event.item, "text_content", None)
             if text:
                 role = "user" if getattr(event.item, "role", None) == "user" else "agent"
                 transcript_turns.append({
@@ -264,48 +261,13 @@ async def entrypoint(ctx: JobContext):
         # ── Session error handler ──
         @session.on("error")
         def on_error(event):
-            logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id}", exc_info=event.error)
-            sentry_sdk.capture_exception(event.error, tags={"callId": call_id, "tenantId": tenant_id})
+            logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id} error={event.error}")
+            sentry_sdk.capture_exception(event.error)
 
-        # ── Start session ──
-        await session.start(agent=agent, room=ctx.room)
-        logger.info(f"[agent] Session started: room={call_id}")
-
-        # ── Start Egress recording ──
+        # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
         recording_path = f"{call_id}.mp4"
-        try:
-            lk = api.LiveKitAPI()
-            egress_info = await lk.egress.start_room_composite_egress(
-                api.RoomCompositeEgressRequest(
-                    room_name=call_id,
-                    audio_only=True,
-                    file_outputs=[api.EncodedFileOutput(
-                        filepath=recording_path,
-                        s3=api.S3Upload(
-                            access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
-                            secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
-                            bucket="call-recordings",
-                            region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
-                            endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
-                            force_path_style=True,
-                        ),
-                    )],
-                )
-            )
-            egress_id = egress_info.egress_id
-            await lk.aclose()
-            logger.info(f"[agent] Egress started: {egress_id}")
 
-            if call_record:
-                supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
-        except Exception as e:
-            logger.error(f"[agent] Failed to start egress: {e}")
-
-        # ── Generate greeting ──
-        session.generate_reply()
-
-        # ── Handle session end (post-call pipeline) ──
         @session.on("close")
         async def on_close(event):
             end_timestamp = int(time.time() * 1000)
@@ -341,6 +303,42 @@ async def entrypoint(ctx: JobContext):
                 logger.error(f"[agent] Post-call pipeline error: {e}")
                 sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
 
+        # ── Start session ──
+        await session.start(agent=agent, room=ctx.room)
+        logger.info(f"[agent] Session started: room={call_id}")
+
+        # ── Start Egress recording ──
+        try:
+            lk = api.LiveKitAPI()
+            egress_info = await lk.egress.start_room_composite_egress(
+                api.RoomCompositeEgressRequest(
+                    room_name=call_id,
+                    audio_only=True,
+                    file_outputs=[api.EncodedFileOutput(
+                        filepath=recording_path,
+                        s3=api.S3Upload(
+                            access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
+                            secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
+                            bucket="call-recordings",
+                            region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
+                            endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
+                            force_path_style=True,
+                        ),
+                    )],
+                )
+            )
+            egress_id = egress_info.egress_id
+            await lk.aclose()
+            logger.info(f"[agent] Egress started: {egress_id}")
+
+            if call_record:
+                supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
+        except Exception as e:
+            logger.error(f"[agent] Failed to start egress: {e}")
+
+        # ── Generate greeting ──
+        await session.generate_reply()
+
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)
         sentry_sdk.capture_exception(e)
@@ -348,4 +346,10 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    cli.run_app(entrypoint)
+    start_health_server()
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            agent_name="voco-voice-agent",
+        )
+    )

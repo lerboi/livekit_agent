@@ -35,9 +35,9 @@ def create_capture_lead_tool(deps: dict):
         if not tenant_id:
             return "I've noted your details and someone will follow up."
 
-        # Compute mid-call duration from start_timestamp (avoids 15s filter issue)
-        start_timestamp = deps.get("start_timestamp") or time.time()
-        duration_seconds = round(time.time() - start_timestamp)
+        # Compute mid-call duration from start_timestamp (milliseconds) (avoids 15s filter issue)
+        start_timestamp = deps.get("start_timestamp") or int(time.time() * 1000)
+        duration_seconds = round((time.time() * 1000 - start_timestamp) / 1000)
 
         try:
             await create_or_merge_lead(

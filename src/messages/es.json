@@ -13,5 +13,10 @@
     "language_barrier_escalation": "Voy a asegurarme de que alguien que hable {language} se comunique con usted de inmediato.",
     "greeting_onboarding": "Hola, gracias por llamar a {business_name}. Esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
     "greeting_default": "Hola, esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?"
+  },
+  "notifications": {
+    "booking_confirmation": "Su cita con {business_name} esta confirmada para el {date} a las {time}. Direccion: {address}",
+    "recovery_sms_attempted_routine": "Hola {first_name}, {business_name} recibio su llamada. Nos comunicaremos pronto para programar una cita.",
+    "recovery_sms_attempted_emergency": "URGENTE: Hola {first_name}, {business_name} recibio su llamada de emergencia. Nos comunicaremos de inmediato."
   }
 }

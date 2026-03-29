@@ -195,16 +195,17 @@ async def run_post_call_pipeline(params: dict):
                 appt_row = appt_resp.data[0] if appt_resp.data else None
                 appointment_id = appt_row.get("id") if appt_row else None
 
-            lead = await create_or_merge_lead(supabase, {
-                "tenant_id": tenant_id,
-                "call_id": call_uuid,
-                "from_number": from_number,
-                "caller_name": caller_name,
-                "job_type": job_type,
-                "triage_result": {"urgency": triage_result["urgency"]},
-                "appointment_id": appointment_id,
-                "call_duration": duration_seconds,
-            })
+            lead = await create_or_merge_lead(
+                supabase,
+                tenant_id=tenant_id,
+                call_id=call_uuid,
+                from_number=from_number,
+                caller_name=caller_name,
+                job_type=job_type,
+                triage_result={"urgency": triage_result["urgency"]},
+                appointment_id=appointment_id,
+                call_duration=duration_seconds,
+            )
         except Exception as e:
             print(f"[post-call] Lead creation error: {e}")
 
@@ -245,7 +246,8 @@ async def run_post_call_pipeline(params: dict):
                 tasks = []
 
                 if outcome_prefs.get("sms") and tenant_info.get("owner_phone"):
-                    tasks.append(send_owner_sms(
+                    tasks.append(asyncio.to_thread(
+                        send_owner_sms,
                         to=tenant_info["owner_phone"],
                         business_name=business_name,
                         caller_name=lead.get("caller_name"),
@@ -257,7 +259,8 @@ async def run_post_call_pipeline(params: dict):
                     ))
 
                 if outcome_prefs.get("email") and tenant_info.get("owner_email"):
-                    tasks.append(send_owner_email(
+                    tasks.append(asyncio.to_thread(
+                        send_owner_email,
                         to=tenant_info["owner_email"],
                         lead=lead,
                         business_name=business_name,
