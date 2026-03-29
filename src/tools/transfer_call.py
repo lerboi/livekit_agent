@@ -9,7 +9,7 @@ import logging
 from livekit import api
 from livekit.agents import function_tool, RunContext
 
-from src.lib.whisper_message import build_whisper_message
+from ..lib.whisper_message import build_whisper_message
 
 logger = logging.getLogger(__name__)
 

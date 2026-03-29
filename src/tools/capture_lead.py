@@ -8,7 +8,7 @@ import time
 
 from livekit.agents import function_tool, RunContext
 
-from src.lib.leads import create_or_merge_lead
+from ..lib.leads import create_or_merge_lead
 
 logger = logging.getLogger(__name__)
 

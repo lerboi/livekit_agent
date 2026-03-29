@@ -10,7 +10,7 @@ import os
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from src.supabase_client import get_supabase_admin
+from ..supabase_client import get_supabase_admin
 
 logger = logging.getLogger(__name__)
 

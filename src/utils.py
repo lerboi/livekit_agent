@@ -6,7 +6,7 @@ Ported from src/utils.js -- same logic, same behavior.
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from src.lib.slot_calculator import calculate_available_slots
+from .lib.slot_calculator import calculate_available_slots
 
 
 def _ordinal(n: int) -> str:

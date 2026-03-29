@@ -11,11 +11,11 @@ from zoneinfo import ZoneInfo
 
 from livekit.agents import function_tool, RunContext
 
-from src.lib.booking import atomic_book_slot
-from src.lib.slot_calculator import calculate_available_slots
-from src.lib.notifications import send_caller_sms, send_caller_recovery_sms
-from src.lib.google_calendar import push_booking_to_calendar
-from src.utils import (
+from ..lib.booking import atomic_book_slot
+from ..lib.slot_calculator import calculate_available_slots
+from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
+from ..lib.google_calendar import push_booking_to_calendar
+from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
     format_zone_pair_buffers,

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from livekit.agents import function_tool, RunContext
 
-from src.utils import format_slot_for_speech
+from ..utils import format_slot_for_speech
 
 logger = logging.getLogger(__name__)
 

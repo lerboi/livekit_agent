@@ -29,9 +29,6 @@ async def atomic_book_slot(
         },
     ).execute()
 
-    if hasattr(response, "error") and response.error:
-        raise Exception(f"book_appointment_atomic failed: {response.error}")
-
     data = response.data
     if isinstance(data, list):
         return data[0] if data else {}

@@ -261,14 +261,14 @@ async def entrypoint(ctx: JobContext):
         @session.on("error")
         def on_error(event):
             logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id} error={event.error}")
-            sentry_sdk.capture_exception(event.error)
+            actual_error = getattr(event.error, "error", event.error)
+            sentry_sdk.capture_exception(actual_error)
 
         # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
         recording_path = f"{call_id}.mp4"
 
-        @session.on("close")
-        async def on_close(event):
+        async def _on_close_async():
             end_timestamp = int(time.time() * 1000)
             duration_sec = round((end_timestamp - start_timestamp) / 1000)
             logger.info(f"[agent] Session closed: room={call_id} duration={duration_sec}s")
@@ -301,6 +301,10 @@ async def entrypoint(ctx: JobContext):
             except Exception as e:
                 logger.error(f"[agent] Post-call pipeline error: {e}")
                 sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
+
+        @session.on("close")
+        def on_close(event):
+            asyncio.create_task(_on_close_async())
 
         # ── Start session ──
         await session.start(agent=agent, room=ctx.room)

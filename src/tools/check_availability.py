@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 
 from livekit.agents import function_tool, RunContext
 
-from src.lib.slot_calculator import calculate_available_slots
-from src.utils import (
+from ..lib.slot_calculator import calculate_available_slots
+from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
     format_zone_pair_buffers,
