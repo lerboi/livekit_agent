@@ -348,7 +348,4 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    cli.run_app(
-        entrypoint,
-        agent_name="voco-voice-agent",
-    )
+    cli.run_app(entrypoint)
