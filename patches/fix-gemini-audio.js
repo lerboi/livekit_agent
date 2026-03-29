@@ -1,8 +1,5 @@
 /**
- * Patch @livekit/agents-plugin-google for gemini-3.1-flash-live-preview:
- * 1. Use new Gemini audio API (audio instead of deprecated media_chunks)
- * 2. Clean config: remove unsupported fields
- * 3. Skip initial sendClientContent (3.1 rejects it)
+ * Patch @livekit/agents-plugin-google for gemini-3.1-flash-live-preview
  */
 
 import { readFileSync, writeFileSync } from 'fs';
@@ -35,7 +32,12 @@ $1delete config.outputAudioTranscription;
 $1delete config.sessionResumption;
 $1delete config.thinkingConfig;
 $1Object.keys(config).forEach(k => { if (config[k] === undefined || config[k] === null) delete config[k]; });
-$1console.log("[gemini-patch] Final config keys:", Object.keys(config).join(", "));
+$1// Remove empty functionDeclarations from tools
+$1if (config.tools) {
+$1  config.tools = config.tools.filter(t => t.functionDeclarations && t.functionDeclarations.length > 0);
+$1  if (config.tools.length === 0) delete config.tools;
+$1}
+$1console.log("[gemini-patch] Final config:", JSON.stringify(config, (k, v) => k === 'text' && typeof v === 'string' && v.length > 100 ? v.slice(0, 100) + '...' : v, 2));
 $1return config;
 $2}
 $3startNewGeneration`,
@@ -43,12 +45,11 @@ $3startNewGeneration`,
 if (content !== before2) patchCount++;
 
 // Fix 3: Skip initial sendClientContent after session open
-// gemini-3.1-flash-live-preview rejects sendClientContent for initial turns
 const before3 = content;
 content = content.replace(
   /if \(turns\.length > 0\) \{\s*\n\s*await session\.sendClientContent\(\{\s*\n\s*turns,\s*\n\s*turnComplete: false\s*\n\s*\}\);\s*\n\s*\}/,
   `if (turns.length > 0) {
-              console.log("[gemini-patch] Skipping initial sendClientContent (" + turns.length + " turns) — not supported by 3.1");
+              console.log("[gemini-patch] Skipping initial sendClientContent (" + turns.length + " turns)");
             }`,
 );
 if (content !== before3) patchCount++;
