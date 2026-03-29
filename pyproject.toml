@@ -1,0 +1,22 @@
+[project]
+name = "voco-livekit-agent"
+version = "1.0.0"
+description = "Voco AI voice receptionist — Twilio SIP + LiveKit + Gemini 3.1 Flash Live"
+requires-python = ">=3.11"
+dependencies = [
+    "livekit-agents>=1.4,<2",
+    "livekit-plugins-google>=1.4,<2",
+    "livekit-api>=0.11,<1",
+    "supabase>=2.0,<3",
+    "openai>=1.0,<2",
+    "twilio>=9.0,<10",
+    "resend>=2.0,<3",
+    "stripe>=10.0,<12",
+    "google-auth>=2.0,<3",
+    "google-api-python-client>=2.0,<3",
+    "sentry-sdk>=2.0,<3",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"

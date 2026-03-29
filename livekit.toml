@@ -6,4 +6,4 @@ version = "1.0.0"
 dockerfile = "Dockerfile"
 
 [runtime]
-entrypoint = "dist/agent.js"
+entrypoint = "python -m src.agent"
