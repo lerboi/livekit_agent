@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY patches/ ./patches/
 RUN npm install
 
 COPY src/ ./src/
