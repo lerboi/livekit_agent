@@ -8,8 +8,7 @@ import asyncio
 import logging
 
 from livekit import api
-from livekit.agents import function_tool
-from livekit.agents.llm import RunContext
+from livekit.agents import function_tool, RunContext
 
 logger = logging.getLogger(__name__)
 

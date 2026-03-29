@@ -7,8 +7,7 @@ Read-only -- no database writes.
 import logging
 from datetime import datetime, timezone
 
-from livekit.agents import function_tool
-from livekit.agents.llm import RunContext
+from livekit.agents import function_tool, RunContext
 
 from src.utils import format_slot_for_speech
 

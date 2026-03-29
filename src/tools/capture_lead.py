@@ -6,8 +6,7 @@ Ported from src/tools/capture-lead.js -- same logic, same behavior.
 import logging
 import time
 
-from livekit.agents import function_tool
-from livekit.agents.llm import RunContext
+from livekit.agents import function_tool, RunContext
 
 from src.lib.leads import create_or_merge_lead
 

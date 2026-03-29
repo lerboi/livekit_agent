@@ -8,8 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from livekit.agents import function_tool
-from livekit.agents.llm import RunContext
+from livekit.agents import function_tool, RunContext
 
 from src.lib.slot_calculator import calculate_available_slots
 from src.utils import (
