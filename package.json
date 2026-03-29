@@ -11,6 +11,7 @@
     "@livekit/agents": "^1.1.0",
     "@livekit/agents-plugin-google": "^1.2.0",
     "@livekit/rtc-node": "^0.13.0",
+    "@sentry/node": "^10.46.0",
     "@supabase/supabase-js": "^2.45.0",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",
