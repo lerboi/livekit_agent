@@ -213,7 +213,7 @@ export default defineAgent({
       const voiceName = VOICE_MAP[tonePreset] || 'Kore';
 
       const model = new google.beta.realtime.RealtimeModel({
-        model: 'gemini-3.1-flash-live-preview',
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         voice: voiceName,
         temperature: 0.3,
         instructions: systemPrompt,
