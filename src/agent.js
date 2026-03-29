@@ -223,7 +223,7 @@ export default defineAgent({
 
       const agent = new voice.Agent({
         instructions: systemPrompt,
-        tools: Object.values(tools),
+        tools,
       });
 
       const session = new voice.AgentSession({
