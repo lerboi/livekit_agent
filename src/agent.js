@@ -30,12 +30,18 @@ const VOICE_MAP = {
 
 export default defineAgent({
   entry: async (ctx) => {
+    // ── Phase 1: Connect to room ──
+    console.log('[agent] Phase 1: Connecting to room...');
     await ctx.connect();
+    console.log('[agent] Phase 1: Connected. Room:', ctx.room.name);
 
-    // Wait for the SIP participant (the caller) to join
+    // ── Phase 2: Wait for SIP participant ──
+    console.log('[agent] Phase 2: Waiting for SIP participant...');
     const participant = await ctx.waitForParticipant();
+    console.log('[agent] Phase 2: Participant joined:', participant.identity);
 
     // Extract phone numbers from SIP participant attributes
+    console.log('[agent] Participant attributes:', JSON.stringify(participant.attributes));
     const toNumber =
       participant.attributes?.['sip.phoneNumber'] ||
       participant.attributes?.['sip.to'] ||
@@ -55,13 +61,20 @@ export default defineAgent({
 
     console.log(`[agent] Call started: room=${callId} from=${fromNumber} to=${toNumber} test=${isTestCall}`);
 
-    // ── Tenant lookup (same logic as handleInbound webhook) ──
+    // ── Phase 3: Supabase + tenant lookup ──
+    console.log('[agent] Phase 3: Initializing Supabase...');
     const supabase = getSupabaseAdmin();
-    const { data: tenant } = await supabase
+    console.log('[agent] Phase 3: Supabase client created. Looking up tenant by phone_number:', toNumber);
+    const { data: tenant, error: tenantError } = await supabase
       .from('tenants')
       .select('*')
       .eq('phone_number', toNumber)
       .single();
+
+    if (tenantError) {
+      console.error('[agent] Phase 3: Tenant lookup error:', tenantError.message, tenantError.code);
+    }
+    console.log('[agent] Phase 3: Tenant found:', tenant?.id ?? 'NONE', tenant?.business_name ?? 'N/A');
 
     const onboardingComplete = tenant?.onboarding_complete ?? false;
     const businessName = tenant?.business_name ?? 'Voco';
@@ -71,19 +84,24 @@ export default defineAgent({
     const ownerPhone = tenant?.owner_phone ?? null;
     const tenantTimezone = tenant?.tenant_timezone ?? 'America/Chicago';
 
-    // ── Calculate available slots (same logic as handleInbound) ──
+    // ── Phase 4: Calculate available slots ──
     let availableSlots = '';
     if (onboardingComplete && tenantId) {
       try {
+        console.log('[agent] Phase 4: Calculating initial slots...');
         availableSlots = await calculateInitialSlots(supabase, tenant);
+        console.log('[agent] Phase 4: Slots calculated:', availableSlots ? 'yes' : 'none');
       } catch (err) {
-        console.error('[agent] Slot calculation failed:', err);
+        console.error('[agent] Phase 4: Slot calculation failed:', err);
       }
+    } else {
+      console.log('[agent] Phase 4: Skipping slots (onboarding_complete:', onboardingComplete, 'tenantId:', tenantId, ')');
     }
 
-    // ── Fetch intake questions ──
+    // ── Phase 5: Fetch intake questions ──
     let intakeQuestions = '';
     if (tenantId) {
+      console.log('[agent] Phase 5: Fetching intake questions...');
       const { data: services } = await supabase
         .from('services')
         .select('intake_questions')
@@ -95,9 +113,11 @@ export default defineAgent({
           .filter((q, i, arr) => arr.indexOf(q) === i)
           .join('\n');
       }
+      console.log('[agent] Phase 5: Intake questions:', intakeQuestions ? 'yes' : 'none');
     }
 
-    // ── Build system prompt ──
+    // ── Phase 6: Build system prompt ──
+    console.log('[agent] Phase 6: Building system prompt...');
     let systemPrompt = buildSystemPrompt(locale, {
       business_name: businessName,
       onboarding_complete: onboardingComplete,
@@ -107,10 +127,12 @@ export default defineAgent({
     if (availableSlots) {
       systemPrompt += `\n\nAVAILABLE APPOINTMENT SLOTS:\n${availableSlots}`;
     }
+    console.log('[agent] Phase 6: Prompt built. Length:', systemPrompt.length);
 
-    // ── Create call record immediately ──
+    // ── Phase 7: Create call record ──
+    console.log('[agent] Phase 7: Creating call record...');
     const startTimestamp = Date.now();
-    const { data: callRecord } = await supabase
+    const { data: callRecord, error: callError } = await supabase
       .from('calls')
       .upsert(
         {
@@ -128,9 +150,15 @@ export default defineAgent({
       .select('id')
       .single();
 
+    if (callError) {
+      console.error('[agent] Phase 7: Call record error:', callError.message, callError.code);
+    }
+    console.log('[agent] Phase 7: Call record:', callRecord?.id ?? 'FAILED');
+
     const sipParticipantIdentity = participant.identity || '';
 
-    // ── Create tools (in-process, direct Supabase access) ──
+    // ── Phase 8: Create tools ──
+    console.log('[agent] Phase 8: Creating tools...');
     const tools = createTools({
       supabase,
       tenant,
@@ -147,11 +175,12 @@ export default defineAgent({
       sipParticipantIdentity,
       ctx,
     });
+    console.log('[agent] Phase 8: Tools created:', Object.keys(tools).join(', '));
 
-    // ── Select Gemini voice based on tone preset ──
+    // ── Phase 9: Create Gemini model + agent + session ──
     const voiceName = VOICE_MAP[tonePreset] || 'Kore';
+    console.log('[agent] Phase 9: Creating Gemini RealtimeModel (voice:', voiceName, ')...');
 
-    // ── Start Gemini Live session via LiveKit agent framework ──
     const model = new google.beta.realtime.RealtimeModel({
       model: 'gemini-3.1-flash-live-preview',
       voice: voiceName,
@@ -160,15 +189,18 @@ export default defineAgent({
       inputAudioTranscription: {},
       outputAudioTranscription: {},
     });
+    console.log('[agent] Phase 9: RealtimeModel created');
 
     const agent = new voice.Agent({
       instructions: systemPrompt,
       tools: Object.values(tools),
     });
+    console.log('[agent] Phase 9: Agent created');
 
     const session = new voice.AgentSession({
       llm: model,
     });
+    console.log('[agent] Phase 9: AgentSession created');
 
     // ── Collect transcript in real-time ──
     const transcriptTurns = [];
@@ -184,11 +216,15 @@ export default defineAgent({
       }
     });
 
-    // ── Start the session ──
+    // ── Phase 10: Start session ──
+    console.log('[agent] Phase 10: Starting session...');
     await session.start({ agent, room: ctx.room });
+    console.log('[agent] Phase 10: Session started');
 
-    // ── Generate greeting ──
+    // ── Phase 11: Generate greeting ──
+    console.log('[agent] Phase 11: Generating greeting...');
     await session.say('', { allowInterruptions: false });
+    console.log('[agent] Phase 11: Greeting sent');
 
     // ── Start Egress recording ──
     let egressId;
