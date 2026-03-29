@@ -61,57 +61,67 @@ async def _send_recovery_sms(deps: dict, tenant: dict | None, urgency: str, call
         locale = (tenant.get("default_locale") if tenant else None) or "en"
 
         # Write pending status
-        supabase.table("calls").update(
-            {
-                "recovery_sms_status": "pending",
-                "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("call_id", call_id).execute()
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {
+                    "recovery_sms_status": "pending",
+                    "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("call_id", call_id).execute()
+        )
 
-        delivery_result = send_caller_recovery_sms(
-            to=deps.get("from_number"),
-            from_number=deps.get("to_number"),
-            caller_name=caller_name,
-            business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
-            locale=locale,
-            urgency=urgency or "routine",
+        delivery_result = await asyncio.to_thread(
+            lambda: send_caller_recovery_sms(
+                to=deps.get("from_number"),
+                from_number=deps.get("to_number"),
+                caller_name=caller_name,
+                business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
+                locale=locale,
+                urgency=urgency or "routine",
+            )
         )
 
         # Write delivery result
         if delivery_result.get("success"):
-            supabase.table("calls").update(
-                {
-                    "recovery_sms_status": "sent",
-                    "recovery_sms_retry_count": 0,
-                    "recovery_sms_last_error": None,
-                    "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
-                    "recovery_sms_sent_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ).eq("call_id", call_id).execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("calls").update(
+                    {
+                        "recovery_sms_status": "sent",
+                        "recovery_sms_retry_count": 0,
+                        "recovery_sms_last_error": None,
+                        "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        "recovery_sms_sent_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("call_id", call_id).execute()
+            )
         else:
             error = delivery_result.get("error", {})
-            supabase.table("calls").update(
-                {
-                    "recovery_sms_status": "retrying",
-                    "recovery_sms_retry_count": 1,
-                    "recovery_sms_last_error": f"{error.get('code', 'UNKNOWN')}: {error.get('message', '')}",
-                    "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
-                    "recovery_sms_sent_at": None,
-                }
-            ).eq("call_id", call_id).execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("calls").update(
+                    {
+                        "recovery_sms_status": "retrying",
+                        "recovery_sms_retry_count": 1,
+                        "recovery_sms_last_error": f"{error.get('code', 'UNKNOWN')}: {error.get('message', '')}",
+                        "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        "recovery_sms_sent_at": None,
+                    }
+                ).eq("call_id", call_id).execute()
+            )
 
     except Exception as err:
         logger.error("[agent] Recovery SMS pipeline failed: %s", str(err))
         # Write error state for cron retry pickup
         try:
-            supabase.table("calls").update(
-                {
-                    "recovery_sms_status": "retrying",
-                    "recovery_sms_retry_count": 1,
-                    "recovery_sms_last_error": f"AGENT_ERROR: {str(err)}",
-                    "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ).eq("call_id", call_id).execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("calls").update(
+                    {
+                        "recovery_sms_status": "retrying",
+                        "recovery_sms_retry_count": 1,
+                        "recovery_sms_last_error": f"AGENT_ERROR: {str(err)}",
+                        "recovery_sms_last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("call_id", call_id).execute()
+            )
         except Exception:
             pass  # last-resort swallow
 
@@ -145,8 +155,8 @@ def create_book_appointment_tool(deps: dict):
             return "I was unable to confirm the booking. Please call back and we will try again."
 
         # Fetch tenant timezone and config
-        tenant_result = (
-            supabase.table("tenants")
+        tenant_result = await asyncio.to_thread(
+            lambda: supabase.table("tenants")
             .select("tenant_timezone, working_hours, slot_duration_mins, business_name, default_locale")
             .eq("id", tenant_id)
             .single()
@@ -177,35 +187,34 @@ def create_book_appointment_tool(deps: dict):
             # Slot was taken -- recalculate next available
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            current_bookings = (
-                supabase.table("appointments")
-                .select("start_time, end_time, zone_id")
-                .eq("tenant_id", tenant_id)
-                .neq("status", "cancelled")
-                .gte("end_time", now_iso)
-                .execute()
-            )
-
-            current_events = (
-                supabase.table("calendar_events")
-                .select("start_time, end_time")
-                .eq("tenant_id", tenant_id)
-                .gte("end_time", now_iso)
-                .execute()
-            )
-
-            current_zones = (
-                supabase.table("service_zones")
-                .select("id, name, postal_codes")
-                .eq("tenant_id", tenant_id)
-                .execute()
-            )
-
-            current_buffers = (
-                supabase.table("zone_travel_buffers")
-                .select("zone_a_id, zone_b_id, buffer_mins")
-                .eq("tenant_id", tenant_id)
-                .execute()
+            current_bookings, current_events, current_zones, current_buffers = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .select("start_time, end_time, zone_id")
+                    .eq("tenant_id", tenant_id)
+                    .neq("status", "cancelled")
+                    .gte("end_time", now_iso)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("calendar_events")
+                    .select("start_time, end_time")
+                    .eq("tenant_id", tenant_id)
+                    .gte("end_time", now_iso)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("service_zones")
+                    .select("id, name, postal_codes")
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("zone_travel_buffers")
+                    .select("zone_a_id, zone_b_id, buffer_mins")
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                ),
             )
 
             end_date_str = to_local_date_string(slot_end, tenant_timezone)
@@ -227,9 +236,11 @@ def create_book_appointment_tool(deps: dict):
                 next_slot_text = "tomorrow morning"
 
             # Write booking_outcome: 'attempted'
-            supabase.table("calls").update(
-                {"booking_outcome": "attempted"}
-            ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("calls").update(
+                    {"booking_outcome": "attempted"}
+                ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
+            )
 
             # Send recovery SMS (non-blocking)
             asyncio.create_task(
@@ -244,26 +255,32 @@ def create_book_appointment_tool(deps: dict):
         appointment_id = result.get("appointment_id")
         if appointment_id:
             try:
-                push_booking_to_calendar(tenant_id, appointment_id)
+                await asyncio.to_thread(
+                    lambda: push_booking_to_calendar(tenant_id, appointment_id)
+                )
             except Exception as cal_err:
                 logger.error("[agent] Calendar push failed: %s", str(cal_err))
 
         # Write booking_outcome: 'booked'
-        supabase.table("calls").update(
-            {"booking_outcome": "booked"}
-        ).eq("call_id", deps.get("call_id", "")).execute()
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {"booking_outcome": "booked"}
+            ).eq("call_id", deps.get("call_id", "")).execute()
+        )
 
         # Caller SMS confirmation (non-blocking)
         sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
         try:
-            send_caller_sms(
-                to=deps.get("from_number"),
-                from_number=deps.get("to_number"),
-                business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
-                date=_format_date_for_sms(slot_start, tenant_timezone),
-                time=_format_time_for_sms(slot_start, tenant_timezone),
-                address=service_address or "",
-                locale=sms_locale,
+            await asyncio.to_thread(
+                lambda: send_caller_sms(
+                    to=deps.get("from_number"),
+                    from_number=deps.get("to_number"),
+                    business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
+                    date=_format_date_for_sms(slot_start, tenant_timezone),
+                    time=_format_time_for_sms(slot_start, tenant_timezone),
+                    address=service_address or "",
+                    locale=sms_locale,
+                )
             )
         except Exception as sms_err:
             logger.error("[agent] Caller SMS failed: %s", str(sms_err))

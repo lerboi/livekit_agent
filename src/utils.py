@@ -70,7 +70,8 @@ def calculate_initial_slots(supabase, tenant: dict) -> str:
     Calculate initial slots for today + next 2 days (same logic as handleInbound).
     Returns formatted numbered list string.
 
-    Uses synchronous supabase client -- queries run sequentially.
+    NOTE: This function is synchronous and should be called via
+    asyncio.to_thread() from async callers.
     """
     tenant_timezone = tenant.get("tenant_timezone") or "America/Chicago"
 

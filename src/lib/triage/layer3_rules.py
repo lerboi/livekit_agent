@@ -1,3 +1,5 @@
+import asyncio
+
 from supabase import Client
 
 SEVERITY = {"emergency": 3, "high_ticket": 2, "routine": 1}
@@ -10,8 +12,8 @@ async def apply_owner_rules(
     detected_service: str | None = None,
 ) -> dict:
     try:
-        response = (
-            supabase.table("services")
+        response = await asyncio.to_thread(
+            lambda: supabase.table("services")
             .select("name, urgency_tag")
             .eq("tenant_id", tenant_id)
             .eq("is_active", True)

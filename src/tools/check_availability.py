@@ -4,6 +4,7 @@ Ported from src/tools/check-availability.js -- same logic, same behavior.
 Now executes in-process with direct Supabase access (zero network hops).
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -62,8 +63,8 @@ def create_check_availability_tool(deps: dict):
             )
 
         # Fetch tenant config
-        tenant_result = (
-            supabase.table("tenants")
+        tenant_result = await asyncio.to_thread(
+            lambda: supabase.table("tenants")
             .select("tenant_timezone, working_hours, slot_duration_mins, business_name")
             .eq("id", tenant_id)
             .single()
@@ -74,36 +75,35 @@ def create_check_availability_tool(deps: dict):
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Fetch live scheduling data
-        appointments_result = (
-            supabase.table("appointments")
-            .select("start_time, end_time, zone_id")
-            .eq("tenant_id", tenant_id)
-            .neq("status", "cancelled")
-            .gte("end_time", now_iso)
-            .execute()
-        )
-
-        events_result = (
-            supabase.table("calendar_events")
-            .select("start_time, end_time")
-            .eq("tenant_id", tenant_id)
-            .gte("end_time", now_iso)
-            .execute()
-        )
-
-        zones_result = (
-            supabase.table("service_zones")
-            .select("id, name, postal_codes")
-            .eq("tenant_id", tenant_id)
-            .execute()
-        )
-
-        buffers_result = (
-            supabase.table("zone_travel_buffers")
-            .select("zone_a_id, zone_b_id, buffer_mins")
-            .eq("tenant_id", tenant_id)
-            .execute()
+        # Fetch live scheduling data (parallel)
+        appointments_result, events_result, zones_result, buffers_result = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .select("start_time, end_time, zone_id")
+                .eq("tenant_id", tenant_id)
+                .neq("status", "cancelled")
+                .gte("end_time", now_iso)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("calendar_events")
+                .select("start_time, end_time")
+                .eq("tenant_id", tenant_id)
+                .gte("end_time", now_iso)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("service_zones")
+                .select("id, name, postal_codes")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("zone_travel_buffers")
+                .select("zone_a_id, zone_b_id, buffer_mins")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            ),
         )
 
         # Determine which dates to check

@@ -1,3 +1,5 @@
+import asyncio
+
 from supabase import Client
 
 
@@ -14,20 +16,22 @@ async def atomic_book_slot(
     urgency: str,
     zone_id: str | None = None,
 ) -> dict:
-    response = supabase.rpc(
-        "book_appointment_atomic",
-        {
-            "p_tenant_id": tenant_id,
-            "p_call_id": call_id,
-            "p_start_time": start_time,
-            "p_end_time": end_time,
-            "p_service_address": address,
-            "p_caller_name": caller_name,
-            "p_caller_phone": caller_phone,
-            "p_urgency": urgency,
-            "p_zone_id": zone_id,
-        },
-    ).execute()
+    response = await asyncio.to_thread(
+        lambda: supabase.rpc(
+            "book_appointment_atomic",
+            {
+                "p_tenant_id": tenant_id,
+                "p_call_id": call_id,
+                "p_start_time": start_time,
+                "p_end_time": end_time,
+                "p_service_address": address,
+                "p_caller_name": caller_name,
+                "p_caller_phone": caller_phone,
+                "p_urgency": urgency,
+                "p_zone_id": zone_id,
+            },
+        ).execute()
+    )
 
     data = response.data
     if isinstance(data, list):

@@ -3,6 +3,7 @@ capture_lead tool -- saves caller info as a lead when they decline booking.
 Ported from src/tools/capture-lead.js -- same logic, same behavior.
 """
 
+import asyncio
 import logging
 import time
 
@@ -54,13 +55,15 @@ def create_capture_lead_tool(deps: dict):
             )
 
             # Write booking_outcome: 'declined' (conditional -- don't overwrite 'booked')
-            supabase.table("calls").update(
-                {"booking_outcome": "declined"}
-            ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("calls").update(
+                    {"booking_outcome": "declined"}
+                ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
+            )
 
             # Look up business name for confirmation message
-            tenant_result = (
-                supabase.table("tenants")
+            tenant_result = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
                 .select("business_name")
                 .eq("id", tenant_id)
                 .single()

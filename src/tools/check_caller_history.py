@@ -4,6 +4,7 @@ Ported from src/tools/check-caller-history.js -- same logic, same behavior.
 Read-only -- no database writes.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -31,8 +32,8 @@ def create_check_caller_history_tool(deps: dict):
             return "No caller history available."
 
         # Look up tenant timezone for formatting
-        tenant_result = (
-            supabase.table("tenants")
+        tenant_result = await asyncio.to_thread(
+            lambda: supabase.table("tenants")
             .select("tenant_timezone")
             .eq("id", tenant_id)
             .single()
@@ -44,26 +45,27 @@ def create_check_caller_history_tool(deps: dict):
         now_iso = datetime.now(timezone.utc).isoformat()
 
         # Parallel lookup: leads + appointments for this caller
-        leads_result = (
-            supabase.table("leads")
-            .select("id, caller_name, job_type, service_address, status, created_at")
-            .eq("tenant_id", tenant_id)
-            .eq("from_number", from_number)
-            .order("created_at", desc=True)
-            .limit(3)
-            .execute()
-        )
-
-        appointments_result = (
-            supabase.table("appointments")
-            .select("start_time, end_time, service_address, status, caller_name")
-            .eq("tenant_id", tenant_id)
-            .eq("caller_phone", from_number)
-            .neq("status", "cancelled")
-            .gte("end_time", now_iso)
-            .order("start_time")
-            .limit(3)
-            .execute()
+        leads_result, appointments_result = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: supabase.table("leads")
+                .select("id, caller_name, job_type, service_address, status, created_at")
+                .eq("tenant_id", tenant_id)
+                .eq("from_number", from_number)
+                .order("created_at", desc=True)
+                .limit(3)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .select("start_time, end_time, service_address, status, caller_name")
+                .eq("tenant_id", tenant_id)
+                .eq("caller_phone", from_number)
+                .neq("status", "cancelled")
+                .gte("end_time", now_iso)
+                .order("start_time")
+                .limit(3)
+                .execute()
+            ),
         )
 
         leads = leads_result.data or []

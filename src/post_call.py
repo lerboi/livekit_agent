@@ -48,21 +48,22 @@ async def run_post_call_pipeline(params: dict):
 
     # ── 2. Update call record with transcript + recording ──
     try:
-        update_response = (
-            supabase.table("calls")
-            .update({
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update({
                 "status": "analyzed",
                 "end_timestamp": end_timestamp,
                 "recording_storage_path": recording_storage_path,
                 "transcript_text": transcript_text or None,
                 "transcript_structured": transcript_structured if transcript_structured else None,
                 "disconnection_reason": disconnection_reason or "agent_hangup",
-            })
-            .eq("call_id", call_id)
-            .select("id, booking_outcome")
-            .execute()
+            }).eq("call_id", call_id).execute()
         )
-        updated_call = update_response.data[0] if update_response.data else None
+
+        # Fetch the updated call record
+        call_fetch = await asyncio.to_thread(
+            lambda: supabase.table("calls").select("id, booking_outcome").eq("call_id", call_id).single().execute()
+        )
+        updated_call = call_fetch.data
     except Exception as e:
         print(f"[post-call] Call record update error: {e}")
         updated_call = None
@@ -72,8 +73,8 @@ async def run_post_call_pipeline(params: dict):
     # ── 3. Test call auto-cancel ──
     if is_test_call and tenant_id:
         try:
-            test_appt_resp = (
-                supabase.table("appointments")
+            test_appt_resp = await asyncio.to_thread(
+                lambda: supabase.table("appointments")
                 .select("id")
                 .eq("call_id", call_uuid)
                 .eq("tenant_id", tenant_id)
@@ -83,18 +84,26 @@ async def run_post_call_pipeline(params: dict):
             test_appt = test_appt_resp.data[0] if test_appt_resp.data else None
 
             if test_appt:
-                supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
-                supabase.table("leads").update({"status": "new", "appointment_id": None}).eq("appointment_id", test_appt["id"]).eq("tenant_id", tenant_id).execute()
+                await asyncio.gather(
+                    asyncio.to_thread(
+                        lambda: supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("leads").update({"status": "new", "appointment_id": None}).eq("appointment_id", test_appt["id"]).eq("tenant_id", tenant_id).execute()
+                    ),
+                )
         except Exception as e:
             print(f"[post-call] Test call auto-cancel error: {e}")
 
     # ── 4. Usage tracking ──
     if not is_test_call and tenant_id and duration_seconds >= 10:
         try:
-            usage_resp = supabase.rpc("increment_calls_used", {
-                "p_tenant_id": tenant_id,
-                "p_call_id": call_id,
-            }).execute()
+            usage_resp = await asyncio.to_thread(
+                lambda: supabase.rpc("increment_calls_used", {
+                    "p_tenant_id": tenant_id,
+                    "p_call_id": call_id,
+                }).execute()
+            )
 
             usage_data = usage_resp.data
             if usage_data and len(usage_data) > 0:
@@ -107,8 +116,8 @@ async def run_post_call_pipeline(params: dict):
 
                 if success and limit_exceeded:
                     try:
-                        sub_resp = (
-                            supabase.table("subscriptions")
+                        sub_resp = await asyncio.to_thread(
+                            lambda: supabase.table("subscriptions")
                             .select("overage_stripe_item_id")
                             .eq("tenant_id", tenant_id)
                             .eq("is_current", True)
@@ -120,10 +129,12 @@ async def run_post_call_pipeline(params: dict):
                         if sub and sub.get("overage_stripe_item_id"):
                             import stripe
                             stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
-                            stripe.SubscriptionItem.create_usage_record(
-                                sub["overage_stripe_item_id"],
-                                quantity=1,
-                                action="increment",
+                            await asyncio.to_thread(
+                                lambda: stripe.SubscriptionItem.create_usage_record(
+                                    sub["overage_stripe_item_id"],
+                                    quantity=1,
+                                    action="increment",
+                                )
                             )
                             print(f"[post-call] Overage reported to Stripe: tenant={tenant_id}")
                     except Exception as overage_err:
@@ -153,7 +164,9 @@ async def run_post_call_pipeline(params: dict):
 
     if not booking_outcome or booking_outcome == "not_attempted":
         try:
-            suggested_slots = _calculate_suggested_slots(supabase, tenant)
+            suggested_slots = await asyncio.to_thread(
+                lambda: _calculate_suggested_slots(supabase, tenant)
+            )
         except Exception as e:
             print(f"[post-call] Suggested slots calculation failed: {e}")
 
@@ -162,19 +175,23 @@ async def run_post_call_pipeline(params: dict):
         "high" if triage_result["urgency"] in ("emergency", "high_ticket") else "standard"
     )
 
-    supabase.table("calls").update({
-        "urgency_classification": triage_result["urgency"],
-        "urgency_confidence": triage_result.get("confidence"),
-        "triage_layer_used": triage_result.get("layer"),
-        "detected_language": detected_language,
-        "language_barrier": language_barrier,
-        "barrier_language": detected_language if language_barrier else None,
-        "suggested_slots": suggested_slots,
-        "notification_priority": notification_priority,
-    }).eq("call_id", call_id).execute()
+    await asyncio.to_thread(
+        lambda: supabase.table("calls").update({
+            "urgency_classification": triage_result["urgency"],
+            "urgency_confidence": triage_result.get("confidence"),
+            "triage_layer_used": triage_result.get("layer"),
+            "detected_language": detected_language,
+            "language_barrier": language_barrier,
+            "barrier_language": detected_language if language_barrier else None,
+            "suggested_slots": suggested_slots,
+            "notification_priority": notification_priority,
+        }).eq("call_id", call_id).execute()
+    )
 
     # Set booking_outcome to not_attempted if still null
-    supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
+    await asyncio.to_thread(
+        lambda: supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
+    )
 
     # ── 9. Create/merge lead ──
     lead = None
@@ -185,8 +202,8 @@ async def run_post_call_pipeline(params: dict):
 
             appointment_id = None
             if booking_outcome == "booked":
-                appt_resp = (
-                    supabase.table("appointments")
+                appt_resp = await asyncio.to_thread(
+                    lambda: supabase.table("appointments")
                     .select("id")
                     .eq("call_id", call_uuid)
                     .limit(1)
@@ -212,8 +229,8 @@ async def run_post_call_pipeline(params: dict):
     # ── 10. Send owner notifications ──
     if tenant_id and tenant:
         try:
-            tenant_info_resp = (
-                supabase.table("tenants")
+            tenant_info_resp = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
                 .select("business_name, owner_phone, owner_email, notification_preferences")
                 .eq("id", tenant_id)
                 .single()
@@ -222,8 +239,8 @@ async def run_post_call_pipeline(params: dict):
             tenant_info = tenant_info_resp.data
 
             if tenant_info and lead:
-                call_row_resp = (
-                    supabase.table("calls")
+                call_row_resp = await asyncio.to_thread(
+                    lambda: supabase.table("calls")
                     .select("booking_outcome")
                     .eq("call_id", call_id)
                     .single()
@@ -323,6 +340,7 @@ def _extract_field_from_transcript(turns, field):
 
 
 def _calculate_suggested_slots(supabase, tenant):
+    """Synchronous helper -- called via asyncio.to_thread() from the pipeline."""
     if not tenant or not tenant.get("working_hours"):
         return None
 

@@ -4,6 +4,7 @@ Ported from src/tools/transfer-call.js -- same logic, same behavior.
 Uses LiveKit SIP transfer instead of retell.call.transfer().
 """
 
+import asyncio
 import logging
 
 from livekit import api
@@ -44,9 +45,11 @@ def create_transfer_call_tool(deps: dict):
             else "caller_requested"
         )
 
-        supabase.table("calls").update(
-            {"exception_reason": exception_reason}
-        ).eq("call_id", deps.get("call_id", "")).execute()
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {"exception_reason": exception_reason}
+            ).eq("call_id", deps.get("call_id", "")).execute()
+        )
 
         # Build whisper context (spoken by agent before transfer for context)
         whisper_context = build_whisper_message(

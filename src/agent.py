@@ -93,8 +93,8 @@ async def entrypoint(ctx: JobContext):
         # ── Tenant lookup ──
         supabase = get_supabase_admin()
         try:
-            tenant_resp = (
-                supabase.table("tenants")
+            tenant_resp = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
                 .select("*")
                 .eq("phone_number", to_number)
                 .single()
@@ -118,8 +118,8 @@ async def entrypoint(ctx: JobContext):
         # ── Subscription gate (fail-open) ──
         if tenant_id:
             try:
-                sub_resp = (
-                    supabase.table("subscriptions")
+                sub_resp = await asyncio.to_thread(
+                    lambda: supabase.table("subscriptions")
                     .select("status")
                     .eq("tenant_id", tenant_id)
                     .eq("is_current", True)
@@ -146,7 +146,9 @@ async def entrypoint(ctx: JobContext):
         available_slots = ""
         if onboarding_complete and tenant_id:
             try:
-                available_slots = calculate_initial_slots(supabase, tenant)
+                available_slots = await asyncio.to_thread(
+                    lambda: calculate_initial_slots(supabase, tenant)
+                )
             except Exception as e:
                 logger.error(f"[agent] Slot calculation failed: {e}")
 
@@ -154,8 +156,8 @@ async def entrypoint(ctx: JobContext):
         intake_questions = ""
         if tenant_id:
             try:
-                services_resp = (
-                    supabase.table("services")
+                services_resp = await asyncio.to_thread(
+                    lambda: supabase.table("services")
                     .select("intake_questions")
                     .eq("tenant_id", tenant_id)
                     .eq("is_active", True)
@@ -188,8 +190,8 @@ async def entrypoint(ctx: JobContext):
 
         if tenant_id:
             try:
-                call_resp = (
-                    supabase.table("calls")
+                call_resp = await asyncio.to_thread(
+                    lambda: supabase.table("calls")
                     .upsert(
                         {
                             "call_id": call_id,
@@ -335,12 +337,14 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"[agent] Egress started: {egress_id}")
 
             if call_record:
-                supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
+                await asyncio.to_thread(
+                    lambda: supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
+                )
         except Exception as e:
             logger.error(f"[agent] Failed to start egress: {e}")
 
-        # ── Generate greeting ──
-        await session.generate_reply()
+        # ── Generate greeting (fire-and-forget — returns SpeechHandle) ──
+        session.generate_reply()
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)

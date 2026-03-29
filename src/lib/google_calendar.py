@@ -20,6 +20,9 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str) -> None:
     Push a booking to Google Calendar.
     Same logic as src/lib/google-calendar.js pushBookingToCalendar().
     This is a best-effort operation -- failures are logged but never raised.
+
+    NOTE: This function is synchronous and should be called via
+    asyncio.to_thread() from async callers.
     """
     supabase = get_supabase_admin()
 

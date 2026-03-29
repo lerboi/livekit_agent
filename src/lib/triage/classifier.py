@@ -4,6 +4,15 @@ from .layer1_keywords import run_keyword_classifier
 from .layer2_llm import run_llm_scorer
 from .layer3_rules import apply_owner_rules
 
+VALID_URGENCIES = {"emergency", "routine", "high_ticket"}
+
+
+def _sanitize_urgency(urgency: str) -> str:
+    """Ensure urgency is a valid DB enum value."""
+    if urgency in VALID_URGENCIES:
+        return urgency
+    return "routine"
+
 
 async def classify_call(
     supabase: Client,
@@ -29,13 +38,14 @@ async def classify_call(
         }
 
     layer2_result = await run_llm_scorer(transcript)
+    layer2_urgency = _sanitize_urgency(layer2_result.get("urgency", "routine"))
     layer3_result = await apply_owner_rules(
-        supabase, layer2_result.get("urgency", "routine"), tenant_id, detected_service
+        supabase, layer2_urgency, tenant_id, detected_service
     )
     final_layer = "layer3" if layer3_result["escalated"] else "layer2"
 
     return {
-        "urgency": layer3_result["urgency"],
+        "urgency": _sanitize_urgency(layer3_result["urgency"]),
         "confidence": layer2_result.get("confidence", "low"),
         "layer": final_layer,
         "reason": layer2_result.get("reason"),
