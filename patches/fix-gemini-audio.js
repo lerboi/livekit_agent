@@ -1,9 +1,7 @@
 /**
- * Patch @livekit/agents-plugin-google to use the new Gemini audio API
- * instead of the deprecated media_chunks format.
- *
- * The plugin sends audio via `sendRealtimeInput({ media: ... })` which
- * generates deprecated `media_chunks`. Gemini now requires `audio` instead.
+ * Patch @livekit/agents-plugin-google to:
+ * 1. Use new Gemini audio API (audio instead of deprecated media_chunks)
+ * 2. Log the connect config for debugging
  */
 
 import { readFileSync, writeFileSync } from 'fs';
@@ -18,12 +16,17 @@ const filePath = resolve(
 
 let content = readFileSync(filePath, 'utf8');
 
-// Replace: sendRealtimeInput({ media: mediaChunk })
-// With:    sendRealtimeInput({ audio: mediaChunk })
+// Fix 1: sendRealtimeInput({ media: mediaChunk }) → sendRealtimeInput({ audio: mediaChunk })
 content = content.replace(
   /sendRealtimeInput\(\{\s*media:\s*mediaChunk\s*\}\)/g,
   'sendRealtimeInput({ audio: mediaChunk })',
 );
 
+// Fix 2: Log the config sent to Gemini on connect
+content = content.replace(
+  'const config = this.buildConnectConfig();',
+  'const config = this.buildConnectConfig(); console.log("[gemini-debug] Connect config:", JSON.stringify(config, null, 2));',
+);
+
 writeFileSync(filePath, content, 'utf8');
-console.log('[patch] Fixed Gemini audio format: media -> audio');
+console.log('[patch] Applied Gemini fixes: audio format + debug logging');
