@@ -26,9 +26,8 @@ sentry_sdk.init(
 )
 
 from google.genai import types as genai_types
-from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, TurnHandlingOptions, room_io
-from livekit.plugins import google, silero, noise_cancellation
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
+from livekit.plugins import google, noise_cancellation
 from livekit import api, rtc
 
 from .prompt import build_system_prompt
@@ -252,24 +251,14 @@ async def entrypoint(ctx: JobContext):
                 thinking_level="minimal",
                 include_thoughts=False,
             ),
-            # Disable server VAD — it fires spuriously and cancels tool calls
-            realtime_input_config=genai_types.RealtimeInputConfig(
-                automatic_activity_detection=genai_types.AutomaticActivityDetection(
-                    disabled=True,
-                ),
-            ),
+            # Use Gemini's native server VAD (handles echo cancellation internally)
+            # Do NOT disable it — client-side VAD causes commit_audio errors and self-interruption
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
-        session = AgentSession(
-            llm=model,
-            # Client-side VAD replaces the disabled server VAD
-            vad=silero.VAD.load(),
-            turn_handling=TurnHandlingOptions(
-                turn_detection=MultilingualModel(),
-            ),
-        )
+        # Use default AgentSession — Gemini's native VAD handles turn detection
+        session = AgentSession(llm=model)
 
         # ── Collect transcript in real-time ──
         transcript_turns = []
