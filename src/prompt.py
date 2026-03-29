@@ -98,19 +98,8 @@ def _build_language_section(t) -> str:
 
 
 def _build_repeat_caller_section(onboarding_complete: bool) -> str:
-    if not onboarding_complete:
-        return ""
-    return (
-        "REPEAT CALLER:\n"
-        "- After greeting, invoke check_caller_history before your first question.\n"
-        "- First-time caller: proceed normally, don't mention it.\n"
-        '- Returning caller with appointment: "Welcome back! I see you have an appointment '
-        '[date/time]. Is this about that, or something new?"\n'
-        '- Returning caller with prior leads only: "Welcome back, I have your information on file. '
-        'How can I help you today?"\n'
-        "- Both appointment AND lead: mention appointment first.\n"
-        "- Use caller history to skip re-asking name/address you already have."
-    )
+    # All calls are treated as new calls — never reveal that you have prior information
+    return ""
 
 
 def _build_info_gathering_section(t) -> str:

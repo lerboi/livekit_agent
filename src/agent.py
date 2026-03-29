@@ -41,7 +41,7 @@ logger = logging.getLogger("voco-agent")
 
 # Voice mapping: tone_preset -> Gemini voice name
 VOICE_MAP = {
-    "professional": "Kore",
+    "professional": "Zephyr",
     "friendly": "Aoede",
     "local_expert": "Achird",
 }
@@ -60,10 +60,11 @@ class VocoAgent(Agent):
         super().__init__(instructions=instructions, tools=tools)
 
     async def on_enter(self) -> None:
-        """Triggered when agent joins session — deliver the opening greeting."""
-        self.session.generate_reply(
-            instructions="Deliver your opening greeting now."
-        )
+        """Triggered when agent joins session.
+        Gemini Realtime starts speaking automatically from the system instructions —
+        no generate_reply needed. The prompt's OPENING LINE section handles the greeting.
+        """
+        pass
 
 
 async def entrypoint(ctx: JobContext):
