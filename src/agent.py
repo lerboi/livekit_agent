@@ -55,8 +55,8 @@ PARTICIPANT_TIMEOUT_S = 30
 class VocoAgent(Agent):
     """Voco AI receptionist agent with dynamic tools."""
 
-    def __init__(self, tools: list):
-        super().__init__(tools=tools)
+    def __init__(self, instructions: str, tools: list):
+        super().__init__(instructions=instructions, tools=tools)
 
 
 async def entrypoint(ctx: JobContext):
@@ -203,7 +203,6 @@ async def entrypoint(ctx: JobContext):
                         },
                         on_conflict="call_id",
                     )
-                    .select("id")
                     .execute()
                 )
                 call_record = call_resp.data[0] if call_resp.data else None
@@ -240,7 +239,7 @@ async def entrypoint(ctx: JobContext):
             instructions=system_prompt,
         )
 
-        agent = VocoAgent(tools=tools)
+        agent = VocoAgent(instructions=system_prompt, tools=tools)
 
         session = AgentSession(llm=model)
 
