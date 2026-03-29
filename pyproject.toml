@@ -4,8 +4,11 @@ version = "1.0.0"
 description = "Voco AI voice receptionist — Twilio SIP + LiveKit + Gemini 3.1 Flash Live"
 requires-python = ">=3.11"
 dependencies = [
-    "livekit-agents>=1.4,<2",
+    "livekit-agents>=1.5,<2",
     "livekit-plugins-google @ git+https://github.com/livekit/agents.git@refs/pull/5238/head#subdirectory=livekit-plugins/livekit-plugins-google",
+    "livekit-plugins-silero>=1.4,<2",
+    "livekit-plugins-turn-detector>=1.4,<2",
+    "livekit-plugins-noise-cancellation>=0.2,<1",
     "livekit-api>=1.0,<2",
     "supabase>=2.0,<3",
     "openai>=2.0,<3",

@@ -25,9 +25,11 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
-from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions
-from livekit.plugins import google
-from livekit import api
+from google.genai import types as genai_types
+from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, TurnHandlingOptions, room_io
+from livekit.plugins import google, silero, noise_cancellation
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit import api, rtc
 
 from .prompt import build_system_prompt
 from .tools import create_tools
@@ -57,6 +59,12 @@ class VocoAgent(Agent):
 
     def __init__(self, instructions: str, tools: list):
         super().__init__(instructions=instructions, tools=tools)
+
+    async def on_enter(self) -> None:
+        """Triggered when agent joins session — deliver the opening greeting."""
+        self.session.generate_reply(
+            instructions="Deliver your opening greeting now."
+        )
 
 
 async def entrypoint(ctx: JobContext):
@@ -239,11 +247,30 @@ async def entrypoint(ctx: JobContext):
             voice=voice_name,
             temperature=0.3,
             instructions=system_prompt,
+            # Disable thinking to reduce latency
+            thinking_config=genai_types.ThinkingConfig(include_thoughts=False),
+            # Compress context to prevent audio token overflow on long calls
+            context_window_compression=genai_types.ContextWindowCompressionConfig(),
+            # Disable server VAD — it fires spuriously and cancels tool calls
+            realtime_input_config=genai_types.RealtimeInputConfig(
+                automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                    disabled=True,
+                ),
+            ),
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
-        session = AgentSession(llm=model)
+        session = AgentSession(
+            llm=model,
+            # Client-side VAD replaces the disabled server VAD
+            vad=silero.VAD.load(),
+            turn_handling=TurnHandlingOptions(
+                turn_detection=MultilingualModel(),
+            ),
+            # Start generating before caller finishes speaking (reduces perceived latency)
+            preemptive_generation=True,
+        )
 
         # ── Collect transcript in real-time ──
         transcript_turns = []
@@ -308,8 +335,20 @@ async def entrypoint(ctx: JobContext):
         def on_close(event):
             asyncio.create_task(_on_close_async())
 
-        # ── Start session ──
-        await session.start(agent=agent, room=ctx.room)
+        # ── Start session (with SIP-optimized noise cancellation) ──
+        await session.start(
+            agent=agent,
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=lambda params: (
+                        noise_cancellation.BVCTelephony()
+                        if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                        else noise_cancellation.BVC()
+                    ),
+                ),
+            ),
+        )
         logger.info(f"[agent] Session started: room={call_id}")
 
         # ── Start Egress recording ──
@@ -343,8 +382,7 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"[agent] Failed to start egress: {e}")
 
-        # ── Generate greeting (fire-and-forget — returns SpeechHandle) ──
-        session.generate_reply()
+        # Greeting is triggered by VocoAgent.on_enter() — no manual generate_reply needed
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)

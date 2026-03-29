@@ -47,7 +47,8 @@ def _build_voice_behavior_section() -> str:
         "If they sound casual, be relaxed and friendly.\n"
         "- When reading back addresses, dates, or times, slow down naturally for clarity.\n"
         "- Pause briefly between distinct information items (e.g., between slot options).\n"
-        "- If the caller sounds confused or frustrated, adjust your tone to be more patient."
+        "- If the caller sounds confused or frustrated, adjust your tone to be more patient.\n"
+        "- When calling a tool, do NOT speak while the tool is executing. Wait silently for the tool result before responding."
     )
 
 
