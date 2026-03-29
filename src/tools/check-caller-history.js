@@ -10,6 +10,7 @@ import { formatSlotForSpeech } from '../utils.js';
 
 export function createCheckCallerHistoryTool(deps) {
   return llm.tool({
+    name: 'check_caller_history',
     description:
       'Check caller history for repeat caller awareness. No parameters needed. ' +
       'Invoke after greeting, before first question.',

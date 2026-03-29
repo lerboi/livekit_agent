@@ -18,6 +18,7 @@ let pushBookingToCalendar = null;
 
 export function createBookAppointmentTool(deps) {
   return llm.tool({
+    name: 'book_appointment',
     description:
       'Book a confirmed appointment slot. Only use after: ' +
       '(1) collecting caller name and service address, ' +

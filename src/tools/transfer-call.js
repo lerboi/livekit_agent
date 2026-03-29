@@ -11,6 +11,7 @@ import { buildWhisperMessage } from '../lib/whisper-message.js';
 
 export function createTransferCallTool(deps) {
   return llm.tool({
+    name: 'transfer_call',
     description:
       "Transfer the current call to the business owner's phone number. " +
       'Use when the caller explicitly requests a human, or after 3 failed clarification attempts. ' +

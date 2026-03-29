@@ -9,6 +9,7 @@ import { createOrMergeLead } from '../lib/leads.js';
 
 export function createCaptureLeadTool(deps) {
   return llm.tool({
+    name: 'capture_lead',
     description:
       'Capture caller information as a lead when they decline booking. ' +
       'Use after the second explicit decline. Must be used before ending the call.',

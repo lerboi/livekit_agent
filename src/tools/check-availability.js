@@ -13,6 +13,7 @@ import { toLocalDateString, formatZonePairBuffers } from '../utils.js';
 
 export function createCheckAvailabilityTool(deps) {
   return llm.tool({
+    name: 'check_availability',
     description:
       'Check real-time appointment availability for specific dates. ' +
       'Use before offering slots to the caller, when the caller asks about a specific date or time, ' +

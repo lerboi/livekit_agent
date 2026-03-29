@@ -10,6 +10,7 @@ import { RoomServiceClient } from 'livekit-server-sdk';
 
 export function createEndCallTool(deps) {
   return llm.tool({
+    name: 'end_call',
     description:
       'End the call gracefully after all actions are complete. ' +
       'Always capture caller information before using this if no booking was made.',
