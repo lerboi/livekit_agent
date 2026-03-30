@@ -26,7 +26,8 @@ def create_capture_lead_tool(deps: dict):
         context: RunContext,
         caller_name: str,
         phone: str = "",
-        address: str = "",
+        street_name: str = "",
+        postal_code: str = "",
         job_type: str = "",
         notes: str = "",
     ) -> str:
@@ -40,6 +41,9 @@ def create_capture_lead_tool(deps: dict):
         start_timestamp = deps.get("start_timestamp") or int(time.time() * 1000)
         duration_seconds = round((time.time() * 1000 - start_timestamp) / 1000)
 
+        # Combine street_name + postal_code into service_address
+        service_address = f"{street_name}, {postal_code}".strip(", ") if (street_name or postal_code) else None
+
         try:
             await create_or_merge_lead(
                 supabase,
@@ -48,7 +52,9 @@ def create_capture_lead_tool(deps: dict):
                 from_number=deps.get("from_number") or phone or "",
                 caller_name=caller_name or None,
                 job_type=job_type or None,
-                service_address=address or None,
+                service_address=service_address,
+                postal_code=postal_code or None,
+                street_name=street_name or None,
                 triage_result={"urgency": "routine"},
                 appointment_id=None,
                 call_duration=duration_seconds,

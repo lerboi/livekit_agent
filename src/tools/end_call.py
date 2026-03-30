@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 async def _delayed_disconnect(deps: dict) -> None:
     """Wait for farewell audio to finish playing, then remove the SIP participant."""
-    await asyncio.sleep(5)
+    await asyncio.sleep(7)
     try:
         lk = api.LiveKitAPI()
         await lk.room.remove_participant(

@@ -15,6 +15,8 @@ async def atomic_book_slot(
     caller_phone: str,
     urgency: str,
     zone_id: str | None = None,
+    postal_code: str | None = None,
+    street_name: str | None = None,
 ) -> dict:
     response = await asyncio.to_thread(
         lambda: supabase.rpc(
@@ -29,6 +31,8 @@ async def atomic_book_slot(
                 "p_caller_phone": caller_phone,
                 "p_urgency": urgency,
                 "p_zone_id": zone_id,
+                "p_postal_code": postal_code,
+                "p_street_name": street_name,
             },
         ).execute()
     )

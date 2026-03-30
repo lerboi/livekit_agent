@@ -16,6 +16,8 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import sentry_sdk
 
@@ -186,6 +188,10 @@ async def entrypoint(ctx: JobContext):
             tone_preset=tone_preset,
             intake_questions=intake_questions,
         )
+        # Inject current date so the AI can map day names to YYYY-MM-DD dates
+        local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
+        system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
+
         if available_slots:
             system_prompt += (
                 f"\n\nINITIAL AVAILABILITY SNAPSHOT (may be outdated — always use "

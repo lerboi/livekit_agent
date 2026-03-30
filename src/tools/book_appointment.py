@@ -131,8 +131,8 @@ def create_book_appointment_tool(deps: dict):
         name="book_appointment",
         description=(
             "Book a confirmed appointment slot. Only use after: "
-            "(1) collecting caller name and service address, "
-            "(2) reading back the address and receiving verbal confirmation, "
+            "(1) collecting caller name, street name, and postal code, "
+            "(2) reading the address back and receiving verbal confirmation, "
             "(3) the caller has selected a slot from the availability results. "
             "Do NOT ask the caller about urgency -- infer it from the conversation."
         ),
@@ -141,12 +141,16 @@ def create_book_appointment_tool(deps: dict):
         context: RunContext,
         slot_start: str,
         slot_end: str,
-        service_address: str,
+        street_name: str,
+        postal_code: str,
         caller_name: str,
         urgency: str = "routine",
     ) -> str:
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
+
+        # Combine street_name + postal_code into service_address for storage and notifications
+        service_address = f"{street_name}, {postal_code}".strip(", ") if (street_name or postal_code) else "Address to be confirmed"
 
         if not slot_start or not slot_end:
             return "I need a bit more information to complete the booking. Could you confirm the time you would like?"
@@ -173,11 +177,13 @@ def create_book_appointment_tool(deps: dict):
                 call_id=deps.get("call_uuid", ""),
                 start_time=slot_start,
                 end_time=slot_end,
-                address=service_address or "Address to be confirmed",
+                address=service_address,
                 caller_name=caller_name or "Caller",
                 caller_phone=deps.get("from_number", ""),
                 urgency=urgency or "routine",
                 zone_id=None,
+                postal_code=postal_code or None,
+                street_name=street_name or None,
             )
         except Exception as booking_err:
             logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
