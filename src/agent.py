@@ -60,8 +60,8 @@ class VocoAgent(Agent):
         super().__init__(instructions=instructions, tools=tools)
 
     async def on_enter(self) -> None:
-        """Triggered when agent joins session. Generate the greeting immediately."""
-        await self.session.generate_reply()
+        # Greeting is handled at the entrypoint level after session.start()
+        pass
 
 
 async def entrypoint(ctx: JobContext):
@@ -339,6 +339,12 @@ async def entrypoint(ctx: JobContext):
             ),
         )
         logger.info(f"[agent] Session started: room={call_id}")
+
+        # ── Generate greeting (must be after session.start, per Gemini realtime pattern) ──
+        await session.generate_reply(
+            instructions=f"{system_prompt}\n\nGreet the caller now.",
+            allow_interruptions=False,
+        )
 
         # ── Start Egress recording ──
         try:
