@@ -341,8 +341,11 @@ async def entrypoint(ctx: JobContext):
         logger.info(f"[agent] Session started: room={call_id}")
 
         # ── Generate greeting (must be after session.start, per Gemini realtime pattern) ──
+        # For A2A models (Gemini 3.1 Flash Live), instructions are sent as realtime text input.
+        # The model already has the full system prompt from RealtimeModel(instructions=...).
+        # Only send a short nudge — not the full prompt again.
         await session.generate_reply(
-            instructions=f"{system_prompt}\n\nGreet the caller now.",
+            instructions="Greet the caller now.",
             allow_interruptions=False,
         )
 
