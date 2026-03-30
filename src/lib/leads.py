@@ -10,7 +10,7 @@ async def create_or_merge_lead(
     supabase: Client,
     *,
     tenant_id: str,
-    call_id: str,
+    call_id: str | None,
     from_number: str,
     caller_name: str | None = None,
     job_type: str | None = None,
@@ -37,11 +37,12 @@ async def create_or_merge_lead(
 
     if existing_leads and len(existing_leads) > 0:
         existing_lead = existing_leads[0]
-        await asyncio.to_thread(
-            lambda: supabase.table("lead_calls").insert(
-                {"lead_id": existing_lead["id"], "call_id": call_id}
-            ).execute()
-        )
+        if call_id:
+            await asyncio.to_thread(
+                lambda: supabase.table("lead_calls").insert(
+                    {"lead_id": existing_lead["id"], "call_id": call_id}
+                ).execute()
+            )
         return existing_lead
 
     # Create new lead
@@ -51,21 +52,18 @@ async def create_or_merge_lead(
     insert_response = await asyncio.to_thread(
         lambda: supabase.table("leads")
         .insert(
-            [
-                {
-                    "tenant_id": tenant_id,
-                    "from_number": from_number,
-                    "caller_name": caller_name or None,
-                    "job_type": job_type or None,
-                    "service_address": service_address or None,
-                    "urgency": urgency,
-                    "status": new_lead_status,
-                    "primary_call_id": call_id,
-                    "appointment_id": appointment_id or None,
-                }
-            ]
+            {
+                "tenant_id": tenant_id,
+                "from_number": from_number,
+                "caller_name": caller_name or None,
+                "job_type": job_type or None,
+                "service_address": service_address or None,
+                "urgency": urgency,
+                "status": new_lead_status,
+                "primary_call_id": call_id,
+                "appointment_id": appointment_id or None,
+            }
         )
-        .select("id, status, from_number, urgency, caller_name, job_type")
         .execute()
     )
 
@@ -76,12 +74,7 @@ async def create_or_merge_lead(
     new_lead = insert_response.data[0]
 
     # Link call to lead + log activity (parallel)
-    await asyncio.gather(
-        asyncio.to_thread(
-            lambda: supabase.table("lead_calls").insert(
-                {"lead_id": new_lead["id"], "call_id": call_id}
-            ).execute()
-        ),
+    parallel_tasks = [
         asyncio.to_thread(
             lambda: supabase.table("activity_log").insert(
                 {
@@ -96,6 +89,13 @@ async def create_or_merge_lead(
                 }
             ).execute()
         ),
-    )
+    ]
+    if call_id:
+        parallel_tasks.insert(0, asyncio.to_thread(
+            lambda: supabase.table("lead_calls").insert(
+                {"lead_id": new_lead["id"], "call_id": call_id}
+            ).execute()
+        ))
+    await asyncio.gather(*parallel_tasks)
 
     return new_lead

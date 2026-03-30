@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 async def _delayed_disconnect(deps: dict) -> None:
-    """Wait 3 seconds for farewell audio to play, then remove the SIP participant."""
-    await asyncio.sleep(3)
+    """Wait for farewell audio to finish playing, then remove the SIP participant."""
+    await asyncio.sleep(5)
     try:
         lk = api.LiveKitAPI()
         await lk.room.remove_participant(
@@ -33,8 +33,9 @@ def create_end_call_tool(deps: dict):
     @function_tool(
         name="end_call",
         description=(
-            "End the call gracefully after all actions are complete. "
-            "Always capture caller information before using this if no booking was made."
+            "End the call after you have finished your farewell and all conversation is complete. "
+            "Always capture caller information before ending if no booking was made. "
+            "Say goodbye to the caller BEFORE calling this tool."
         ),
     )
     async def end_call(context: RunContext) -> str:
@@ -42,6 +43,6 @@ def create_end_call_tool(deps: dict):
         # After farewell is spoken, disconnect the SIP participant.
         # Use a short delay to let the farewell audio play out.
         asyncio.create_task(_delayed_disconnect(deps))
-        return "Call ending."
+        return "Disconnecting caller now. Do not speak further."
 
     return end_call

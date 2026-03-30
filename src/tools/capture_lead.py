@@ -44,7 +44,7 @@ def create_capture_lead_tool(deps: dict):
             await create_or_merge_lead(
                 supabase,
                 tenant_id=tenant_id,
-                call_id=deps.get("call_uuid") or deps.get("call_id", ""),
+                call_id=deps.get("call_uuid"),
                 from_number=deps.get("from_number") or phone or "",
                 caller_name=caller_name or None,
                 job_type=job_type or None,

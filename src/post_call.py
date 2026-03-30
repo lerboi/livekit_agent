@@ -7,6 +7,7 @@ Both stages run in-process immediately (no webhook delay).
 import os
 import re
 import asyncio
+import stripe
 from datetime import datetime, timedelta, timezone
 
 from .lib.triage.classifier import classify_call
@@ -14,6 +15,8 @@ from .lib.leads import create_or_merge_lead
 from .lib.notifications import send_owner_sms, send_owner_email
 from .lib.slot_calculator import calculate_available_slots
 from .utils import to_local_date_string, format_zone_pair_buffers
+
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
 SUPPORTED_LANGUAGES = {"en", "es"}
 
@@ -127,13 +130,12 @@ async def run_post_call_pipeline(params: dict):
                         sub = sub_resp.data[0] if sub_resp.data else None
 
                         if sub and sub.get("overage_stripe_item_id"):
-                            import stripe
-                            stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+                            item_id = sub["overage_stripe_item_id"]
+                            client = stripe.StripeClient(os.environ.get("STRIPE_SECRET_KEY"))
                             await asyncio.to_thread(
-                                lambda: stripe.SubscriptionItem.create_usage_record(
-                                    sub["overage_stripe_item_id"],
-                                    quantity=1,
-                                    action="increment",
+                                lambda: client.subscription_items.create_usage_record(
+                                    item_id,
+                                    params={"quantity": 1, "action": "increment"},
                                 )
                             )
                             print(f"[post-call] Overage reported to Stripe: tenant={tenant_id}")
@@ -333,9 +335,47 @@ def _detect_language_from_transcript(turns):
 
 
 def _extract_field_from_transcript(turns, field):
-    """Best-effort field extraction from transcript.
-    The AI tool calls capture this data more accurately during the call.
+    """Best-effort field extraction from transcript via pattern matching.
+    The AI tool calls capture this data more accurately during the call;
+    this is a fallback for calls where tools were not triggered.
     """
+    if not turns:
+        return None
+
+    user_texts = [t.get("content", "") for t in turns if t.get("role") == "user"]
+    if not user_texts:
+        return None
+
+    if field == "name":
+        original_text = " ".join(user_texts)
+        patterns = [
+            r"(?:my name is|this is|i'm|i am|it's)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+            r"(?:name'?s)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, original_text, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                if 2 <= len(name) <= 50 and name.lower() not in ("here", "there", "calling", "sorry"):
+                    return name.title()
+        return None
+
+    elif field == "job":
+        user_text_lower = " ".join(user_texts).lower()
+        job_keywords = {
+            "plumbing": ["plumb", "pipe", "drain", "leak", "faucet", "toilet", "water heater", "sewer", "clog"],
+            "electrical": ["electric", "wiring", "outlet", "circuit", "breaker", "light switch", "panel"],
+            "hvac": ["hvac", "air condition", "heating", "furnace", "ac unit", "thermostat", "duct"],
+            "handyman": ["handyman", "repair", "fix", "install", "mount", "assemble", "drywall"],
+            "roofing": ["roof", "shingle", "gutter"],
+            "cleaning": ["clean", "pressure wash", "window clean"],
+        }
+        for job_type, keywords in job_keywords.items():
+            for kw in keywords:
+                if kw in user_text_lower:
+                    return job_type
+        return None
+
     return None
 
 

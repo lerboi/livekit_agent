@@ -43,9 +43,10 @@ def create_check_availability_tool(deps: dict):
     @function_tool(
         name="check_availability",
         description=(
-            "Check real-time appointment availability for specific dates. "
-            "Use before offering slots to the caller, when the caller asks about a specific date or time, "
-            "or when previously shown slots may be outdated."
+            "Check real-time appointment availability. "
+            "Call this whenever the caller asks about availability or before offering time slots. "
+            "Always use this for current data — initial slots in the prompt may be outdated. "
+            "Pass date in YYYY-MM-DD format for a specific day, or omit for the next 3 days."
         ),
     )
     async def check_availability(

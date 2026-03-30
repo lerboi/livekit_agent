@@ -190,7 +190,10 @@ async def entrypoint(ctx: JobContext):
             intake_questions=intake_questions,
         )
         if available_slots:
-            system_prompt += f"\n\nAVAILABLE APPOINTMENT SLOTS:\n{available_slots}"
+            system_prompt += (
+                f"\n\nINITIAL AVAILABILITY SNAPSHOT (may be outdated — always use "
+                f"check_availability for real-time data before booking):\n{available_slots}"
+            )
 
         # ── Create call record (only when tenant exists — calls.tenant_id is NOT NULL) ──
         start_timestamp = int(time.time() * 1000)
