@@ -42,7 +42,8 @@ def create_capture_lead_tool(deps: dict):
         duration_seconds = round((time.time() * 1000 - start_timestamp) / 1000)
 
         # Combine street_name + postal_code into service_address
-        service_address = f"{street_name}, {postal_code}".strip(", ") if (street_name or postal_code) else None
+        parts = [p for p in [street_name, postal_code] if p]
+        service_address = ", ".join(parts) if parts else None
 
         try:
             await create_or_merge_lead(

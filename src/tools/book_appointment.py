@@ -150,7 +150,8 @@ def create_book_appointment_tool(deps: dict):
         supabase = deps["supabase"]
 
         # Combine street_name + postal_code into service_address for storage and notifications
-        service_address = f"{street_name}, {postal_code}".strip(", ") if (street_name or postal_code) else "Address to be confirmed"
+        parts = [p for p in [street_name, postal_code] if p]
+        service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
         if not slot_start or not slot_end:
             return "I need a bit more information to complete the booking. Could you confirm the time you would like?"
@@ -174,7 +175,7 @@ def create_book_appointment_tool(deps: dict):
             result = await atomic_book_slot(
                 supabase,
                 tenant_id=tenant_id,
-                call_id=deps.get("call_uuid", ""),
+                call_id=deps.get("call_uuid") or None,
                 start_time=slot_start,
                 end_time=slot_end,
                 address=service_address,

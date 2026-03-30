@@ -386,7 +386,7 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"[agent] Failed to start egress: {e}")
 
-        # Greeting is triggered by VocoAgent.on_enter() — no manual generate_reply needed
+        # Greeting is triggered by session.generate_reply() above — on_enter is intentionally empty
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)
