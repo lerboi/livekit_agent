@@ -130,8 +130,10 @@ def create_book_appointment_tool(deps: dict):
     @function_tool(
         name="book_appointment",
         description=(
-            "Book a confirmed appointment slot. Only use after: "
-            "(1) collecting caller name, street name, and postal code, "
+            "Book a confirmed appointment slot. "
+            "Always tell the caller you're booking before calling this tool. "
+            "Only use after: "
+            "(1) collecting caller name, street name, and postal/zip code, "
             "(2) reading the address back and receiving verbal confirmation, "
             "(3) the caller has selected a slot from the availability results. "
             "Do NOT ask the caller about urgency -- infer it from the conversation."

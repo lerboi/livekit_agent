@@ -45,11 +45,10 @@ def _build_voice_behavior_section() -> str:
         "- Adapt to the caller's mood and energy. Be calm and reassuring with stressed callers, "
         "relaxed and warm with casual ones.\n"
         "- Slow down naturally when reading back addresses, dates, or appointment times.\n"
-        "- When the caller is waiting on an action — like checking availability or booking — "
-        "let them know briefly before proceeding (e.g. 'Let me check on that'), "
-        "then wait for the result before continuing.\n"
-        "- If the caller seems confused, be patient and rephrase.\n"
-        "- Pause briefly between distinct pieces of information (e.g. between slot options)."
+        "- BEFORE every tool call (checking availability, booking, etc.), you MUST briefly tell "
+        "the caller what you're about to do — for example, 'Let me check that for you' or "
+        "'Let me book that in for you.' This prevents awkward silence while the tool runs.\n"
+        "- If the caller seems confused, be patient and rephrase."
     )
 
 
@@ -98,7 +97,7 @@ def _build_repeat_caller_section(onboarding_complete: bool) -> str:
     return ""
 
 
-def _build_info_gathering_section(t) -> str:
+def _build_info_gathering_section(t, postal_label: str) -> str:
     return (
         "INFORMATION GATHERING:\n"
         "Collect information one piece at a time — ask one question, wait for the answer, "
@@ -107,14 +106,14 @@ def _build_info_gathering_section(t) -> str:
         "Follow this order:\n"
         "1. Understand the caller's issue — what do they need help with? Let them explain.\n"
         "2. Ask for their name.\n"
-        "3. Ask for their street name.\n"
-        "4. Ask for their postal code.\n"
+        f"3. Ask for their {postal_label}.\n"
+        "4. Ask for their street name.\n"
         "\n"
         "If the caller already volunteered any of these earlier in the conversation "
-        "(e.g., they mentioned their postal code or name in their opening), "
+        f"(e.g., they mentioned their {postal_label} or name in their opening), "
         "don't re-ask — just confirm what you heard and move to the next step.\n"
         "\n"
-        "Always have all four (issue, name, street name, postal code) before discussing scheduling.\n"
+        f"Always have all four (issue, name, {postal_label}, street name) before discussing scheduling.\n"
         "Always have the caller's name before using any tools or saving information.\n"
         "\n"
         "URGENCY:\n"
@@ -137,7 +136,7 @@ def _build_intake_questions_section(intake_questions: str | None) -> str:
     )
 
 
-def _build_booking_section(business_name: str, onboarding_complete: bool) -> str:
+def _build_booking_section(business_name: str, onboarding_complete: bool, postal_label: str) -> str:
     if not onboarding_complete:
         return (
             "CAPABILITIES:\n"
@@ -153,25 +152,26 @@ def _build_booking_section(business_name: str, onboarding_complete: bool) -> str
         "\n"
         "SCHEDULING:\n"
         "- Only discuss scheduling after you have the caller's name, issue, and service address "
-        "(street name + postal code).\n"
-        "- Ask the caller what day and time works for them. Never list or read out available times.\n"
+        f"(street name + {postal_label}).\n"
+        "- Ask the caller what day and time works for them.\n"
+        "- NEVER read out or list available time slots. Only check a specific time the caller requests.\n"
         "- If they mention a day but not a time, ask what time works best before checking.\n"
         "- If they mention a time but not a day, ask which day.\n"
-        "- Once you have both a day and time preference, use check_availability for real-time slot data. "
-        "Do not rely on any initial availability shown at the start — always verify with the tool.\n"
+        "- Once you have both a day and time preference, use check_availability to verify that "
+        "specific slot. Do not rely on any initial availability shown at the start.\n"
         "- If their preferred time is available, proceed to book it.\n"
-        "- If their preferred time is NOT available, suggest up to 3 of the closest alternative "
-        "times to what they asked for. Do not list every available slot.\n"
+        "- If their preferred time is NOT available, suggest only the 3 closest alternative "
+        "times to what they asked for. Never list all available slots.\n"
         "- If no slots are available on their preferred day, ask if another day works and check again.\n"
         f"- If fully booked, capture their information so {business_name} can follow up.\n"
         f"- For quote requests, frame it as a visit — {business_name} needs to see "
         "the job to give an accurate quote.\n"
         "\n"
         "BEFORE BOOKING:\n"
-        "- Read the street name and postal code back and wait for the caller to confirm. "
+        f"- Read the street name and {postal_label} back and wait for the caller to confirm. "
         "If they correct it, read the corrected version back and confirm again.\n"
         "- You need three things to book: the caller's name, a confirmed address "
-        "(street name + postal code), and a selected time slot (with start/end times from "
+        f"(street name + {postal_label}), and a selected time slot (with start/end times from "
         "the availability results).\n"
         "\n"
         "AFTER BOOKING:\n"
@@ -226,6 +226,7 @@ def build_system_prompt(
     onboarding_complete: bool = False,
     tone_preset: str = "professional",
     intake_questions: str = "",
+    country: str = "US",
 ) -> str:
     """
     Build the full system prompt for the Gemini Live voice agent.
@@ -236,6 +237,7 @@ def build_system_prompt(
         onboarding_complete: Whether the tenant has completed onboarding.
         tone_preset: Tone preset key ('professional', 'friendly', 'local_expert').
         intake_questions: Custom intake questions string.
+        country: Tenant country code ('SG', 'US', 'CA', etc.).
 
     Returns:
         The assembled system prompt string.
@@ -253,15 +255,17 @@ def build_system_prompt(
 
     tone_label = TONE_LABELS.get(tone_preset) or TONE_LABELS["professional"]
 
+    postal_label = "postal code" if country == "SG" else "zip code"
+
     sections = [
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t),
         _build_repeat_caller_section(onboarding_complete),
-        _build_info_gathering_section(t),
+        _build_info_gathering_section(t, postal_label),
         _build_intake_questions_section(intake_questions),
-        _build_booking_section(business_name, onboarding_complete),
+        _build_booking_section(business_name, onboarding_complete, postal_label),
     ]
 
     if onboarding_complete:

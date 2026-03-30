@@ -119,6 +119,7 @@ async def entrypoint(ctx: JobContext):
         tone_preset = tenant.get("tone_preset", "professional") if tenant else "professional"
         owner_phone = tenant.get("owner_phone") if tenant else None
         tenant_timezone = tenant.get("tenant_timezone", "America/Chicago") if tenant else "America/Chicago"
+        country = tenant.get("country", "US") if tenant else "US"
 
         logger.info(f"[agent] Tenant: {tenant_id or 'NONE'} ({business_name})")
 
@@ -187,6 +188,7 @@ async def entrypoint(ctx: JobContext):
             onboarding_complete=onboarding_complete,
             tone_preset=tone_preset,
             intake_questions=intake_questions,
+            country=country,
         )
         # Inject current date so the AI can map day names to YYYY-MM-DD dates
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
