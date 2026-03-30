@@ -60,11 +60,8 @@ class VocoAgent(Agent):
         super().__init__(instructions=instructions, tools=tools)
 
     async def on_enter(self) -> None:
-        """Triggered when agent joins session.
-        Gemini Realtime starts speaking automatically from the system instructions —
-        no generate_reply needed. The prompt's OPENING LINE section handles the greeting.
-        """
-        pass
+        """Triggered when agent joins session. Generate the greeting immediately."""
+        await self.session.generate_reply()
 
 
 async def entrypoint(ctx: JobContext):
