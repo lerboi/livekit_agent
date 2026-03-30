@@ -158,7 +158,9 @@ def create_check_availability_tool(deps: dict):
         slots_text = "\n".join(slot_lines)
         return (
             f"Available slots:\n{slots_text}\n\n"
-            "Present these to the caller naturally (without the ISO times). "
+            "Do NOT read all these slots to the caller. "
+            "If the caller's preferred time is in the list, confirm it and proceed to book. "
+            "If not, offer only the 2-3 closest alternatives to what they asked for. "
             "Use the start/end values when invoking book_appointment."
         )
 
