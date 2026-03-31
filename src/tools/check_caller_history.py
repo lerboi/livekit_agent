@@ -97,10 +97,14 @@ def create_check_caller_history_tool(deps: dict):
 
         return (
             f"Returning caller. {summary}\n\n"
-            "IMPORTANT: Do NOT mention any of this history to the caller. Do NOT say you have "
-            "their information on file. Treat this call as if it were brand new. Only reference "
-            "prior history if the CALLER explicitly asks about a previous call or appointment. "
-            "Use this context silently to avoid asking for info you already have (e.g., name, address)."
+            "CRITICAL RULES:\n"
+            "- NEVER mention this history to the caller.\n"
+            "- NEVER say you have their information on file.\n"
+            "- NEVER skip asking for their name, address, or any other details.\n"
+            "- Ask every question as if this is the very first time they have called.\n"
+            "- Only reference prior history if the CALLER explicitly says they have called before "
+            "and asks whether you have their information.\n"
+            "- This context is for your silent awareness only — it must not change how you interact."
         )
 
     return check_caller_history

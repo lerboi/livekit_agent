@@ -36,7 +36,6 @@ from .prompt import build_system_prompt
 from .tools import create_tools
 from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
-from .utils import calculate_initial_slots
 from .health import start_health_server
 
 logger = logging.getLogger("voco-agent")
@@ -123,19 +122,53 @@ async def entrypoint(ctx: JobContext):
 
         logger.info(f"[agent] Tenant: {tenant_id or 'NONE'} ({business_name})")
 
-        # ── Subscription gate (fail-open) ──
-        if tenant_id:
-            try:
-                sub_resp = await asyncio.to_thread(
-                    lambda: supabase.table("subscriptions")
-                    .select("status")
-                    .eq("tenant_id", tenant_id)
-                    .eq("is_current", True)
-                    .limit(1)
-                    .execute()
-                )
-                sub = sub_resp.data[0] if sub_resp.data else None
+        # ── Parallel DB queries (subscription + intake questions + call record) ──
+        # All depend on tenant_id but NOT on each other — run concurrently to minimize latency
+        start_timestamp = int(time.time() * 1000)
+        sub_result = None
+        intake_questions = ""
+        call_record = None
 
+        if tenant_id:
+            sub_task = asyncio.to_thread(
+                lambda: supabase.table("subscriptions")
+                .select("status")
+                .eq("tenant_id", tenant_id)
+                .eq("is_current", True)
+                .limit(1)
+                .execute()
+            )
+            intake_task = asyncio.to_thread(
+                lambda: supabase.table("services")
+                .select("intake_questions")
+                .eq("tenant_id", tenant_id)
+                .eq("is_active", True)
+                .execute()
+            )
+            call_task = asyncio.to_thread(
+                lambda: supabase.table("calls")
+                .upsert(
+                    {
+                        "call_id": call_id,
+                        "tenant_id": tenant_id,
+                        "from_number": from_number,
+                        "to_number": to_number,
+                        "direction": "inbound",
+                        "status": "started",
+                        "start_timestamp": start_timestamp,
+                        "call_provider": "livekit",
+                    },
+                    on_conflict="call_id",
+                )
+                .execute()
+            )
+
+            results = await asyncio.gather(sub_task, intake_task, call_task, return_exceptions=True)
+
+            # Process subscription result
+            if not isinstance(results[0], Exception):
+                sub_data = results[0].data
+                sub = sub_data[0] if sub_data else None
                 if sub and sub.get("status") in BLOCKED_STATUSES:
                     logger.info(f"[agent] Subscription blocked: tenant={tenant_id} status={sub['status']} — disconnecting caller")
                     try:
@@ -147,39 +180,25 @@ async def entrypoint(ctx: JobContext):
                     except Exception as e:
                         logger.error(f"[agent] Failed to disconnect blocked caller: {e}")
                     return
-            except Exception as e:
-                logger.warning(f"[agent] Subscription check failed (allowing call): {e}")
+            else:
+                logger.warning(f"[agent] Subscription check failed (allowing call): {results[0]}")
 
-        # ── Calculate available slots ──
-        available_slots = ""
-        if onboarding_complete and tenant_id:
-            try:
-                available_slots = await asyncio.to_thread(
-                    lambda: calculate_initial_slots(supabase, tenant)
-                )
-            except Exception as e:
-                logger.error(f"[agent] Slot calculation failed: {e}")
+            # Process intake questions result
+            if not isinstance(results[1], Exception) and results[1].data:
+                all_questions = []
+                for s in results[1].data:
+                    for q in (s.get("intake_questions") or []):
+                        if q not in all_questions:
+                            all_questions.append(q)
+                intake_questions = "\n".join(all_questions)
 
-        # ── Fetch intake questions ──
-        intake_questions = ""
-        if tenant_id:
-            try:
-                services_resp = await asyncio.to_thread(
-                    lambda: supabase.table("services")
-                    .select("intake_questions")
-                    .eq("tenant_id", tenant_id)
-                    .eq("is_active", True)
-                    .execute()
-                )
-                if services_resp.data:
-                    all_questions = []
-                    for s in services_resp.data:
-                        for q in (s.get("intake_questions") or []):
-                            if q not in all_questions:
-                                all_questions.append(q)
-                    intake_questions = "\n".join(all_questions)
-            except Exception:
-                pass
+            # Process call record result
+            if not isinstance(results[2], Exception):
+                call_record = results[2].data[0] if results[2].data else None
+            else:
+                logger.error(f"[agent] Call record insert failed: {results[2]}")
+        else:
+            logger.warning(f"[agent] No tenant for {to_number} — skipping call record (tenant_id is NOT NULL)")
 
         # ── Build system prompt ──
         system_prompt = build_system_prompt(
@@ -193,41 +212,6 @@ async def entrypoint(ctx: JobContext):
         # Inject current date so the AI can map day names to YYYY-MM-DD dates
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
         system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
-
-        if available_slots:
-            system_prompt += (
-                f"\n\nINITIAL AVAILABILITY SNAPSHOT (may be outdated — always use "
-                f"check_availability for real-time data before booking):\n{available_slots}"
-            )
-
-        # ── Create call record (only when tenant exists — calls.tenant_id is NOT NULL) ──
-        start_timestamp = int(time.time() * 1000)
-        call_record = None
-
-        if tenant_id:
-            try:
-                call_resp = await asyncio.to_thread(
-                    lambda: supabase.table("calls")
-                    .upsert(
-                        {
-                            "call_id": call_id,
-                            "tenant_id": tenant_id,
-                            "from_number": from_number,
-                            "to_number": to_number,
-                            "direction": "inbound",
-                            "status": "started",
-                            "start_timestamp": start_timestamp,
-                            "call_provider": "livekit",
-                        },
-                        on_conflict="call_id",
-                    )
-                    .execute()
-                )
-                call_record = call_resp.data[0] if call_resp.data else None
-            except Exception as e:
-                logger.error(f"[agent] Call record insert failed: {e}")
-        else:
-            logger.warning(f"[agent] No tenant for {to_number} — skipping call record (tenant_id is NOT NULL)")
 
         # ── Create tools (in-process, direct Supabase access) ──
         tools = create_tools({
@@ -354,7 +338,6 @@ async def entrypoint(ctx: JobContext):
         # Only send a short nudge — not the full prompt again.
         await session.generate_reply(
             instructions="Greet the caller now.",
-            allow_interruptions=False,
         )
 
         # ── Start Egress recording ──
