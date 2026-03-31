@@ -16,33 +16,37 @@ logger = logging.getLogger(__name__)
 async def _delayed_disconnect(deps: dict) -> None:
     """Wait for farewell audio to finish playing, then remove the SIP participant."""
     await asyncio.sleep(7)
+    lk = api.LiveKitAPI()
     try:
-        lk = api.LiveKitAPI()
         await lk.room.remove_participant(
             api.RoomParticipantIdentity(
                 room=deps["room_name"],
                 identity=deps["sip_participant_identity"],
             )
         )
-        await lk.aclose()
     except Exception as e:
-        logger.error("[agent] Failed to disconnect SIP participant: %s", str(e))
+        # 404 = participant already left (caller hung up first) — expected, not an error
+        if "not_found" in str(e) or "does not exist" in str(e):
+            logger.info("[agent] SIP participant already disconnected (caller hung up first)")
+        else:
+            logger.error("[agent] Failed to disconnect SIP participant: %s", str(e))
+    finally:
+        await lk.aclose()
 
 
 def create_end_call_tool(deps: dict):
     @function_tool(
         name="end_call",
         description=(
-            "End the call after you have finished your farewell and all conversation is complete. "
-            "Always capture caller information before ending if no booking was made. "
-            "Say goodbye to the caller BEFORE calling this tool."
+            "Disconnect the phone line. "
+            "IMPORTANT: You must have ALREADY spoken your complete farewell BEFORE calling this. "
+            "Do NOT say goodbye and call this tool at the same time — finish speaking first, "
+            "then call this tool separately with no additional speech. "
+            "Always capture caller information before ending if no booking was made."
         ),
     )
     async def end_call(context: RunContext) -> str:
-        # Gemini will generate the farewell from prompt instructions.
-        # After farewell is spoken, disconnect the SIP participant.
-        # Use a short delay to let the farewell audio play out.
         asyncio.create_task(_delayed_disconnect(deps))
-        return "Disconnecting caller now. Do not speak further."
+        return " "
 
     return end_call

@@ -332,46 +332,45 @@ async def entrypoint(ctx: JobContext):
         )
         logger.info(f"[agent] Session started: room={call_id}")
 
-        # ── Generate greeting (must be after session.start, per Gemini realtime pattern) ──
-        # For A2A models (Gemini 3.1 Flash Live), instructions are sent as realtime text input.
-        # The model already has the full system prompt from RealtimeModel(instructions=...).
-        # Only send a short nudge — not the full prompt again.
-        await session.generate_reply(
+        # ── Start Egress recording (before greeting so recording captures it) ──
+        async def _start_egress():
+            nonlocal egress_id
+            try:
+                lk = api.LiveKitAPI()
+                egress_info = await lk.egress.start_room_composite_egress(
+                    api.RoomCompositeEgressRequest(
+                        room_name=call_id,
+                        audio_only=True,
+                        file_outputs=[api.EncodedFileOutput(
+                            filepath=recording_path,
+                            s3=api.S3Upload(
+                                access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
+                                secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
+                                bucket="call-recordings",
+                                region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
+                                endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
+                                force_path_style=True,
+                            ),
+                        )],
+                    )
+                )
+                egress_id = egress_info.egress_id
+                await lk.aclose()
+                logger.info(f"[agent] Egress started: {egress_id}")
+
+                if call_record:
+                    await asyncio.to_thread(
+                        lambda: supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
+                    )
+            except Exception as e:
+                logger.error(f"[agent] Failed to start egress: {e}")
+
+        asyncio.create_task(_start_egress())
+
+        # ── Generate greeting (non-blocking — speech plays in background) ──
+        session.generate_reply(
             instructions="Greet the caller now.",
         )
-
-        # ── Start Egress recording ──
-        try:
-            lk = api.LiveKitAPI()
-            egress_info = await lk.egress.start_room_composite_egress(
-                api.RoomCompositeEgressRequest(
-                    room_name=call_id,
-                    audio_only=True,
-                    file_outputs=[api.EncodedFileOutput(
-                        filepath=recording_path,
-                        s3=api.S3Upload(
-                            access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
-                            secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
-                            bucket="call-recordings",
-                            region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
-                            endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
-                            force_path_style=True,
-                        ),
-                    )],
-                )
-            )
-            egress_id = egress_info.egress_id
-            await lk.aclose()
-            logger.info(f"[agent] Egress started: {egress_id}")
-
-            if call_record:
-                await asyncio.to_thread(
-                    lambda: supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
-                )
-        except Exception as e:
-            logger.error(f"[agent] Failed to start egress: {e}")
-
-        # Greeting is triggered by session.generate_reply() above — on_enter is intentionally empty
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)

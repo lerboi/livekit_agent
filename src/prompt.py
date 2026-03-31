@@ -212,7 +212,14 @@ def _build_call_duration_section(t) -> str:
     return (
         "CALL DURATION:\n"
         "- At 9 minutes, begin wrapping up the conversation.\n"
-        "- Hard maximum: 10 minutes."
+        "- Hard maximum: 10 minutes.\n"
+        "\n"
+        "ENDING THE CALL:\n"
+        "- When the conversation is complete, say your full farewell first. "
+        "Let your goodbye finish completely.\n"
+        "- Only AFTER you have finished speaking your farewell, call the end_call tool "
+        "in a separate step with no additional speech.\n"
+        "- NEVER say goodbye and call end_call at the same time — this will cut off your voice."
     )
 
 
