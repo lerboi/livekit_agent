@@ -122,14 +122,124 @@ async def entrypoint(ctx: JobContext):
 
         logger.info(f"[agent] Tenant: {tenant_id or 'NONE'} ({business_name})")
 
-        # ── Parallel DB queries (subscription + intake questions + call record) ──
-        # All depend on tenant_id but NOT on each other — run concurrently to minimize latency
+        # ── Build system prompt immediately (intake questions injected later) ──
         start_timestamp = int(time.time() * 1000)
-        sub_result = None
-        intake_questions = ""
-        call_record = None
 
-        if tenant_id:
+        system_prompt = build_system_prompt(
+            locale,
+            business_name=business_name,
+            onboarding_complete=onboarding_complete,
+            tone_preset=tone_preset,
+            intake_questions="",  # injected after DB query completes
+            country=country,
+        )
+        local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
+        system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
+
+        # ── Create tools with mutable deps (call_uuid filled in after DB query) ──
+        deps = {
+            "supabase": supabase,
+            "tenant": tenant,
+            "tenant_id": tenant_id,
+            "call_id": call_id,
+            "call_uuid": None,  # updated after call record insert
+            "from_number": from_number,
+            "to_number": to_number,
+            "owner_phone": owner_phone,
+            "start_timestamp": start_timestamp,
+            "onboarding_complete": onboarding_complete,
+            "tenant_timezone": tenant_timezone,
+            "room_name": call_id,
+            "sip_participant_identity": sip_participant_identity,
+            "ctx": ctx,
+        }
+        tools = create_tools(deps)
+
+        # ── Create Gemini model + agent + session ──
+        voice_name = VOICE_MAP.get(tone_preset, "Kore")
+
+        model = google.realtime.RealtimeModel(
+            model="gemini-3.1-flash-live-preview",
+            voice=voice_name,
+            temperature=0.3,
+            instructions=system_prompt,
+            thinking_config=genai_types.ThinkingConfig(
+                thinking_level="minimal",
+                include_thoughts=False,
+            ),
+        )
+
+        agent = VocoAgent(instructions=system_prompt, tools=tools)
+        session = AgentSession(llm=model)
+
+        # ── Collect transcript in real-time ──
+        transcript_turns = []
+
+        @session.on("conversation_item_added")
+        def on_conversation_item(event):
+            text = getattr(event.item, "text_content", None)
+            if text:
+                role = "user" if getattr(event.item, "role", None) == "user" else "agent"
+                transcript_turns.append({
+                    "role": role,
+                    "content": text,
+                    "timestamp": int(time.time() * 1000),
+                })
+
+        # ── Session error handler ──
+        @session.on("error")
+        def on_error(event):
+            logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id} error={event.error}")
+            actual_error = getattr(event.error, "error", event.error)
+            sentry_sdk.capture_exception(actual_error)
+
+        # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
+        egress_id = None
+        recording_path = f"{call_id}.mp4"
+
+        async def _on_close_async():
+            end_timestamp = int(time.time() * 1000)
+            duration_sec = round((end_timestamp - start_timestamp) / 1000)
+            logger.info(f"[agent] Session closed: room={call_id} duration={duration_sec}s")
+
+            if egress_id:
+                try:
+                    lk = api.LiveKitAPI()
+                    await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
+                    await lk.aclose()
+                except Exception as e:
+                    logger.error(f"[agent] Failed to stop egress: {e}")
+
+            try:
+                await run_post_call_pipeline({
+                    "supabase": supabase,
+                    "call_id": call_id,
+                    "call_uuid": deps["call_uuid"],
+                    "tenant_id": tenant_id,
+                    "tenant": tenant,
+                    "from_number": from_number,
+                    "to_number": to_number,
+                    "start_timestamp": start_timestamp,
+                    "end_timestamp": end_timestamp,
+                    "transcript_turns": transcript_turns,
+                    "recording_storage_path": recording_path if egress_id else None,
+                    "is_test_call": is_test_call,
+                })
+            except Exception as e:
+                logger.error(f"[agent] Post-call pipeline error: {e}")
+                sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
+
+        @session.on("close")
+        def on_close(event):
+            asyncio.create_task(_on_close_async())
+
+        # ── Launch DB queries as a background task (don't block session start) ──
+        async def _run_db_queries():
+            """Run subscription check, intake questions, and call record insert in parallel."""
+            if not tenant_id:
+                logger.warning(f"[agent] No tenant for {to_number} — skipping DB queries")
+                return
+
             sub_task = asyncio.to_thread(
                 lambda: supabase.table("subscriptions")
                 .select("status")
@@ -165,7 +275,7 @@ async def entrypoint(ctx: JobContext):
 
             results = await asyncio.gather(sub_task, intake_task, call_task, return_exceptions=True)
 
-            # Process subscription result
+            # Subscription check — disconnect if blocked
             if not isinstance(results[0], Exception):
                 sub_data = results[0].data
                 sub = sub_data[0] if sub_data else None
@@ -183,140 +293,34 @@ async def entrypoint(ctx: JobContext):
             else:
                 logger.warning(f"[agent] Subscription check failed (allowing call): {results[0]}")
 
-            # Process intake questions result
+            # Intake questions — inject into session if available
             if not isinstance(results[1], Exception) and results[1].data:
                 all_questions = []
                 for s in results[1].data:
                     for q in (s.get("intake_questions") or []):
                         if q not in all_questions:
                             all_questions.append(q)
-                intake_questions = "\n".join(all_questions)
+                if all_questions:
+                    questions_text = "\n".join(all_questions)
+                    session.generate_reply(
+                        instructions=(
+                            f"Additional intake questions to ask naturally during the conversation "
+                            f"(skip any already answered):\n{questions_text}"
+                        ),
+                    )
 
-            # Process call record result
+            # Call record — update deps so tools have the call_uuid
             if not isinstance(results[2], Exception):
-                call_record = results[2].data[0] if results[2].data else None
+                call_data = results[2].data[0] if results[2].data else None
+                if call_data:
+                    deps["call_uuid"] = call_data.get("id")
             else:
                 logger.error(f"[agent] Call record insert failed: {results[2]}")
-        else:
-            logger.warning(f"[agent] No tenant for {to_number} — skipping call record (tenant_id is NOT NULL)")
 
-        # ── Build system prompt ──
-        system_prompt = build_system_prompt(
-            locale,
-            business_name=business_name,
-            onboarding_complete=onboarding_complete,
-            tone_preset=tone_preset,
-            intake_questions=intake_questions,
-            country=country,
-        )
-        # Inject current date so the AI can map day names to YYYY-MM-DD dates
-        local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
-        system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
+        # Fire DB queries in background — they complete while session starts + greeting plays
+        db_task = asyncio.create_task(_run_db_queries())
 
-        # ── Create tools (in-process, direct Supabase access) ──
-        tools = create_tools({
-            "supabase": supabase,
-            "tenant": tenant,
-            "tenant_id": tenant_id,
-            "call_id": call_id,
-            "call_uuid": call_record.get("id") if call_record else None,
-            "from_number": from_number,
-            "to_number": to_number,
-            "owner_phone": owner_phone,
-            "start_timestamp": start_timestamp,
-            "onboarding_complete": onboarding_complete,
-            "tenant_timezone": tenant_timezone,
-            "room_name": call_id,
-            "sip_participant_identity": sip_participant_identity,
-            "ctx": ctx,
-        })
-
-        # ── Create Gemini model + agent + session ──
-        voice_name = VOICE_MAP.get(tone_preset, "Kore")
-
-        model = google.realtime.RealtimeModel(
-            model="gemini-3.1-flash-live-preview",
-            voice=voice_name,
-            temperature=0.3,
-            instructions=system_prompt,
-            # Minimal thinking for lowest latency
-            thinking_config=genai_types.ThinkingConfig(
-                thinking_level="minimal",
-                include_thoughts=False,
-            ),
-            # Use Gemini's native server VAD (handles echo cancellation internally)
-            # Do NOT disable it — client-side VAD causes commit_audio errors and self-interruption
-        )
-
-        agent = VocoAgent(instructions=system_prompt, tools=tools)
-
-        # Use default AgentSession — Gemini's native VAD handles turn detection
-        session = AgentSession(llm=model)
-
-        # ── Collect transcript in real-time ──
-        transcript_turns = []
-
-        @session.on("conversation_item_added")
-        def on_conversation_item(event):
-            text = getattr(event.item, "text_content", None)
-            if text:
-                role = "user" if getattr(event.item, "role", None) == "user" else "agent"
-                transcript_turns.append({
-                    "role": role,
-                    "content": text,
-                    "timestamp": int(time.time() * 1000),
-                })
-
-        # ── Session error handler ──
-        @session.on("error")
-        def on_error(event):
-            logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id} error={event.error}")
-            actual_error = getattr(event.error, "error", event.error)
-            sentry_sdk.capture_exception(actual_error)
-
-        # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
-        egress_id = None
-        recording_path = f"{call_id}.mp4"
-
-        async def _on_close_async():
-            end_timestamp = int(time.time() * 1000)
-            duration_sec = round((end_timestamp - start_timestamp) / 1000)
-            logger.info(f"[agent] Session closed: room={call_id} duration={duration_sec}s")
-
-            # Stop egress
-            if egress_id:
-                try:
-                    lk = api.LiveKitAPI()
-                    await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
-                    await lk.aclose()
-                except Exception as e:
-                    logger.error(f"[agent] Failed to stop egress: {e}")
-
-            # Run post-call pipeline
-            try:
-                await run_post_call_pipeline({
-                    "supabase": supabase,
-                    "call_id": call_id,
-                    "call_uuid": call_record.get("id") if call_record else None,
-                    "tenant_id": tenant_id,
-                    "tenant": tenant,
-                    "from_number": from_number,
-                    "to_number": to_number,
-                    "start_timestamp": start_timestamp,
-                    "end_timestamp": end_timestamp,
-                    "transcript_turns": transcript_turns,
-                    "recording_storage_path": recording_path if egress_id else None,
-                    "is_test_call": is_test_call,
-                })
-            except Exception as e:
-                logger.error(f"[agent] Post-call pipeline error: {e}")
-                sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
-
-        @session.on("close")
-        def on_close(event):
-            asyncio.create_task(_on_close_async())
-
-        # ── Start session (with SIP-optimized noise cancellation) ──
+        # ── Start session (awaited — Gemini WebSocket handshake) ──
         await session.start(
             agent=agent,
             room=ctx.room,
@@ -332,9 +336,16 @@ async def entrypoint(ctx: JobContext):
         )
         logger.info(f"[agent] Session started: room={call_id}")
 
-        # ── Start Egress recording (before greeting so recording captures it) ──
+        # ── Generate greeting immediately after session starts ──
+        session.generate_reply(
+            instructions="Greet the caller now.",
+        )
+
+        # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
             nonlocal egress_id
+            # Wait for DB task so call_uuid is available for egress tracking
+            await db_task
             try:
                 lk = api.LiveKitAPI()
                 egress_info = await lk.egress.start_room_composite_egress(
@@ -358,7 +369,7 @@ async def entrypoint(ctx: JobContext):
                 await lk.aclose()
                 logger.info(f"[agent] Egress started: {egress_id}")
 
-                if call_record:
+                if deps.get("call_uuid"):
                     await asyncio.to_thread(
                         lambda: supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
                     )
@@ -366,11 +377,6 @@ async def entrypoint(ctx: JobContext):
                 logger.error(f"[agent] Failed to start egress: {e}")
 
         asyncio.create_task(_start_egress())
-
-        # ── Generate greeting (non-blocking — speech plays in background) ──
-        session.generate_reply(
-            instructions="Greet the caller now.",
-        )
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)
