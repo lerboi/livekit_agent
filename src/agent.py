@@ -234,6 +234,9 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(_on_close_async())
 
         # ── Launch DB queries as a background task (don't block session start) ──
+        # Event signals when session is ready to accept generate_reply() calls
+        session_ready = asyncio.Event()
+
         async def _run_db_queries():
             """Run subscription check, intake questions, and call record insert in parallel."""
             if not tenant_id:
@@ -293,7 +296,15 @@ async def entrypoint(ctx: JobContext):
             else:
                 logger.warning(f"[agent] Subscription check failed (allowing call): {results[0]}")
 
-            # Intake questions — inject into session if available
+            # Call record — update deps so tools have the call_uuid (no session dependency)
+            if not isinstance(results[2], Exception):
+                call_data = results[2].data[0] if results[2].data else None
+                if call_data:
+                    deps["call_uuid"] = call_data.get("id")
+            else:
+                logger.error(f"[agent] Call record insert failed: {results[2]}")
+
+            # Intake questions — wait for session to be ready before injecting
             if not isinstance(results[1], Exception) and results[1].data:
                 all_questions = []
                 for s in results[1].data:
@@ -301,6 +312,7 @@ async def entrypoint(ctx: JobContext):
                         if q not in all_questions:
                             all_questions.append(q)
                 if all_questions:
+                    await session_ready.wait()
                     questions_text = "\n".join(all_questions)
                     session.generate_reply(
                         instructions=(
@@ -308,14 +320,6 @@ async def entrypoint(ctx: JobContext):
                             f"(skip any already answered):\n{questions_text}"
                         ),
                     )
-
-            # Call record — update deps so tools have the call_uuid
-            if not isinstance(results[2], Exception):
-                call_data = results[2].data[0] if results[2].data else None
-                if call_data:
-                    deps["call_uuid"] = call_data.get("id")
-            else:
-                logger.error(f"[agent] Call record insert failed: {results[2]}")
 
         # Fire DB queries in background — they complete while session starts + greeting plays
         db_task = asyncio.create_task(_run_db_queries())
@@ -340,6 +344,7 @@ async def entrypoint(ctx: JobContext):
         session.generate_reply(
             instructions="Greet the caller now.",
         )
+        session_ready.set()  # signal DB task that session is ready for generate_reply()
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
