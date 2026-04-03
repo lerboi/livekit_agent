@@ -96,9 +96,14 @@ def _build_language_section(t) -> str:
         "natural like 'Sorry, I didn't quite catch that — could you say that again?' and continue "
         "in English.\n"
         "- Only switch languages if the caller directly asks to speak in another language "
-        "(e.g., 'Can we speak in Spanish?').\n"
-        "- If the caller speaks a language you cannot support, gather their name, phone number, "
-        "and a brief description of their need, then let them know someone will follow up."
+        "(e.g., 'Can we speak in Spanish?', 'Can you speak Chinese?', '可以说中文吗?').\n"
+        "- Supported languages: English, Spanish, Chinese (Mandarin), Malay, Tamil, Vietnamese. "
+        "If the caller asks to speak in any of these, switch immediately and continue the entire "
+        "conversation in that language — including address readback, appointment confirmations, "
+        "and farewells.\n"
+        "- If the caller speaks a language not in the supported list, gather their name, phone number, "
+        "and a brief description of their need in whatever language you can manage, then let them know "
+        "someone will follow up."
     )
 
 
