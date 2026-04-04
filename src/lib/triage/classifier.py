@@ -4,7 +4,7 @@ from .layer1_keywords import run_keyword_classifier
 from .layer2_llm import run_llm_scorer
 from .layer3_rules import apply_owner_rules
 
-VALID_URGENCIES = {"emergency", "routine", "high_ticket"}
+VALID_URGENCIES = {"emergency", "routine", "urgent"}
 
 
 def _sanitize_urgency(urgency: str) -> str:

@@ -260,8 +260,23 @@ def create_book_appointment_tool(deps: dict):
 
         # Success -- async side effects (non-blocking)
 
-        # Calendar sync (fire-and-forget)
         appointment_id = result.get("appointment_id")
+
+        # Backfill appointment call_id if it was NULL at booking time
+        # (call_uuid may not have been populated yet from the background DB task)
+        if appointment_id and deps.get("call_uuid"):
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .update({"call_id": deps["call_uuid"]})
+                    .eq("id", appointment_id)
+                    .is_("call_id", "null")
+                    .execute()
+                )
+            except Exception:
+                pass  # non-critical — post-call pipeline has fallback
+
+        # Calendar sync (fire-and-forget)
         if appointment_id:
             try:
                 await asyncio.to_thread(

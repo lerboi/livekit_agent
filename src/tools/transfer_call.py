@@ -60,6 +60,8 @@ def create_transfer_call_tool(deps: dict):
         )
         logger.info("[agent] Transfer context: %s", whisper_context)
 
+        deps["call_end_reason"][0] = "transferred"
+
         # Perform SIP REFER transfer via LiveKit
         try:
             lk = api.LiveKitAPI()

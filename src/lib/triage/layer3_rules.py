@@ -2,7 +2,7 @@ import asyncio
 
 from supabase import Client
 
-SEVERITY = {"emergency": 3, "high_ticket": 2, "routine": 1}
+SEVERITY = {"emergency": 3, "urgent": 2, "routine": 1}
 
 
 async def apply_owner_rules(

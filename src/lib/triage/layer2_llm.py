@@ -8,10 +8,11 @@ _client: AsyncOpenAI | None = None
 
 SYSTEM_PROMPT = (
     'You classify home service calls. Return ONLY a JSON object: '
-    '{"urgency": "emergency"|"routine"|"high_ticket", '
+    '{"urgency": "emergency"|"routine"|"urgent", '
     '"confidence": "high"|"medium"|"low", "reason": "one sentence"}\n'
     "Emergency: immediate safety risk, happening right now, property damage ongoing.\n"
-    "High-ticket: job likely > $500, complex install/replacement (not repair).\n"
+    "Urgent: needs prompt attention but not an immediate safety risk — e.g., broken AC in summer, "
+    "clogged drain, water heater out, no hot water.\n"
     "Routine: future scheduling, quote requests, non-urgent repairs."
 )
 

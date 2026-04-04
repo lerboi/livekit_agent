@@ -136,6 +136,9 @@ async def entrypoint(ctx: JobContext):
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
         system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
 
+        # Default disconnect reason — tools update this via deps closure
+        call_end_reason = ["caller_hangup"]
+
         # ── Create tools with mutable deps (call_uuid filled in after DB query) ──
         deps = {
             "supabase": supabase,
@@ -151,6 +154,7 @@ async def entrypoint(ctx: JobContext):
             "tenant_timezone": tenant_timezone,
             "room_name": call_id,
             "sip_participant_identity": sip_participant_identity,
+            "call_end_reason": call_end_reason,
             "ctx": ctx,
         }
         tools = create_tools(deps)
@@ -195,17 +199,35 @@ async def entrypoint(ctx: JobContext):
 
         # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
-        recording_path = f"{call_id}.mp4"
+        recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"
 
         async def _on_close_async():
             end_timestamp = int(time.time() * 1000)
             duration_sec = round((end_timestamp - start_timestamp) / 1000)
             logger.info(f"[agent] Session closed: room={call_id} duration={duration_sec}s")
 
+            # Ensure DB task completed (call_uuid populated) before post-call
+            try:
+                await db_task
+            except Exception:
+                pass  # db_task errors already logged inside _run_db_queries
+
             if egress_id:
                 try:
                     lk = api.LiveKitAPI()
                     await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
+                    # Wait for S3 upload to finish (poll up to 30s)
+                    for _ in range(15):
+                        await asyncio.sleep(2)
+                        try:
+                            info = await lk.egress.list_egress(api.ListEgressRequest(egress_id=egress_id))
+                            if info.items and info.items[0].status in (
+                                api.EgressStatus.EGRESS_COMPLETE,
+                                api.EgressStatus.EGRESS_FAILED,
+                            ):
+                                break
+                        except Exception:
+                            break
                     await lk.aclose()
                 except Exception as e:
                     logger.error(f"[agent] Failed to stop egress: {e}")
@@ -224,6 +246,7 @@ async def entrypoint(ctx: JobContext):
                     "transcript_turns": transcript_turns,
                     "recording_storage_path": recording_path if egress_id else None,
                     "is_test_call": is_test_call,
+                    "disconnection_reason": call_end_reason[0],
                 })
             except Exception as e:
                 logger.error(f"[agent] Post-call pipeline error: {e}")
@@ -358,7 +381,9 @@ async def entrypoint(ctx: JobContext):
                         room_name=call_id,
                         audio_only=True,
                         file_outputs=[api.EncodedFileOutput(
+                            file_type=api.EncodedFileType.OGG,
                             filepath=recording_path,
+                            disable_manifest=True,
                             s3=api.S3Upload(
                                 access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
                                 secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),

@@ -18,7 +18,7 @@ from .utils import to_local_date_string, format_zone_pair_buffers
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
-SUPPORTED_LANGUAGES = {"en", "es"}
+SUPPORTED_LANGUAGES = {"en", "es", "zh", "ms", "ta", "vi"}
 
 
 async def run_post_call_pipeline(params: dict):
@@ -174,7 +174,7 @@ async def run_post_call_pipeline(params: dict):
 
     # ── 8. Update call with triage + language data ──
     notification_priority = (
-        "high" if triage_result["urgency"] in ("emergency", "high_ticket") else "standard"
+        "high" if triage_result["urgency"] in ("emergency", "urgent") else "standard"
     )
 
     await asyncio.to_thread(
@@ -318,18 +318,48 @@ _SPANISH_MARKERS = [
     re.compile(r"\bayuda\b"),
 ]
 
+_CHINESE_MARKER = re.compile(r"[\u4e00-\u9fff]")  # CJK Unified Ideographs
+
+_TAMIL_MARKER = re.compile(r"[\u0B80-\u0BFF]")  # Tamil Unicode block
+
+_VIETNAMESE_MARKER = re.compile(
+    r"[àáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]",
+    re.IGNORECASE,
+)
+
+_MALAY_MARKERS = [
+    re.compile(r"\b(saya|anda|boleh|tolong|terima kasih|selamat)\b", re.IGNORECASE),
+]
+
 
 def _detect_language_from_transcript(turns):
-    caller_text = " ".join(
-        t["content"] for t in turns if t.get("role") == "user"
-    ).lower()
+    # Use all text (caller + agent) since the agent switches language too
+    all_text = " ".join(t["content"] for t in turns).lower()
 
-    if not caller_text or len(caller_text) < 5:
+    if not all_text or len(all_text) < 5:
         return None
 
-    spanish_matches = sum(1 for p in _SPANISH_MARKERS if p.search(caller_text))
+    # Script-based detection (most reliable — unique character ranges)
+    if _CHINESE_MARKER.search(all_text):
+        return "zh"
+
+    if _TAMIL_MARKER.search(all_text):
+        return "ta"
+
+    # Vietnamese diacriticals (unique to Vietnamese, not shared with other Latin scripts)
+    viet_matches = len(_VIETNAMESE_MARKER.findall(all_text))
+    if viet_matches >= 3:
+        return "vi"
+
+    # Spanish keyword markers (need 2+ matches to avoid false positives)
+    spanish_matches = sum(1 for p in _SPANISH_MARKERS if p.search(all_text))
     if spanish_matches >= 2:
         return "es"
+
+    # Malay keyword markers
+    malay_matches = sum(1 for p in _MALAY_MARKERS if p.search(all_text))
+    if malay_matches >= 2:
+        return "ms"
 
     return "en"
 
