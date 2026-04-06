@@ -118,7 +118,7 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str) -> None:
         if event_id:
             (
                 supabase.table("appointments")
-                .update({"google_event_id": event_id})
+                .update({"external_event_id": event_id, "external_event_provider": "google"})
                 .eq("id", appointment_id)
                 .execute()
             )
