@@ -145,8 +145,14 @@ def create_check_availability_tool(deps: dict):
         )
 
         # Determine which dates to check
+        tenant_today = to_local_date_string(datetime.now(timezone.utc), tenant_timezone)
         dates_to_check: list[str] = []
         if date:
+            if date < tenant_today:
+                return (
+                    f"That date has already passed. "
+                    f"Could you let me know a date from today ({tenant_today}) onwards?"
+                )
             dates_to_check = [date]
         else:
             for day_offset in range(3):
@@ -173,6 +179,15 @@ def create_check_availability_tool(deps: dict):
         if time and date:
             requested_utc = _parse_requested_time(time, date, tenant_timezone)
             if requested_utc:
+                # Reject times that are in the past or less than 1 hour from now
+                now_utc = datetime.now(timezone.utc)
+                min_booking_time = now_utc + timedelta(hours=1)
+                if requested_utc < min_booking_time and date == tenant_today:
+                    requested_speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
+                    return (
+                        f"{requested_speech} is too soon — appointments need at least one hour's notice. "
+                        f"Ask the caller for a later time today, or check another day."
+                    )
                 requested_end = requested_utc + timedelta(minutes=slot_duration)
 
                 # Check if the requested time falls within any available slot

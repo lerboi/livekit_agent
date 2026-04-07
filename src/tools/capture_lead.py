@@ -27,6 +27,7 @@ def create_capture_lead_tool(deps: dict):
         caller_name: str,
         phone: str = "",
         street_name: str = "",
+        unit_number: str = "",
         postal_code: str = "",
         job_type: str = "",
         notes: str = "",
@@ -41,8 +42,8 @@ def create_capture_lead_tool(deps: dict):
         start_timestamp = deps.get("start_timestamp") or int(time.time() * 1000)
         duration_seconds = round((time.time() * 1000 - start_timestamp) / 1000)
 
-        # Combine street_name + postal_code into service_address
-        parts = [p for p in [street_name, postal_code] if p]
+        # Combine street_name + unit_number + postal_code into service_address
+        parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else None
 
         try:

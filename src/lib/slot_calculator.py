@@ -158,6 +158,11 @@ def calculate_available_slots(
     window_start = _local_time_to_utc(target_date, open_time, tenant_timezone)
     window_end = _local_time_to_utc(target_date, close_time, tenant_timezone)
 
+    # If the entire working window is in the past, no slots are possible
+    now = datetime.now(timezone.utc)
+    if window_end <= now:
+        return []
+
     # Lunch block in UTC (if configured)
     lunch_start_utc = (
         _local_time_to_utc(target_date, lunch_start, tenant_timezone)
@@ -193,7 +198,6 @@ def calculate_available_slots(
     cursor = window_start
 
     # Skip past slots when calculating for today -- don't offer times that have already passed
-    now = datetime.now(timezone.utc)
     if cursor < now < window_end:
         # Only advance if we're within today's working window
         # Check if target_date is actually today in the tenant timezone

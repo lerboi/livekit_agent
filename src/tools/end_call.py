@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 async def _delayed_disconnect(deps: dict) -> None:
     """Wait for farewell audio to finish playing, then remove the SIP participant."""
-    await asyncio.sleep(7)
+    await asyncio.sleep(12)
     lk = api.LiveKitAPI()
     try:
         await lk.room.remove_participant(
@@ -32,6 +32,17 @@ async def _delayed_disconnect(deps: dict) -> None:
             logger.error("[agent] Failed to disconnect SIP participant: %s", str(e))
     finally:
         await lk.aclose()
+
+    # Shut down the agent's room context to trigger session close.
+    # Without this, the agent stays in the room after the SIP participant
+    # is removed, the session never closes, and the post-call pipeline
+    # (transcript, recording path, lead creation, notifications) never runs.
+    try:
+        ctx = deps.get("ctx")
+        if ctx:
+            ctx.shutdown()
+    except Exception:
+        pass
 
 
 def create_end_call_tool(deps: dict):

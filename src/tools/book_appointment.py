@@ -133,9 +133,10 @@ def create_book_appointment_tool(deps: dict):
             "Book a confirmed appointment slot. "
             "Always tell the caller you're booking before calling this tool. "
             "Only use after: "
-            "(1) collecting caller name, street name, and postal/zip code, "
-            "(2) reading the address back and receiving verbal confirmation, "
+            "(1) collecting caller name, street name, unit/apartment number, and postal/zip code, "
+            "(2) reading the full address back and receiving verbal confirmation, "
             "(3) the caller has selected a slot from the availability results. "
+            "Pass unit_number as empty string only if the caller explicitly confirmed there is no unit. "
             "Do NOT ask the caller about urgency -- infer it from the conversation."
         ),
     )
@@ -146,13 +147,14 @@ def create_book_appointment_tool(deps: dict):
         street_name: str,
         postal_code: str,
         caller_name: str,
+        unit_number: str = "",
         urgency: str = "routine",
     ) -> str:
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
-        # Combine street_name + postal_code into service_address for storage and notifications
-        parts = [p for p in [street_name, postal_code] if p]
+        # Combine street_name + unit_number + postal_code into service_address
+        parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
         if not slot_start or not slot_end:
@@ -258,9 +260,16 @@ def create_book_appointment_tool(deps: dict):
 
             return f"That slot was just taken. The next available time is {next_slot_text}. Would you like me to book that instead?"
 
-        # Success -- async side effects (non-blocking)
+        # Success — write booking_outcome immediately (before any side effects)
+        # so it persists even if the caller hangs up during calendar push or SMS.
 
         appointment_id = result.get("appointment_id")
+
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {"booking_outcome": "booked"}
+            ).eq("call_id", deps.get("call_id", "")).execute()
+        )
 
         # Backfill appointment call_id if it was NULL at booking time
         # (call_uuid may not have been populated yet from the background DB task)
@@ -284,13 +293,6 @@ def create_book_appointment_tool(deps: dict):
                 )
             except Exception as cal_err:
                 logger.error("[agent] Calendar push failed: %s", str(cal_err))
-
-        # Write booking_outcome: 'booked'
-        await asyncio.to_thread(
-            lambda: supabase.table("calls").update(
-                {"booking_outcome": "booked"}
-            ).eq("call_id", deps.get("call_id", "")).execute()
-        )
 
         # Caller SMS confirmation (non-blocking)
         sms_locale = (tenant.get("default_locale") if tenant else None) or "en"

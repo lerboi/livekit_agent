@@ -138,7 +138,7 @@ def send_owner_email(
         _init_resend()
         result = resend.Emails.send(
             {
-                "from": os.environ.get("RESEND_FROM_EMAIL", "alerts@getvoco.ai"),
+                "from": os.environ.get("RESEND_FROM_EMAIL", "alerts@voco.live"),
                 "to": to,
                 "subject": subject,
                 "html": html,

@@ -252,9 +252,14 @@ async def entrypoint(ctx: JobContext):
                 logger.error(f"[agent] Post-call pipeline error: {e}")
                 sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
 
+        # Strong references to background tasks to prevent garbage collection
+        _background_tasks = set()
+
         @session.on("close")
         def on_close(event):
-            asyncio.create_task(_on_close_async())
+            task = asyncio.create_task(_on_close_async())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
         # ── Launch DB queries as a background task (don't block session start) ──
         # Event signals when session is ready to accept generate_reply() calls
@@ -401,7 +406,10 @@ async def entrypoint(ctx: JobContext):
 
                 if deps.get("call_uuid"):
                     await asyncio.to_thread(
-                        lambda: supabase.table("calls").update({"egress_id": egress_id}).eq("call_id", call_id).execute()
+                        lambda: supabase.table("calls").update({
+                            "egress_id": egress_id,
+                            "recording_storage_path": recording_path,
+                        }).eq("call_id", call_id).execute()
                     )
             except Exception as e:
                 logger.error(f"[agent] Failed to start egress: {e}")
