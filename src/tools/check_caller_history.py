@@ -32,41 +32,50 @@ def create_check_caller_history_tool(deps: dict):
             return "No caller history available."
 
         # Look up tenant timezone for formatting
-        tenant_result = await asyncio.to_thread(
-            lambda: supabase.table("tenants")
-            .select("tenant_timezone")
-            .eq("id", tenant_id)
-            .single()
-            .execute()
-        )
-        tenant = tenant_result.data if tenant_result.data else None
+        try:
+            tenant_result = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
+                .select("tenant_timezone")
+                .eq("id", tenant_id)
+                .single()
+                .execute()
+            )
+            tenant = tenant_result.data if tenant_result.data else None
+        except Exception as e:
+            logger.error("[agent] check_caller_history: tenant fetch failed: %s", e)
+            return "No caller history available."
+
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
         # Parallel lookup: leads + appointments for this caller
-        leads_result, appointments_result = await asyncio.gather(
-            asyncio.to_thread(
-                lambda: supabase.table("leads")
-                .select("id, caller_name, job_type, service_address, status, created_at")
-                .eq("tenant_id", tenant_id)
-                .eq("from_number", from_number)
-                .order("created_at", desc=True)
-                .limit(3)
-                .execute()
-            ),
-            asyncio.to_thread(
-                lambda: supabase.table("appointments")
-                .select("start_time, end_time, service_address, status, caller_name")
-                .eq("tenant_id", tenant_id)
-                .eq("caller_phone", from_number)
-                .neq("status", "cancelled")
-                .gte("end_time", now_iso)
-                .order("start_time")
-                .limit(3)
-                .execute()
-            ),
-        )
+        try:
+            leads_result, appointments_result = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: supabase.table("leads")
+                    .select("id, caller_name, job_type, service_address, status, created_at")
+                    .eq("tenant_id", tenant_id)
+                    .eq("from_number", from_number)
+                    .order("created_at", desc=True)
+                    .limit(3)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .select("start_time, end_time, service_address, status, caller_name")
+                    .eq("tenant_id", tenant_id)
+                    .eq("caller_phone", from_number)
+                    .neq("status", "cancelled")
+                    .gte("end_time", now_iso)
+                    .order("start_time")
+                    .limit(3)
+                    .execute()
+                ),
+            )
+        except Exception as e:
+            logger.error("[agent] check_caller_history: history lookup failed: %s", e)
+            return "No caller history available."
 
         leads = leads_result.data or []
         appointments = appointments_result.data or []

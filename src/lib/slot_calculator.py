@@ -10,6 +10,7 @@ Calculates available booking slots for a given date, respecting:
 """
 
 import calendar
+import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -206,7 +207,11 @@ def calculate_available_slots(
             f"{zoned_now.year}-{str(zoned_now.month).zfill(2)}-{str(zoned_now.day).zfill(2)}"
         )
         if target_date == today_str:
-            cursor = now
+            # Round cursor up to the next slot-grid-aligned boundary
+            # so offered times match the clean grid (9:00, 10:00, etc.)
+            elapsed_mins = (now - window_start).total_seconds() / 60
+            slots_elapsed = math.ceil(elapsed_mins / slot_duration_mins)
+            cursor = window_start + timedelta(minutes=slots_elapsed * slot_duration_mins)
 
     while cursor < window_end and len(available) < max_slots:
         slot_start = cursor

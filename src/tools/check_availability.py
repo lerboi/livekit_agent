@@ -101,49 +101,64 @@ def create_check_availability_tool(deps: dict):
             )
 
         # Fetch tenant config
-        tenant_result = await asyncio.to_thread(
-            lambda: supabase.table("tenants")
-            .select("tenant_timezone, working_hours, slot_duration_mins, business_name")
-            .eq("id", tenant_id)
-            .single()
-            .execute()
-        )
-        tenant = tenant_result.data if tenant_result.data else None
+        try:
+            tenant_result = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
+                .select("tenant_timezone, working_hours, slot_duration_mins, business_name")
+                .eq("id", tenant_id)
+                .single()
+                .execute()
+            )
+            tenant = tenant_result.data if tenant_result.data else None
+        except Exception as e:
+            logger.error("[agent] check_availability: tenant config fetch failed: %s", e)
+            return (
+                "I'm having trouble checking availability right now. "
+                "Let me take your information and someone will call you back to schedule."
+            )
+
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
         slot_duration = (tenant.get("slot_duration_mins") if tenant else None) or 60
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
         # Fetch live scheduling data (parallel)
-        appointments_result, events_result, zones_result, buffers_result = await asyncio.gather(
-            asyncio.to_thread(
-                lambda: supabase.table("appointments")
-                .select("start_time, end_time, zone_id")
-                .eq("tenant_id", tenant_id)
-                .neq("status", "cancelled")
-                .gte("end_time", now_iso)
-                .execute()
-            ),
-            asyncio.to_thread(
-                lambda: supabase.table("calendar_events")
-                .select("start_time, end_time")
-                .eq("tenant_id", tenant_id)
-                .gte("end_time", now_iso)
-                .execute()
-            ),
-            asyncio.to_thread(
-                lambda: supabase.table("service_zones")
-                .select("id, name, postal_codes")
-                .eq("tenant_id", tenant_id)
-                .execute()
-            ),
-            asyncio.to_thread(
-                lambda: supabase.table("zone_travel_buffers")
-                .select("zone_a_id, zone_b_id, buffer_mins")
-                .eq("tenant_id", tenant_id)
-                .execute()
-            ),
-        )
+        try:
+            appointments_result, events_result, zones_result, buffers_result = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .select("start_time, end_time, zone_id")
+                    .eq("tenant_id", tenant_id)
+                    .neq("status", "cancelled")
+                    .gte("end_time", now_iso)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("calendar_events")
+                    .select("start_time, end_time")
+                    .eq("tenant_id", tenant_id)
+                    .gte("end_time", now_iso)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("service_zones")
+                    .select("id, name, postal_codes")
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("zone_travel_buffers")
+                    .select("zone_a_id, zone_b_id, buffer_mins")
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                ),
+            )
+        except Exception as e:
+            logger.error("[agent] check_availability: scheduling data fetch failed: %s", e)
+            return (
+                "I'm having trouble checking availability right now. "
+                "Let me take your information and someone will call you back to schedule."
+            )
 
         # Determine which dates to check
         tenant_today = to_local_date_string(datetime.now(timezone.utc), tenant_timezone)
