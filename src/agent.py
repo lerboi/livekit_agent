@@ -86,13 +86,41 @@ async def entrypoint(ctx: JobContext):
         from_number = attrs.get("sip.phoneNumber") or attrs.get("sip.from") or ""
         sip_participant_identity = participant.identity or ""
 
+        # Log raw SIP attributes for debugging phone number format issues
+        logger.info(f"[agent] SIP attrs: {json.dumps(attrs)}")
+
         # Check if this is a test call (metadata set by test-call route)
         is_test_call = False
+        room_meta = {}
         try:
             room_meta = json.loads(ctx.room.metadata) if ctx.room.metadata else {}
             is_test_call = room_meta.get("test_call") is True
         except Exception:
             pass
+
+        # For test calls, outbound SIP participant won't have sip.trunkPhoneNumber
+        # set to the tenant's number. Use room metadata as fallback.
+        if is_test_call and room_meta.get("to_number"):
+            to_number = room_meta["to_number"]
+
+        # Normalize phone numbers to E.164 for reliable tenant lookup.
+        # LiveKit SIP attributes may include sip:/tel: prefixes or @domain suffixes.
+        def _normalize_phone(number: str) -> str:
+            if not number:
+                return number
+            if number.lower().startswith("sip:"):
+                number = number[4:]
+            if "@" in number:
+                number = number.split("@")[0]
+            if number.lower().startswith("tel:"):
+                number = number[4:]
+            number = number.strip()
+            if number and number[0].isdigit():
+                number = "+" + number
+            return number
+
+        to_number = _normalize_phone(to_number)
+        from_number = _normalize_phone(from_number)
 
         logger.info(f"[agent] Call started: room={call_id} from={from_number} to={to_number} test={is_test_call}")
 
@@ -132,6 +160,8 @@ async def entrypoint(ctx: JobContext):
             tone_preset=tone_preset,
             intake_questions="",  # injected after DB query completes
             country=country,
+            working_hours=tenant.get("working_hours") if tenant else None,
+            tenant_timezone=tenant_timezone,
         )
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
         system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."

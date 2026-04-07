@@ -58,6 +58,93 @@ def _build_voice_behavior_section() -> str:
     )
 
 
+def _build_corrections_section() -> str:
+    return (
+        "HANDLING CORRECTIONS — CRITICAL RULE:\n"
+        "When the caller corrects ANY piece of information you repeated back (name, address, "
+        "phone number, issue description, time, or any other detail):\n"
+        "1. The caller's correction is ALWAYS correct. Your previous version was WRONG.\n"
+        "2. Completely discard your earlier version. Do not blend old and new.\n"
+        "3. In your very next response, repeat back ONLY the corrected version — never the old one.\n"
+        "4. Never reference, compare with, or fall back to the earlier incorrect version.\n"
+        "5. If you are unsure what the caller said, ask them to repeat the CORRECTION, "
+        "not the original.\n"
+        "\n"
+        "Example: If you said '123 Main Street' and the caller says 'No, it's 456 Oak Avenue', "
+        "then 456 Oak Avenue is the only address. 123 Main Street no longer exists — forget it "
+        "entirely. Your next response must say '456 Oak Avenue', never '123 Main Street'.\n"
+        "\n"
+        "This applies to every type of information — names, addresses, numbers, dates, "
+        "descriptions. The caller's most recent statement always overrides everything before it."
+    )
+
+
+def _build_working_hours_section(
+    working_hours: dict | None, tenant_timezone: str
+) -> str:
+    if not working_hours:
+        return ""
+
+    DAY_ORDER = [
+        "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday",
+    ]
+    DAY_SHORT = {
+        "monday": "Mon", "tuesday": "Tue", "wednesday": "Wed",
+        "thursday": "Thu", "friday": "Fri", "saturday": "Sat",
+        "sunday": "Sun",
+    }
+
+    def _fmt(t: str) -> str:
+        h, m = map(int, t.split(":"))
+        suffix = "AM" if h < 12 else "PM"
+        return f"{h % 12 or 12}:{m:02d} {suffix}"
+
+    def _day_sig(day: str) -> str:
+        c = working_hours.get(day, {})
+        if not c.get("enabled"):
+            return "closed"
+        sig = f"{c['open']}-{c['close']}"
+        if c.get("lunchStart") and c.get("lunchEnd"):
+            sig += f"/{c['lunchStart']}-{c['lunchEnd']}"
+        return sig
+
+    # Group consecutive days with the same schedule
+    groups: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(DAY_ORDER):
+        sig = _day_sig(DAY_ORDER[i])
+        start = i
+        while i + 1 < len(DAY_ORDER) and _day_sig(DAY_ORDER[i + 1]) == sig:
+            i += 1
+        groups.append((start, i, sig))
+        i += 1
+
+    lines: list[str] = []
+    for start_idx, end_idx, sig in groups:
+        if start_idx == end_idx:
+            label = DAY_SHORT[DAY_ORDER[start_idx]]
+        else:
+            label = f"{DAY_SHORT[DAY_ORDER[start_idx]]}-{DAY_SHORT[DAY_ORDER[end_idx]]}"
+
+        if sig == "closed":
+            lines.append(f"{label}: Closed")
+        else:
+            c = working_hours.get(DAY_ORDER[start_idx], {})
+            line = f"{label}: {_fmt(c['open'])} - {_fmt(c['close'])}"
+            if c.get("lunchStart") and c.get("lunchEnd"):
+                line += f" (lunch {_fmt(c['lunchStart'])} - {_fmt(c['lunchEnd'])})"
+            lines.append(line)
+
+    schedule = "\n".join(lines)
+    return (
+        f"BUSINESS HOURS ({tenant_timezone}):\n"
+        f"{schedule}\n"
+        "When callers ask about your hours or availability, refer to these hours. "
+        "Never guess or make up business hours."
+    )
+
+
 def _build_greeting_section(
     locale: str, business_name: str, onboarding_complete: bool, t
 ) -> str:
@@ -149,14 +236,8 @@ def _build_info_gathering_section(t, postal_label: str) -> str:
         "This applies to their name, their issue description, and every part of their address. "
         "Do not move on to the next question until the caller confirms what you repeated is correct. "
         "For the full address, read back all parts together and get explicit confirmation before "
-        "scheduling.\n"
-        "\n"
-        "CORRECTIONS:\n"
-        "When the caller corrects you, the correction completely replaces whatever you had — "
-        "discard the old value entirely. Your very next response must use only the caller's "
-        "corrected information, never the original. Do not blend or mix old and new values. "
-        "On a phone call, the caller's latest statement is always the truth, even if it sounds "
-        "different from what you previously heard.\n"
+        "scheduling. When reading back, always use the caller's MOST RECENT statement — "
+        "never an earlier version that was corrected.\n"
         "\n"
         "Always have the caller's name before using any tools or saving information.\n"
         "\n"
@@ -281,6 +362,8 @@ def build_system_prompt(
     tone_preset: str = "professional",
     intake_questions: str = "",
     country: str = "US",
+    working_hours: dict | None = None,
+    tenant_timezone: str = "America/Chicago",
 ) -> str:
     """
     Build the full system prompt for the Gemini Live voice agent.
@@ -292,6 +375,8 @@ def build_system_prompt(
         tone_preset: Tone preset key ('professional', 'friendly', 'local_expert').
         intake_questions: Custom intake questions string.
         country: Tenant country code ('SG', 'US', 'CA', etc.).
+        working_hours: Day-keyed working hours JSON from tenant config.
+        tenant_timezone: IANA timezone string (e.g., 'Asia/Singapore').
 
     Returns:
         The assembled system prompt string.
@@ -314,6 +399,8 @@ def build_system_prompt(
     sections = [
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(),
+        _build_corrections_section(),
+        _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t),
         _build_repeat_caller_section(onboarding_complete),
