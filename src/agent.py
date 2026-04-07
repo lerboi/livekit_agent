@@ -254,12 +254,14 @@ async def entrypoint(ctx: JobContext):
 
         # Strong references to background tasks to prevent garbage collection
         _background_tasks = set()
+        close_complete = asyncio.Event()
 
         @session.on("close")
         def on_close(event):
             task = asyncio.create_task(_on_close_async())
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+            task.add_done_callback(lambda _: close_complete.set())
 
         # ── Launch DB queries as a background task (don't block session start) ──
         # Event signals when session is ready to accept generate_reply() calls
@@ -420,6 +422,14 @@ async def entrypoint(ctx: JobContext):
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)
         sentry_sdk.capture_exception(e)
         raise
+
+    # Keep entrypoint alive until the post-call pipeline completes.
+    # Without this, entrypoint returns immediately after session.start(),
+    # the LiveKit worker considers the job done, and the process exits —
+    # killing the _on_close_async task (post-call pipeline) mid-flight.
+    # The close_complete event is set by the on_close handler's done_callback
+    # after _on_close_async finishes (regardless of success or failure).
+    await close_complete.wait()
 
 
 if __name__ == "__main__":
