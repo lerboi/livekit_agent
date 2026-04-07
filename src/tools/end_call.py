@@ -59,6 +59,6 @@ def create_end_call_tool(deps: dict):
     async def end_call(context: RunContext) -> str:
         deps["call_end_reason"][0] = "agent_ended"
         asyncio.create_task(_delayed_disconnect(deps))
-        return " "
+        return "[Call disconnected — do not produce any further speech.]"
 
     return end_call

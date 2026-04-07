@@ -80,8 +80,9 @@ def create_check_availability_tool(deps: dict):
             "never rely on results from a previous call. "
             "Pass date in YYYY-MM-DD format. "
             "Pass time in HH:MM 24-hour format (e.g., '14:00' for 2 PM) to check a specific time. "
-            "Omit time to get all available slots for the day. "
-            "Omit both date and time to check the next 3 days."
+            "Always include both date AND time when the caller has stated a time preference. "
+            "Pass date alone to confirm a day has availability (returns a summary, not specific times). "
+            "Omit both date and time to check the next 3 days (summary only)."
         ),
     )
     async def check_availability(
@@ -261,20 +262,23 @@ def create_check_availability_tool(deps: dict):
                 f"so {biz_name} can call back to schedule."
             )
 
-        slot_lines: list[str] = []
-        for i, slot in enumerate(all_slots):
-            speech_text = format_slot_for_speech(slot["start"], tenant_timezone)
-            slot_lines.append(
-                f"{i + 1}. {speech_text} (start: {slot['start']}, end: {slot['end']})"
-            )
+        # Return a summary — not individual slots — so the AI cannot read them out.
+        # The AI should ask the caller for a preferred time, then call this tool again
+        # with both date and time to verify the specific slot.
+        if date:
+            date_label = _format_date_label(date, tenant_timezone)
+        else:
+            date_label = "the next few days"
 
-        slots_text = "\n".join(slot_lines)
+        earliest_speech = format_slot_for_speech(all_slots[0]["start"], tenant_timezone)
+        latest_speech = format_slot_for_speech(all_slots[-1]["start"], tenant_timezone)
+
         return (
-            f"Available slots:\n{slots_text}\n\n"
-            "Do NOT read all these slots to the caller. "
-            "If the caller's preferred time is in the list, confirm it and proceed to book. "
-            "If not, offer only the 2-3 closest alternatives to what they asked for. "
-            "Use the start/end values when invoking book_appointment."
+            f"There are {len(all_slots)} available slots on {date_label}, "
+            f"from {earliest_speech} through {latest_speech}. "
+            "Do not list individual times to the caller. "
+            "Ask what time of day works best for them, then call check_availability again "
+            "with both the date and their preferred time to confirm the exact slot."
         )
 
     return check_availability
