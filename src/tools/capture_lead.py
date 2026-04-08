@@ -18,8 +18,9 @@ def create_capture_lead_tool(deps: dict):
     @function_tool(
         name="capture_lead",
         description=(
-            "Capture caller information as a lead when they decline booking. "
-            "Use after the second explicit decline. Must be used before ending the call."
+            "Capture caller information as a lead when the caller has firmly declined booking. "
+            "Use when you're confident they don't want to book right now and you're about to "
+            "wrap up the call. Must be used before ending the call."
         ),
     )
     async def capture_lead(
