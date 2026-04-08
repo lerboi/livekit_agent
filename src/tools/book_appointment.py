@@ -163,6 +163,20 @@ def create_book_appointment_tool(deps: dict):
         if not tenant_id:
             return "I was unable to confirm the booking. Please call back and we will try again."
 
+        # Idempotency guard: if this exact slot was already successfully booked earlier
+        # in this call, return the cached confirmation without re-running the booking.
+        # Prevents duplicate side effects (recovery SMS, calendar events) when Gemini
+        # invokes the tool twice for the same slot in quick succession.
+        _slot_key = f"{slot_start}|{slot_end}"
+        cached_response = deps.get("_last_booked_slot_response")
+        if cached_response and deps.get("_last_booked_slot_key") == _slot_key:
+            logger.info(
+                "[agent] book_appointment: idempotent re-invocation for call=%s slot=%s",
+                deps.get("call_id"),
+                _slot_key,
+            )
+            return cached_response
+
         # Fetch tenant timezone and config
         tenant_result = await asyncio.to_thread(
             lambda: supabase.table("tenants")
@@ -195,6 +209,21 @@ def create_book_appointment_tool(deps: dict):
             return "I was unable to confirm the booking right now. Let me take your information and someone will call you back to schedule."
 
         if not result.get("success"):
+            # Late duplicate guard: if a prior successful booking has already cached a
+            # response on this call, this is a concurrent duplicate invocation arriving
+            # AFTER the first booking committed. Return the cached success response
+            # instead of treating it as a real slot_taken (which would fire a spurious
+            # recovery SMS for an already-booked slot).
+            if deps.get("_last_booked_slot_key"):
+                logger.info(
+                    "[agent] book_appointment: slot_taken after prior success; returning cached response for call=%s",
+                    deps.get("call_id"),
+                )
+                return deps.get(
+                    "_last_booked_slot_response",
+                    "Your appointment is already confirmed. Is there anything else I can help you with?",
+                )
+
             # Slot was taken -- recalculate next available
             now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -285,33 +314,51 @@ def create_book_appointment_tool(deps: dict):
             except Exception:
                 pass  # non-critical — post-call pipeline has fallback
 
-        # Calendar sync (fire-and-forget)
+        # Compute the confirmation message once — cached for idempotency and returned below.
+        formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
+        return_msg = (
+            f"Your appointment is confirmed for {formatted_time}. "
+            "You will receive a confirmation. Is there anything else I can help you with?"
+        )
+
+        # Cache the successful booking BEFORE firing background tasks so any concurrent
+        # duplicate invocation (caught by the slot_taken guard above, or by the cache
+        # check at the top) sees the cached response.
+        deps["_last_booked_slot_key"] = _slot_key
+        deps["_last_booked_slot_response"] = return_msg
+
+        # Calendar sync — truly fire-and-forget so the tool returns quickly. A slow tool
+        # (awaited side effects) caused the AI to go silent, which let the caller's speech
+        # trigger duplicate invocations and a spurious recovery SMS.
         if appointment_id:
+            async def _push_calendar_bg():
+                try:
+                    await asyncio.to_thread(
+                        lambda: push_booking_to_calendar(tenant_id, appointment_id)
+                    )
+                except Exception as cal_err:
+                    logger.error("[agent] Calendar push failed: %s", str(cal_err))
+            asyncio.create_task(_push_calendar_bg())
+
+        # Caller SMS confirmation — truly fire-and-forget for the same reason.
+        sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
+        async def _send_confirmation_sms_bg():
             try:
                 await asyncio.to_thread(
-                    lambda: push_booking_to_calendar(tenant_id, appointment_id)
+                    lambda: send_caller_sms(
+                        to=deps.get("from_number"),
+                        from_number=deps.get("to_number"),
+                        business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
+                        date=_format_date_for_sms(slot_start, tenant_timezone),
+                        time=_format_time_for_sms(slot_start, tenant_timezone),
+                        address=service_address or "",
+                        locale=sms_locale,
+                    )
                 )
-            except Exception as cal_err:
-                logger.error("[agent] Calendar push failed: %s", str(cal_err))
+            except Exception as sms_err:
+                logger.error("[agent] Caller SMS failed: %s", str(sms_err))
+        asyncio.create_task(_send_confirmation_sms_bg())
 
-        # Caller SMS confirmation (non-blocking)
-        sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
-        try:
-            await asyncio.to_thread(
-                lambda: send_caller_sms(
-                    to=deps.get("from_number"),
-                    from_number=deps.get("to_number"),
-                    business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
-                    date=_format_date_for_sms(slot_start, tenant_timezone),
-                    time=_format_time_for_sms(slot_start, tenant_timezone),
-                    address=service_address or "",
-                    locale=sms_locale,
-                )
-            )
-        except Exception as sms_err:
-            logger.error("[agent] Caller SMS failed: %s", str(sms_err))
-
-        formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
-        return f"Your appointment is confirmed for {formatted_time}. You will receive a confirmation. Is there anything else I can help you with?"
+        return return_msg
 
     return book_appointment

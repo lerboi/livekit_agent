@@ -77,12 +77,16 @@ def create_check_availability_tool(deps: dict):
             "Check real-time appointment availability. "
             "Always tell the caller you're checking before calling this tool. "
             "Call this tool every time the caller asks about a specific date or time — "
-            "never rely on results from a previous call. "
+            "never rely on results from a previous call, and never answer about a different "
+            "time based on a check you ran for an earlier time. "
             "Pass date in YYYY-MM-DD format. "
             "Pass time in HH:MM 24-hour format (e.g., '14:00' for 2 PM) to check a specific time. "
-            "Always include both date AND time when the caller has stated a time preference. "
-            "Pass date alone to confirm a day has availability (returns a summary, not specific times). "
-            "Omit both date and time to check the next 3 days (summary only)."
+            "Always include both date AND time when the caller has named a specific hour. "
+            "For vague time windows like 'afternoon,' 'morning,' or 'evening,' ask the caller "
+            "for a concrete hour BEFORE calling this tool — do not pick a time on their behalf. "
+            "Pass date alone only to confirm whether a day has availability at all (the tool "
+            "returns a confirmation, not specific times). "
+            "Omit both date and time to check the next 3 days (confirmation only)."
         ),
     )
     async def check_availability(
@@ -277,23 +281,24 @@ def create_check_availability_tool(deps: dict):
                 f"so {biz_name} can call back to schedule."
             )
 
-        # Return a summary — not individual slots — so the AI cannot read them out.
-        # The AI should ask the caller for a preferred time, then call this tool again
-        # with both date and time to verify the specific slot.
+        # Return a clean confirmation without any specific times.
+        # Specific times (earliest/latest/count) are deliberately withheld so Gemini cannot
+        # mine them and present them to the caller. The AI must ask the caller to name a
+        # concrete hour, then call this tool again with date+time to verify a specific slot.
         if date:
             date_label = _format_date_label(date, tenant_timezone)
         else:
             date_label = "the next few days"
 
-        earliest_speech = format_slot_for_speech(all_slots[0]["start"], tenant_timezone)
-        latest_speech = format_slot_for_speech(all_slots[-1]["start"], tenant_timezone)
-
         return (
-            f"There are {len(all_slots)} available slots on {date_label}, "
-            f"from {earliest_speech} through {latest_speech}. "
-            "Do not list individual times to the caller. "
-            "Ask what time of day works best for them, then call check_availability again "
-            "with both the date and their preferred time to confirm the exact slot."
+            f"There is availability on {date_label}. You have NOT verified any specific slot "
+            f"yet — the caller must name a concrete time (like '2 o'clock' or 'around 10 in "
+            f"the morning') before you can confirm anything is bookable. If the caller only "
+            f"gave a vague window like 'afternoon' or 'morning,' ask them to narrow it to a "
+            f"specific hour. Then call this tool again with both the date and their preferred "
+            f"time to verify that exact slot. Do not mention or imply any specific times to "
+            f"the caller at this stage — not the earliest, not the latest, not anything in "
+            f"between."
         )
 
     return check_availability
