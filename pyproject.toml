@@ -31,6 +31,8 @@ dependencies = [
     "google-auth>=2.0,<3",
     "google-api-python-client>=2.0,<3",
     "sentry-sdk>=2.0,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
 ]
 
 [project.optional-dependencies]
