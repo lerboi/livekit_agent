@@ -37,6 +37,7 @@ from .tools import create_tools
 from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
 from .health import start_health_server
+from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
 
@@ -105,20 +106,8 @@ async def entrypoint(ctx: JobContext):
 
         # Normalize phone numbers to E.164 for reliable tenant lookup.
         # LiveKit SIP attributes may include sip:/tel: prefixes or @domain suffixes.
-        def _normalize_phone(number: str) -> str:
-            if not number:
-                return number
-            if number.lower().startswith("sip:"):
-                number = number[4:]
-            if "@" in number:
-                number = number.split("@")[0]
-            if number.lower().startswith("tel:"):
-                number = number[4:]
-            number = number.strip()
-            if number and number[0].isdigit():
-                number = "+" + number
-            return number
-
+        # _normalize_phone is imported from src/lib/phone.py (extracted in Plan 39-04
+        # so that src/webhook/twilio_routes.py can reuse the same logic).
         to_number = _normalize_phone(to_number)
         from_number = _normalize_phone(from_number)
 
