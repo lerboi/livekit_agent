@@ -36,7 +36,7 @@ from .prompt import build_system_prompt
 from .tools import create_tools
 from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
-from .health import start_health_server
+from .webhook import start_webhook_server
 from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
@@ -452,7 +452,7 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    start_health_server()
+    start_webhook_server()
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
