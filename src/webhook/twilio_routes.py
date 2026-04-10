@@ -266,11 +266,102 @@ async def dial_fallback(request: Request) -> Response:
     return _xml_response(_ai_sip_twiml())
 
 
+_twilio_client = None
+
+
+def _get_twilio_client():
+    """Lazy-init Twilio REST client for SMS forwarding."""
+    global _twilio_client
+    if _twilio_client is None:
+        from twilio.rest import Client as TwilioClient
+        _twilio_client = TwilioClient(
+            os.environ.get("TWILIO_ACCOUNT_SID"),
+            os.environ.get("TWILIO_AUTH_TOKEN"),
+        )
+    return _twilio_client
+
+
+async def _log_sms(
+    tenant_id: str, from_number: str, to_number: str, body: str, direction: str,
+):
+    """Insert a row into sms_messages for audit logging."""
+    from src.supabase_client import get_supabase_admin
+
+    def _insert():
+        return get_supabase_admin().table("sms_messages").insert({
+            "tenant_id": tenant_id,
+            "from_number": from_number,
+            "to_number": to_number,
+            "body": body,
+            "direction": direction,
+        }).execute()
+
+    await asyncio.to_thread(_insert)
+
+
 @router.post("/incoming-sms")
 async def incoming_sms(request: Request) -> Response:
-    """Twilio SMS webhook (Phase 40 wires forwarding to pickup_numbers with sms_forward=true).
+    """Twilio SMS webhook — forward to pickup_numbers with sms_forward=true (D-13 through D-16)."""
+    form_data = request.state.form_data
+    from_number = _normalize_phone(form_data.get("From", ""))
+    to_number = _normalize_phone(form_data.get("To", ""))
+    body = form_data.get("Body", "")
+    num_media = int(form_data.get("NumMedia", "0") or "0")
 
-    Phase 39 returns empty TwiML so inbound SMS is acknowledged but not
-    forwarded. No sms_messages table insert (Phase 40).
-    """
+    # Tenant lookup (fail-open)
+    tenant = None
+    try:
+        from src.supabase_client import get_supabase_admin
+
+        def _query():
+            return get_supabase_admin().table("tenants") \
+                .select("id, pickup_numbers") \
+                .eq("phone_number", to_number).limit(1).execute()
+
+        resp = await asyncio.to_thread(_query)
+        rows = resp.data or []
+        if rows:
+            tenant = rows[0]
+    except Exception as e:
+        logger.warning("[webhook] SMS tenant lookup failed: %s", e)
+
+    if not tenant:
+        return _xml_response(_empty_twiml())
+
+    tenant_id = tenant["id"]
+    pickup_numbers = tenant.get("pickup_numbers") or []
+    forward_targets = [
+        p["number"] for p in pickup_numbers
+        if p.get("sms_forward") and p.get("number")
+    ]
+
+    # Append MMS note if media present (D-14)
+    forward_body = body
+    if num_media > 0:
+        forward_body = f"{body}\n[Media attached - view in Twilio console]".strip()
+
+    forward_text = f"[Voco] From {from_number}: {forward_body}"
+
+    # Log inbound message (D-15)
+    try:
+        await _log_sms(tenant_id, from_number, to_number, body, "inbound")
+    except Exception as e:
+        logger.error("[webhook] SMS inbound log failed: %s", e)
+
+    # Forward to each sms_forward target (D-16: non-fatal per recipient)
+    twilio_client = _get_twilio_client()
+    for target in forward_targets:
+        try:
+            def _send(t=target):
+                return twilio_client.messages.create(
+                    body=forward_text,
+                    from_=to_number,
+                    to=t,
+                )
+
+            await asyncio.to_thread(_send)
+            await _log_sms(tenant_id, to_number, target, forward_text, "forwarded")
+        except Exception as e:
+            logger.error("[webhook] SMS forward failed to %s: %s", target, e)
+
     return _xml_response(_empty_twiml())

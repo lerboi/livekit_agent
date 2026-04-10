@@ -497,3 +497,201 @@ def test_dial_fallback_returns_ai_twiml(client_no_auth, monkeypatch):
     assert "<Dial>" in body
     assert "sip:test@sip.livekit.cloud" in body
     assert "<Response/>" not in body
+
+
+# ---------- Phase 40-02 — SMS forwarding tests ----------
+
+
+def _make_sms_tenant_mock(tenant_data=None):
+    """Build a supabase mock that handles both tenant lookup and sms_messages insert."""
+    response = MagicMock()
+    response.data = [tenant_data] if tenant_data else []
+
+    insert_response = MagicMock()
+    insert_response.data = [{"id": "sms-1"}]
+
+    chain = MagicMock()
+    chain.execute.return_value = response
+    chain.limit.return_value = chain
+    chain.eq.return_value = chain
+    chain.select.return_value = chain
+
+    insert_chain = MagicMock()
+    insert_chain.execute.return_value = insert_response
+
+    supabase = MagicMock()
+
+    def _table_dispatch(name):
+        if name == "sms_messages":
+            sms_chain = MagicMock()
+            sms_chain.insert.return_value = insert_chain
+            return sms_chain
+        return chain
+
+    supabase.table.side_effect = _table_dispatch
+    return supabase
+
+
+def test_incoming_sms_forwarding(client_no_auth, monkeypatch):
+    """POST /twilio/incoming-sms -> forwards to sms_forward=true targets only,
+    logs inbound + forwarded to sms_messages."""
+    tenant = {
+        "id": "t-sms",
+        "pickup_numbers": [
+            {"number": "+15550001111", "sms_forward": True},
+            {"number": "+15550002222", "sms_forward": False},
+        ],
+    }
+    mock_sb = _make_sms_tenant_mock(tenant)
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+
+    # Mock Twilio client
+    mock_twilio = MagicMock()
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._get_twilio_client",
+        lambda: mock_twilio,
+    )
+    monkeypatch.setattr("src.webhook.twilio_routes._twilio_client", None)
+
+    resp = client_no_auth.post(
+        "/twilio/incoming-sms",
+        data={
+            "From": "+15551234567",
+            "To": "+15559876543",
+            "Body": "Help needed",
+            "NumMedia": "0",
+        },
+    )
+    assert resp.status_code == 200
+
+    # Twilio messages.create called once (only sms_forward=true target)
+    assert mock_twilio.messages.create.call_count == 1
+    call_kwargs = mock_twilio.messages.create.call_args
+    # Check forwarded body format
+    assert "[Voco] From +15551234567: Help needed" in str(call_kwargs)
+    assert "+15550001111" in str(call_kwargs)
+
+    # sms_messages inserts: 1 inbound + 1 forwarded = 2
+    sms_inserts = []
+    for call in mock_sb.table.call_args_list:
+        if call[0][0] == "sms_messages":
+            sms_inserts.append(call)
+    assert len(sms_inserts) >= 2
+
+
+def test_incoming_sms_mms_note(client_no_auth, monkeypatch):
+    """POST /twilio/incoming-sms with NumMedia=2 -> forwarded body contains MMS note."""
+    tenant = {
+        "id": "t-mms",
+        "pickup_numbers": [
+            {"number": "+15550001111", "sms_forward": True},
+        ],
+    }
+    mock_sb = _make_sms_tenant_mock(tenant)
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+
+    mock_twilio = MagicMock()
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._get_twilio_client",
+        lambda: mock_twilio,
+    )
+    monkeypatch.setattr("src.webhook.twilio_routes._twilio_client", None)
+
+    resp = client_no_auth.post(
+        "/twilio/incoming-sms",
+        data={
+            "From": "+15551234567",
+            "To": "+15559876543",
+            "Body": "Check this",
+            "NumMedia": "2",
+        },
+    )
+    assert resp.status_code == 200
+
+    # Verify MMS note in forwarded message
+    call_kwargs = mock_twilio.messages.create.call_args
+    assert "[Media attached - view in Twilio console]" in str(call_kwargs)
+
+
+def test_incoming_sms_partial_failure(client_no_auth, monkeypatch):
+    """POST /twilio/incoming-sms with 2 sms_forward targets, first fails ->
+    second still receives SMS; response is 200."""
+    tenant = {
+        "id": "t-partial",
+        "pickup_numbers": [
+            {"number": "+15550001111", "sms_forward": True},
+            {"number": "+15550002222", "sms_forward": True},
+        ],
+    }
+    mock_sb = _make_sms_tenant_mock(tenant)
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+
+    mock_twilio = MagicMock()
+    call_count = {"n": 0}
+
+    def _messages_create(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("Twilio send failed")
+        return MagicMock(sid="SM001")
+
+    mock_twilio.messages.create.side_effect = _messages_create
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._get_twilio_client",
+        lambda: mock_twilio,
+    )
+    monkeypatch.setattr("src.webhook.twilio_routes._twilio_client", None)
+
+    resp = client_no_auth.post(
+        "/twilio/incoming-sms",
+        data={
+            "From": "+15551234567",
+            "To": "+15559876543",
+            "Body": "Need help",
+            "NumMedia": "0",
+        },
+    )
+    assert resp.status_code == 200
+
+    # Both targets were attempted
+    assert mock_twilio.messages.create.call_count == 2
+
+
+def test_incoming_sms_unknown_tenant(client_no_auth, monkeypatch):
+    """POST /twilio/incoming-sms with To number matching no tenant -> empty TwiML, no forwarding."""
+    mock_sb = _make_sms_tenant_mock(None)
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+
+    mock_twilio = MagicMock()
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._get_twilio_client",
+        lambda: mock_twilio,
+    )
+    monkeypatch.setattr("src.webhook.twilio_routes._twilio_client", None)
+
+    resp = client_no_auth.post(
+        "/twilio/incoming-sms",
+        data={
+            "From": "+15551234567",
+            "To": "+10000000000",
+            "Body": "Hello",
+            "NumMedia": "0",
+        },
+    )
+    assert resp.status_code == 200
+    assert "<Response/>" in resp.text
+
+    # No forwarding attempted
+    assert mock_twilio.messages.create.call_count == 0
