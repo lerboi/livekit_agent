@@ -227,23 +227,43 @@ async def incoming_call(request: Request) -> Response:
 
 @router.post("/dial-status")
 async def dial_status(request: Request) -> Response:
-    """Twilio dial-status callback (Phase 40 wires duration writeback).
+    """Twilio dial-status callback — write duration and detect fallback."""
+    form_data = request.state.form_data
+    call_sid = form_data.get("CallSid", "")
+    dial_status_val = form_data.get("DialCallStatus", "")
+    duration_raw = form_data.get("DialCallDuration", "")
+    duration_sec = int(duration_raw) if duration_raw.isdigit() else None
 
-    Phase 39 returns empty TwiML so the endpoint exists and the signature path
-    is exercised. Phase 40 reads CallStatus + DialCallDuration from
-    request.state.form_data and updates calls.outbound_dial_duration_sec.
-    """
+    # Determine final routing_mode (D-05, D-09)
+    if dial_status_val in ("no-answer", "busy", "failed"):
+        final_mode = "fallback_to_ai"
+    else:
+        final_mode = "owner_pickup"
+
+    # Update calls row — fail-safe (D-09)
+    try:
+        from src.supabase_client import get_supabase_admin
+
+        def _update():
+            update_data = {"routing_mode": final_mode}
+            if duration_sec is not None:
+                update_data["outbound_dial_duration_sec"] = duration_sec
+            return get_supabase_admin().table("calls") \
+                .update(update_data) \
+                .eq("call_sid", call_sid) \
+                .execute()
+
+        await asyncio.to_thread(_update)
+    except Exception as e:
+        logger.warning("[webhook] dial_status update failed: %s", e)
+
     return _xml_response(_empty_twiml())
 
 
 @router.post("/dial-fallback")
 async def dial_fallback(request: Request) -> Response:
-    """Twilio dial-fallback (invoked if primary dial fails — Phase 40).
-
-    Phase 39 returns empty TwiML. Phase 40 returns an AI TwiML branch here
-    so the fallback always lands on the AI.
-    """
-    return _xml_response(_empty_twiml())
+    """Twilio dial-fallback — owner didn't answer, route to AI (D-05, D-06)."""
+    return _xml_response(_ai_sip_twiml())
 
 
 @router.post("/incoming-sms")

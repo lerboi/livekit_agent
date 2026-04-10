@@ -49,15 +49,16 @@ def test_dial_status_returns_empty_twiml(client_no_auth):
     assert "<Response/>" in resp.text
 
 
-def test_dial_fallback_returns_empty_twiml(client_no_auth):
-    """POST /twilio/dial-fallback -> 200 with empty <Response/> TwiML."""
+def test_dial_fallback_returns_ai_twiml_basic(client_no_auth):
+    """POST /twilio/dial-fallback -> 200 with AI SIP TwiML (Phase 40 live)."""
     resp = client_no_auth.post(
         "/twilio/dial-fallback",
         data={"ErrorCode": "11100"},
     )
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/xml")
-    assert "<Response/>" in resp.text
+    assert "<Sip>" in resp.text
+    assert "<Dial>" in resp.text
 
 
 def test_incoming_sms_returns_empty_twiml(client_no_auth):
@@ -365,3 +366,134 @@ def test_owner_pickup_inserts_calls_row(client_no_auth, monkeypatch):
     assert insert_args["tenant_id"] == "t-insert"
     assert insert_args["call_sid"] == "CA0007"
     assert insert_args["routing_mode"] == "owner_pickup"
+
+
+# ---------- Phase 40-02 — dial-status and dial-fallback tests ----------
+
+
+def _make_update_mock():
+    """Build a MagicMock supabase chain for update().eq().execute()."""
+    response = MagicMock()
+    response.data = [{"id": "call-1"}]
+
+    chain = MagicMock()
+    chain.execute.return_value = response
+    chain.eq.return_value = chain
+    chain.update.return_value = chain
+
+    supabase = MagicMock()
+    supabase.table.return_value = chain
+    return supabase
+
+
+def test_dial_status_updates_calls_row(client_no_auth, monkeypatch):
+    """POST /twilio/dial-status with completed call -> updates calls row with
+    routing_mode=owner_pickup and outbound_dial_duration_sec=45."""
+    mock_sb = _make_update_mock()
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+    resp = client_no_auth.post(
+        "/twilio/dial-status",
+        data={
+            "CallSid": "CS123",
+            "DialCallStatus": "completed",
+            "DialCallDuration": "45",
+        },
+    )
+    assert resp.status_code == 200
+    assert "<Response/>" in resp.text
+
+    # Verify update was called with correct data
+    update_call = mock_sb.table.return_value.update
+    assert update_call.called
+    update_data = update_call.call_args[0][0]
+    assert update_data["routing_mode"] == "owner_pickup"
+    assert update_data["outbound_dial_duration_sec"] == 45
+
+    # Verify eq filter on call_sid
+    eq_call = mock_sb.table.return_value.update.return_value.eq
+    assert eq_call.called
+    eq_args = eq_call.call_args[0]
+    assert eq_args == ("call_sid", "CS123")
+
+
+def test_dial_status_no_answer(client_no_auth, monkeypatch):
+    """POST /twilio/dial-status with no-answer -> routing_mode=fallback_to_ai, no duration."""
+    mock_sb = _make_update_mock()
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+    resp = client_no_auth.post(
+        "/twilio/dial-status",
+        data={
+            "CallSid": "CS456",
+            "DialCallStatus": "no-answer",
+        },
+    )
+    assert resp.status_code == 200
+    assert "<Response/>" in resp.text
+
+    update_data = mock_sb.table.return_value.update.call_args[0][0]
+    assert update_data["routing_mode"] == "fallback_to_ai"
+    assert "outbound_dial_duration_sec" not in update_data
+
+
+def test_dial_status_busy(client_no_auth, monkeypatch):
+    """POST /twilio/dial-status with busy -> routing_mode=fallback_to_ai."""
+    mock_sb = _make_update_mock()
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+    resp = client_no_auth.post(
+        "/twilio/dial-status",
+        data={
+            "CallSid": "CS789",
+            "DialCallStatus": "busy",
+        },
+    )
+    assert resp.status_code == 200
+
+    update_data = mock_sb.table.return_value.update.call_args[0][0]
+    assert update_data["routing_mode"] == "fallback_to_ai"
+
+
+def test_dial_status_db_failure(client_no_auth, monkeypatch):
+    """POST /twilio/dial-status when DB raises Exception -> still returns empty TwiML (fail-safe)."""
+    def _raise():
+        raise RuntimeError("DB connection lost")
+
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.update.side_effect = RuntimeError("DB connection lost")
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+    resp = client_no_auth.post(
+        "/twilio/dial-status",
+        data={
+            "CallSid": "CS999",
+            "DialCallStatus": "completed",
+            "DialCallDuration": "10",
+        },
+    )
+    assert resp.status_code == 200
+    assert "<Response/>" in resp.text
+
+
+def test_dial_fallback_returns_ai_twiml(client_no_auth, monkeypatch):
+    """POST /twilio/dial-fallback -> response contains <Sip> (AI TwiML), not empty TwiML."""
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:test@sip.livekit.cloud")
+    resp = client_no_auth.post(
+        "/twilio/dial-fallback",
+        data={"ErrorCode": "11100"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Sip>" in body
+    assert "<Dial>" in body
+    assert "sip:test@sip.livekit.cloud" in body
+    assert "<Response/>" not in body
