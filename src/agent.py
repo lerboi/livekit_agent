@@ -179,7 +179,9 @@ async def entrypoint(ctx: JobContext):
         tools = create_tools(deps)
 
         # ── Create Gemini model + agent + session ──
-        voice_name = VOICE_MAP.get(tone_preset, "Kore")
+        # Use explicitly selected voice if set, else fall back to tone-based mapping (Phase 44: AI Voice Selection)
+        ai_voice = tenant.get("ai_voice") if tenant else None
+        voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "Kore")
 
         model = google.realtime.RealtimeModel(
             model="gemini-3.1-flash-live-preview",
