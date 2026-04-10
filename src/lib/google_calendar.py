@@ -6,6 +6,7 @@ Lightweight adapter -- pushes bookings to Google Calendar.
 
 import logging
 import os
+from datetime import timezone
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -112,6 +113,42 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str) -> None:
             )
             .execute()
         )
+
+        # Persist refreshed tokens if googleapiclient auto-refreshed them during the
+        # insert request. Without this, each booking pays the refresh cost and the DB
+        # stays permanently stale, eventually hitting Google's refresh rate limit and
+        # silently breaking calendar sync for this tenant.
+        try:
+            new_token = getattr(google_creds, "token", None)
+            if new_token and new_token != creds["access_token"]:
+                update_payload = {"access_token": new_token}
+                # google_creds.expiry is a naive UTC datetime; calendar_credentials
+                # stores expiry_date as Unix milliseconds (bigint) — see migration 003.
+                new_expiry = getattr(google_creds, "expiry", None)
+                if new_expiry is not None:
+                    update_payload["expiry_date"] = int(
+                        new_expiry.replace(tzinfo=timezone.utc).timestamp() * 1000
+                    )
+                # Google occasionally rotates refresh tokens; persist if changed.
+                new_refresh = getattr(google_creds, "refresh_token", None)
+                if new_refresh and new_refresh != creds.get("refresh_token"):
+                    update_payload["refresh_token"] = new_refresh
+                (
+                    supabase.table("calendar_credentials")
+                    .update(update_payload)
+                    .eq("tenant_id", tenant_id)
+                    .eq("provider", "google")
+                    .execute()
+                )
+                logger.info(
+                    "[agent] Persisted refreshed Google credentials for tenant=%s",
+                    tenant_id,
+                )
+        except Exception as persist_err:
+            logger.error(
+                "[agent] Failed to persist refreshed Google credentials (non-fatal): %s",
+                persist_err,
+            )
 
         # Store the Google event ID
         event_id = event.get("id")

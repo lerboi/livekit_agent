@@ -209,14 +209,16 @@ def create_book_appointment_tool(deps: dict):
             return "I was unable to confirm the booking right now. Let me take your information and someone will call you back to schedule."
 
         if not result.get("success"):
-            # Late duplicate guard: if a prior successful booking has already cached a
-            # response on this call, this is a concurrent duplicate invocation arriving
-            # AFTER the first booking committed. Return the cached success response
-            # instead of treating it as a real slot_taken (which would fire a spurious
-            # recovery SMS for an already-booked slot).
-            if deps.get("_last_booked_slot_key"):
+            # Late duplicate guard: if a prior successful booking of THIS EXACT slot
+            # has already cached a response on this call, this is a concurrent duplicate
+            # invocation arriving AFTER the first booking committed. Return the cached
+            # success response instead of treating it as a real slot_taken (which would
+            # fire a spurious recovery SMS for an already-booked slot).
+            # Key match is required so that a legitimate attempt at a *different* slot
+            # after a prior success doesn't accidentally return the old confirmation.
+            if deps.get("_last_booked_slot_key") == _slot_key:
                 logger.info(
-                    "[agent] book_appointment: slot_taken after prior success; returning cached response for call=%s",
+                    "[agent] book_appointment: slot_taken after prior success for same slot; returning cached response for call=%s",
                     deps.get("call_id"),
                 )
                 return deps.get(
@@ -282,18 +284,38 @@ def create_book_appointment_tool(deps: dict):
                 ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
             )
 
-            # Send recovery SMS (non-blocking)
-            asyncio.create_task(
-                _send_recovery_sms(deps, tenant, urgency, caller_name)
-            )
+            # Send recovery SMS (non-blocking) — fire at most ONCE per call, even if
+            # multiple slot_taken events occur across different slots. The recovery SMS
+            # is a generic "couldn't book you" message, not slot-specific, so one per
+            # call is the correct semantic. The check + set is synchronous (no await
+            # between them), so it's race-safe on the single-threaded event loop.
+            if not deps.get("_recovery_sms_fired"):
+                deps["_recovery_sms_fired"] = True
+                asyncio.create_task(
+                    _send_recovery_sms(deps, tenant, urgency, caller_name)
+                )
 
             return f"That slot was just taken. The next available time is {next_slot_text}. Would you like me to book that instead?"
 
-        # Success — write booking_outcome immediately (before any side effects)
-        # so it persists even if the caller hangs up during calendar push or SMS.
-
+        # Success — compute and cache the confirmation response SYNCHRONOUSLY before
+        # any await. A concurrent duplicate invocation (that lost the race to
+        # atomic_book_slot) will see this cache via the late-guard above and return
+        # the success response instead of firing a spurious recovery SMS. Previously
+        # the cache was set AFTER two awaited DB updates, opening a ~100-200ms window
+        # where a duplicate could fall through to the slot_taken branch.
         appointment_id = result.get("appointment_id")
 
+        formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
+        return_msg = (
+            f"Your appointment is confirmed for {formatted_time}. "
+            "You will receive a confirmation. Is there anything else I can help you with?"
+        )
+
+        deps["_last_booked_slot_key"] = _slot_key
+        deps["_last_booked_slot_response"] = return_msg
+
+        # Now safe to do the awaited follow-up work. Write booking_outcome immediately
+        # so it persists even if the caller hangs up during calendar push or SMS.
         await asyncio.to_thread(
             lambda: supabase.table("calls").update(
                 {"booking_outcome": "booked"}
@@ -313,19 +335,6 @@ def create_book_appointment_tool(deps: dict):
                 )
             except Exception:
                 pass  # non-critical — post-call pipeline has fallback
-
-        # Compute the confirmation message once — cached for idempotency and returned below.
-        formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
-        return_msg = (
-            f"Your appointment is confirmed for {formatted_time}. "
-            "You will receive a confirmation. Is there anything else I can help you with?"
-        )
-
-        # Cache the successful booking BEFORE firing background tasks so any concurrent
-        # duplicate invocation (caught by the slot_taken guard above, or by the cache
-        # check at the top) sees the cached response.
-        deps["_last_booked_slot_key"] = _slot_key
-        deps["_last_booked_slot_response"] = return_msg
 
         # Calendar sync — truly fire-and-forget so the tool returns quickly. A slow tool
         # (awaited side effects) caused the AI to go silent, which let the caller's speech

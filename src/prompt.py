@@ -49,11 +49,7 @@ def _build_voice_behavior_section() -> str:
         "\n"
         "Keep the conversation grounded by asking one focused thing at a time. After the caller "
         "answers, briefly acknowledge what you heard before moving forward — it signals you're "
-        "listening rather than running a script.\n"
-        "\n"
-        "Before running any tool (checking availability, booking, capturing information), tell "
-        "the caller what you're doing in one short phrase — 'Let me check that for you' or "
-        "'Let me get that booked in.' Silence while a tool runs feels unnatural on a phone call."
+        "listening rather than running a script."
     )
 
 
@@ -75,6 +71,35 @@ def _build_corrections_section() -> str:
         "\n"
         "This applies to every type of information — names, addresses, numbers, dates, "
         "descriptions. The caller's most recent statement always overrides everything before it."
+    )
+
+
+def _build_tool_narration_section() -> str:
+    return (
+        "TOOL NARRATION — CRITICAL RULE:\n"
+        "Before calling ANY tool, you MUST first speak a short, natural filler phrase "
+        "to the caller. Tools take one to three seconds to run, and silence on a live "
+        "phone call feels broken to the caller. This is not optional.\n"
+        "\n"
+        "Rules:\n"
+        "1. Never emit a tool call without speaking first.\n"
+        "2. The filler must be natural and conversational — not 'please hold' "
+        "(too cold) or 'one moment please' (too formal).\n"
+        "3. Speak the filler, then immediately invoke the tool. Do not wait for "
+        "the caller to reply.\n"
+        "\n"
+        "Examples by tool:\n"
+        "- check_availability: 'Let me check that for you.' / 'Give me one second "
+        "to look at the calendar.' / 'Let me see what we have open.'\n"
+        "- book_appointment: 'Let me get that booked in for you.' / 'Locking that "
+        "in now.' / 'Booking that slot now.'\n"
+        "- capture_lead: 'Let me make a note of your details.' / 'Let me save "
+        "that so the team can follow up.'\n"
+        "- transfer_call: 'Let me get you through to someone.' / 'I'll connect "
+        "you now — one second.'\n"
+        "\n"
+        "Silence while a tool runs is the single worst thing you can do on a "
+        "live phone call."
     )
 
 
@@ -411,6 +436,7 @@ def build_system_prompt(
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(),
         _build_corrections_section(),
+        _build_tool_narration_section(),
         _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t),

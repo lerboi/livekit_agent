@@ -19,6 +19,7 @@ def create_capture_lead_tool(deps: dict):
         name="capture_lead",
         description=(
             "Capture caller information as a lead when the caller has firmly declined booking. "
+            "Always tell the caller you're noting their details before calling this tool. "
             "Use when you're confident they don't want to book right now and you're about to "
             "wrap up the call. Must be used before ending the call."
         ),

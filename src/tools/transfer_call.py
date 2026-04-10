@@ -20,6 +20,7 @@ def create_transfer_call_tool(deps: dict):
         name="transfer_call",
         description=(
             "Transfer the current call to the business owner's phone number. "
+            "Always tell the caller you're transferring them before calling this tool. "
             "Use when the caller explicitly requests a human, or after 3 failed clarification attempts. "
             "Always capture caller info (name, phone, issue) first, unless the caller explicitly requests immediate transfer."
         ),
