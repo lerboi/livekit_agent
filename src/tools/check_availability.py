@@ -128,12 +128,13 @@ def create_check_availability_tool(deps: dict):
 
         # Fetch live scheduling data (parallel)
         try:
-            appointments_result, events_result, zones_result, buffers_result = await asyncio.gather(
+            appointments_result, events_result, zones_result, buffers_result, blocks_result = await asyncio.gather(
                 asyncio.to_thread(
                     lambda: supabase.table("appointments")
                     .select("start_time, end_time, zone_id")
                     .eq("tenant_id", tenant_id)
                     .neq("status", "cancelled")
+                    .neq("status", "completed")
                     .gte("end_time", now_iso)
                     .execute()
                 ),
@@ -154,6 +155,13 @@ def create_check_availability_tool(deps: dict):
                     lambda: supabase.table("zone_travel_buffers")
                     .select("zone_a_id, zone_b_id, buffer_mins")
                     .eq("tenant_id", tenant_id)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: supabase.table("calendar_blocks")
+                    .select("start_time, end_time")
+                    .eq("tenant_id", tenant_id)
+                    .gte("end_time", now_iso)
                     .execute()
                 ),
             )
@@ -186,7 +194,7 @@ def create_check_availability_tool(deps: dict):
                 working_hours=tenant.get("working_hours") or {} if tenant else {},
                 slot_duration_mins=slot_duration,
                 existing_bookings=appointments_result.data or [],
-                external_blocks=events_result.data or [],
+                external_blocks=(events_result.data or []) + (blocks_result.data or []),
                 zones=zones_result.data or [],
                 zone_pair_buffers=format_zone_pair_buffers(buffers_result.data or []),
                 target_date=date_str,
