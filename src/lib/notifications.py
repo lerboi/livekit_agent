@@ -65,6 +65,7 @@ def _interpolate(template: str | None, vars: dict) -> str:
 def send_owner_sms(
     *,
     to: str,
+    from_number: str | None = None,
     business_name: str,
     caller_name: str | None = None,
     job_type: str | None = None,
@@ -73,7 +74,13 @@ def send_owner_sms(
     callback_link: str | None = None,
     dashboard_link: str | None = None,
 ):
-    """Send an SMS alert to the business owner about a new call/booking."""
+    """Send an SMS alert to the business owner about a new call/booking.
+
+    `from_number` should be the tenant's own Twilio number (the one the caller
+    dialed). Falls back to the `TWILIO_FROM_NUMBER` env var for backwards
+    compatibility, but each tenant has their own number so the explicit arg
+    is preferred.
+    """
     is_emergency = urgency == "emergency"
     name = caller_name or "Unknown"
     job = job_type or "General inquiry"
@@ -93,7 +100,7 @@ def send_owner_sms(
     try:
         result = _get_twilio_client().messages.create(
             body=body,
-            from_=os.environ.get("TWILIO_FROM_NUMBER"),
+            from_=from_number or os.environ.get("TWILIO_FROM_NUMBER"),
             to=to,
         )
         logger.info("[notifications] Owner SMS sent: %s", result.sid)

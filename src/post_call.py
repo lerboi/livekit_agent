@@ -312,6 +312,7 @@ async def run_post_call_pipeline(params: dict):
                     tasks.append(asyncio.to_thread(
                         send_owner_sms,
                         to=tenant_info["owner_phone"],
+                        from_number=to_number,  # tenant's own Twilio number
                         business_name=business_name,
                         caller_name=lead.get("caller_name"),
                         job_type=lead.get("job_type"),
