@@ -101,6 +101,44 @@ async def _insert_owner_pickup_call(
     await asyncio.to_thread(_insert)
 
 
+async def _is_vip_caller(tenant: dict, from_number: str) -> bool:
+    """Check if caller is VIP via tenant's vip_numbers or lead is_vip flag.
+
+    Two-source lookup per D-01:
+    1. Standalone VIP numbers in tenant's vip_numbers JSONB (already in memory)
+    2. Lead-based VIP via from_number + is_vip=true query (requires DB hit)
+
+    Returns True if either source matches. Fail-open: returns False on error.
+    """
+    # Source 1: Standalone VIP numbers (no DB hit — already in tenant row)
+    vip_numbers = tenant.get("vip_numbers") or []
+    for entry in vip_numbers:
+        if entry.get("number") == from_number:
+            return True
+
+    # Source 2: Lead-based VIP (requires DB query per D-02)
+    try:
+        from src.supabase_client import get_supabase_admin
+
+        def _query():
+            return (
+                get_supabase_admin()
+                .table("leads")
+                .select("id")
+                .eq("tenant_id", tenant["id"])
+                .eq("from_number", from_number)
+                .eq("is_vip", True)
+                .limit(1)
+                .execute()
+            )
+
+        response = await asyncio.to_thread(_query)
+        return bool(response.data)
+    except Exception as e:
+        logger.warning("[webhook] VIP lead lookup failed (fail-open): %s", e)
+        return False
+
+
 # --- /twilio/incoming-call ---------------------------------------------------
 #
 # Phase 40 live routing composition (D-02):
@@ -138,7 +176,7 @@ async def incoming_call(request: Request) -> Response:
                 supabase.table("tenants")
                 .select(
                     "id, call_forwarding_schedule, tenant_timezone, country, "
-                    "pickup_numbers, dial_timeout_seconds, subscriptions(status)"
+                    "pickup_numbers, dial_timeout_seconds, vip_numbers, subscriptions(status)"
                 )
                 .eq("phone_number", to_number)
                 .limit(1)
@@ -171,6 +209,34 @@ async def incoming_call(request: Request) -> Response:
             return _xml_response(_ai_sip_twiml())
     except Exception as e:
         logger.warning("[webhook] Subscription check failed (fail-open): %s", e)
+
+    # 2.5. VIP check — bypass schedule + cap for VIP callers (per D-03, D-05)
+    try:
+        if await _is_vip_caller(tenant, from_number):
+            logger.info(
+                "[webhook] VIP caller %s for tenant %s — direct routing",
+                from_number, tenant["id"],
+            )
+            pickup_numbers = [
+                p["number"]
+                for p in (tenant.get("pickup_numbers") or [])
+                if p.get("number")
+            ]
+            if pickup_numbers:
+                await _insert_owner_pickup_call(
+                    tenant["id"], call_sid, from_number, to_number,
+                )
+                timeout = tenant.get("dial_timeout_seconds", 15)
+                return _xml_response(
+                    _owner_pickup_twiml(from_number, pickup_numbers, timeout),
+                )
+            else:
+                logger.info(
+                    "[webhook] VIP caller but no pickup numbers for tenant %s — AI TwiML",
+                    tenant["id"],
+                )
+    except Exception as e:
+        logger.warning("[webhook] VIP check failed (fail-open): %s", e)
 
     # 3. Evaluate schedule
     decision = evaluate_schedule(
