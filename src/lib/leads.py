@@ -45,6 +45,27 @@ async def create_or_merge_lead(
                     {"lead_id": existing_lead["id"], "call_id": call_id}
                 ).execute()
             )
+        # Point the lead at the newest appointment so the calendar flyout's
+        # reverse-join (leads!appointment_id) finds a match. Promote status
+        # 'new' -> 'booked' when a booking just happened.
+        if appointment_id:
+            updates = {"appointment_id": appointment_id}
+            if existing_lead.get("status") == "new":
+                updates["status"] = "booked"
+            try:
+                updated_resp = await asyncio.to_thread(
+                    lambda: supabase.table("leads")
+                    .update(updates)
+                    .eq("id", existing_lead["id"])
+                    .execute()
+                )
+                if updated_resp.data:
+                    existing_lead = updated_resp.data[0]
+            except Exception as err:
+                logger.warning(
+                    "create_or_merge_lead: appointment_id update failed (non-fatal): %s",
+                    err,
+                )
         return existing_lead
 
     # Create new lead
