@@ -120,6 +120,9 @@ def _make_tenant_mock(
 
     The mock mimics:
       supabase.table("tenants").select(...).eq(...).limit(1).execute()
+
+    Routes the "leads" table to an empty response so _is_vip_caller does
+    not falsely match in tests that don't configure VIP behavior.
     """
     row = None
     if tenant_data is not None:
@@ -138,8 +141,24 @@ def _make_tenant_mock(
     chain.eq.return_value = chain
     chain.select.return_value = chain
 
+    # Empty leads response so _is_vip_caller lead lookup returns False
+    leads_response = MagicMock()
+    leads_response.data = []
+    leads_chain = MagicMock()
+    leads_chain.execute.return_value = leads_response
+    leads_chain.limit.return_value = leads_chain
+    leads_chain.eq.return_value = leads_chain
+    leads_chain.select.return_value = leads_chain
+
     supabase = MagicMock()
-    supabase.table.return_value = chain
+    supabase.table.return_value = chain  # backward-compat: table.return_value still points to chain
+
+    def _table_dispatch(name):
+        if name == "leads":
+            return leads_chain
+        return chain
+
+    supabase.table.side_effect = _table_dispatch
     return supabase
 
 
@@ -695,3 +714,215 @@ def test_incoming_sms_unknown_tenant(client_no_auth, monkeypatch):
 
     # No forwarding attempted
     assert mock_twilio.messages.create.call_count == 0
+
+
+# ---------- Phase 46 — VIP caller routing tests ----------
+
+
+def _make_vip_supabase_mock(tenant_data, *, subscriptions=None, vip_lead_found=False):
+    """Build supabase mock supporting both tenants and leads table queries."""
+    # Tenant chain (same as _make_tenant_mock)
+    row = None
+    if tenant_data is not None:
+        row = {**tenant_data}
+        if subscriptions is not None:
+            row["subscriptions"] = subscriptions
+        elif "subscriptions" not in row:
+            row["subscriptions"] = [{"status": "active"}]
+
+    tenant_response = MagicMock()
+    tenant_response.data = [row] if row else []
+    tenant_chain = MagicMock()
+    tenant_chain.execute.return_value = tenant_response
+    tenant_chain.limit.return_value = tenant_chain
+    tenant_chain.eq.return_value = tenant_chain
+    tenant_chain.select.return_value = tenant_chain
+
+    # Leads chain for VIP lookup
+    leads_response = MagicMock()
+    leads_response.data = [{"id": "lead-vip-1"}] if vip_lead_found else []
+    leads_chain = MagicMock()
+    leads_chain.execute.return_value = leads_response
+    leads_chain.limit.return_value = leads_chain
+    leads_chain.eq.return_value = leads_chain
+    leads_chain.select.return_value = leads_chain
+
+    # Insert chain for _insert_owner_pickup_call
+    insert_response = MagicMock()
+    insert_response.data = [{"id": "call-1"}]
+    insert_chain = MagicMock()
+    insert_chain.execute.return_value = insert_response
+    insert_chain.insert.return_value = insert_chain
+
+    supabase = MagicMock()
+
+    def table_router(name):
+        if name == "leads":
+            return leads_chain
+        if name == "calls":
+            return insert_chain
+        return tenant_chain
+
+    supabase.table.side_effect = table_router
+
+    return supabase
+
+
+def _patch_vip_routing(monkeypatch, *, tenant_data=None, subscriptions=None,
+                       schedule_decision=None, cap_ok=True, vip_lead_found=False):
+    """Apply monkeypatches for VIP routing tests."""
+    mock_sb = _make_vip_supabase_mock(
+        tenant_data, subscriptions=subscriptions, vip_lead_found=vip_lead_found,
+    )
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin",
+        lambda: mock_sb,
+    )
+    if schedule_decision is not None:
+        monkeypatch.setattr(
+            "src.webhook.twilio_routes.evaluate_schedule",
+            lambda sched, tz, now: schedule_decision,
+        )
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes.check_outbound_cap",
+        AsyncMock(return_value=cap_ok),
+    )
+    monkeypatch.setenv("RAILWAY_WEBHOOK_URL", "https://test.example.com")
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:test@sip.livekit.cloud")
+    return mock_sb
+
+
+def test_incoming_call_vip_standalone(client_no_auth, monkeypatch):
+    """VIP caller from vip_numbers -> owner_pickup TwiML, bypassing schedule."""
+    tenant = {
+        "id": "t-vip1",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+11111"}],
+        "dial_timeout_seconds": 20,
+        "vip_numbers": [{"number": "+15559876543", "label": "VIP customer"}],
+    }
+    _patch_vip_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-VIP1"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Dial" in body
+    assert "<Number>+11111</Number>" in body
+    assert 'timeout="20"' in body
+    assert "<Sip>" not in body  # Must NOT be AI TwiML
+
+
+def test_incoming_call_vip_lead(client_no_auth, monkeypatch):
+    """VIP caller from is_vip lead -> owner_pickup TwiML, bypassing schedule."""
+    tenant = {
+        "id": "t-vip2",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+22222"}],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [],
+    }
+    _patch_vip_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+        vip_lead_found=True,
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-VIP2"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Dial" in body
+    assert "<Number>+22222</Number>" in body
+
+
+def test_incoming_call_non_vip_continues(client_no_auth, monkeypatch):
+    """Non-VIP caller -> normal schedule evaluation (AI TwiML when schedule disabled)."""
+    tenant = {
+        "id": "t-novip",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+33333"}],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [{"number": "+10000000000", "label": "Someone else"}],
+    }
+    _patch_vip_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+        vip_lead_found=False,
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-NOVIP"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Sip>" in body  # AI TwiML, not owner pickup
+
+
+def test_incoming_call_vip_no_pickup(client_no_auth, monkeypatch):
+    """VIP caller with no pickup numbers -> AI TwiML (can't ring owner)."""
+    tenant = {
+        "id": "t-vipnopickup",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [{"number": "+15559876543"}],
+    }
+    _patch_vip_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-VIPNOPICK"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Sip>" in body  # Falls through to AI since no pickup numbers
+
+
+def test_incoming_call_vip_check_fail(client_no_auth, monkeypatch):
+    """VIP check exception -> fail-open, continues to schedule evaluation."""
+    tenant = {
+        "id": "t-vipfail",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+44444"}],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [{"number": "+15559876543"}],
+    }
+    _patch_vip_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    # Override _is_vip_caller to raise an exception
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._is_vip_caller",
+        AsyncMock(side_effect=Exception("DB timeout")),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-VIPFAIL"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "<Sip>" in body  # Fail-open -> AI TwiML
