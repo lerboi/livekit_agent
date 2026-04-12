@@ -73,6 +73,36 @@ async def run_post_call_pipeline(params: dict):
 
     call_uuid = (updated_call.get("id") if updated_call else None) or call_uuid
 
+    # ── 2b. Booking reconciliation ──
+    # If book_appointment succeeded during the call, ensure the DB reflects that.
+    # Guards against the race where the tool's mid-call update matched zero rows
+    # because the calls row didn't exist yet (db_task had not completed).
+    booking_succeeded = params.get("booking_succeeded", False)
+    booked_appointment_id = params.get("booked_appointment_id")
+    booked_caller_name = params.get("booked_caller_name")
+
+    if booking_succeeded:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("calls")
+                .update({"booking_outcome": "booked"})
+                .eq("call_id", call_id)
+                .execute()
+            )
+            # Backfill appointment.call_id if it was NULL at booking time. The
+            # FK can be NULL when book_appointment fired before deps["call_uuid"]
+            # was populated by the background db_task.
+            if booked_appointment_id and call_uuid:
+                await asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .update({"call_id": call_uuid})
+                    .eq("id", booked_appointment_id)
+                    .is_("call_id", "null")
+                    .execute()
+                )
+        except Exception as e:
+            print(f"[post-call] Booking reconciliation error: {e}")
+
     # ── 3. Test call auto-cancel ──
     if is_test_call and tenant_id:
         try:
@@ -162,7 +192,13 @@ async def run_post_call_pipeline(params: dict):
 
     # ── 7. Calculate suggested slots for unbooked calls ──
     suggested_slots = None
-    booking_outcome = updated_call.get("booking_outcome") if updated_call else None
+    # If booking_succeeded, the reconciliation above wrote "booked"; use that
+    # value here so the suggested_slots gate and the appointment lookup below
+    # see the corrected outcome without re-querying the DB.
+    booking_outcome = (
+        "booked" if booking_succeeded
+        else (updated_call.get("booking_outcome") if updated_call else None)
+    )
 
     if not booking_outcome or booking_outcome == "not_attempted":
         try:
@@ -199,11 +235,19 @@ async def run_post_call_pipeline(params: dict):
     lead = None
     if call_uuid and duration_seconds >= 15:
         try:
-            caller_name = _extract_field_from_transcript(transcript_turns, "name")
+            # Prefer the caller_name captured at booking time (verified by the AI)
+            # over the regex fallback, which has a high false-positive rate on
+            # phrases like "it's raining" or "i'm calling".
+            caller_name = booked_caller_name or _extract_field_from_transcript(
+                transcript_turns, "name"
+            )
             job_type = _extract_field_from_transcript(transcript_turns, "job")
 
-            appointment_id = None
-            if booking_outcome == "booked":
+            # Prefer the appointment_id returned directly from the booking tool;
+            # fall back to the FK lookup only if we don't have it (covers the
+            # capture_lead-only path).
+            appointment_id = booked_appointment_id
+            if booking_outcome == "booked" and not appointment_id:
                 appt_resp = await asyncio.to_thread(
                     lambda: supabase.table("appointments")
                     .select("id")
@@ -378,15 +422,27 @@ def _extract_field_from_transcript(turns, field):
 
     if field == "name":
         original_text = " ".join(user_texts)
+        # Trigger is matched case-insensitively, but capitalization is enforced
+        # on the captured token via a post-match check below — re.IGNORECASE
+        # would otherwise nullify a [A-Z] constraint inside the group.
         patterns = [
-            r"(?:my name is|this is|i'm|i am|it's)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-            r"(?:name'?s)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+            r"(?:my name is|this is|i'm|i am|it's|name'?s)\s+(\w+(?:\s+\w+)?)",
         ]
+        non_name_words = {
+            "here", "there", "calling", "sorry", "raining", "cold", "hot", "just",
+            "trying", "looking", "about", "a", "the", "an", "ok", "okay", "yes",
+            "no", "fine", "good", "bad", "home", "work", "going", "only", "really",
+            "actually", "kind", "sort",
+        }
         for pattern in patterns:
             match = re.search(pattern, original_text, re.IGNORECASE)
             if match:
                 name = match.group(1).strip()
-                if 2 <= len(name) <= 50 and name.lower() not in ("here", "there", "calling", "sorry"):
+                # Require capitalized first token (proper-noun heuristic).
+                if not name or not name[0].isupper():
+                    continue
+                first_token = name.split()[0].lower()
+                if 2 <= len(name) <= 50 and first_token not in non_name_words:
                     return name.title()
         return None
 

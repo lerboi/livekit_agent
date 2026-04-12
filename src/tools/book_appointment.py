@@ -314,13 +314,29 @@ def create_book_appointment_tool(deps: dict):
         deps["_last_booked_slot_key"] = _slot_key
         deps["_last_booked_slot_response"] = return_msg
 
+        # Authoritative booking flags for post-call reconciliation. These are set
+        # synchronously (no await between) so post-call can correct the DB even if
+        # the mid-call update below races the background db_task that creates the
+        # calls row.
+        deps["_booking_succeeded"] = True
+        deps["_booked_appointment_id"] = appointment_id
+        deps["_booked_caller_name"] = caller_name or None
+
         # Now safe to do the awaited follow-up work. Write booking_outcome immediately
         # so it persists even if the caller hangs up during calendar push or SMS.
-        await asyncio.to_thread(
+        # If the calls row hasn't been inserted yet (db_task race), this matches zero
+        # rows silently; post-call reconciliation handles that case.
+        result_update = await asyncio.to_thread(
             lambda: supabase.table("calls").update(
                 {"booking_outcome": "booked"}
             ).eq("call_id", deps.get("call_id", "")).execute()
         )
+        if not (result_update.data if result_update else None):
+            logger.warning(
+                "[booking] mid-call booking_outcome update matched zero rows "
+                "(race with db_task); will be reconciled in post-call. call_id=%s",
+                deps.get("call_id"),
+            )
 
         # Backfill appointment call_id if it was NULL at booking time
         # (call_uuid may not have been populated yet from the background DB task)

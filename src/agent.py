@@ -268,6 +268,11 @@ async def entrypoint(ctx: JobContext):
                     "recording_storage_path": recording_path if egress_id else None,
                     "is_test_call": is_test_call,
                     "disconnection_reason": call_end_reason[0],
+                    # In-memory truth about what booking tools did during the call,
+                    # used by post-call to reconcile the DB against mid-call races.
+                    "booking_succeeded": deps.get("_booking_succeeded", False),
+                    "booked_appointment_id": deps.get("_booked_appointment_id"),
+                    "booked_caller_name": deps.get("_booked_caller_name"),
                 })
             except Exception as e:
                 logger.error(f"[agent] Post-call pipeline error: {e}")
