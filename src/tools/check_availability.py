@@ -75,7 +75,12 @@ def create_check_availability_tool(deps: dict):
         name="check_availability",
         description=(
             "Check real-time appointment availability. "
-            "Always tell the caller you're checking before calling this tool. "
+            "DO NOT speak the words 'available' or 'not available' for a specific time, and "
+            "DO NOT quote any specific time as bookable, before invoking this tool. "
+            "The tool's return is the only authoritative availability — fabricating it traps "
+            "the caller in a slot that may not exist. "
+            "Always speak a short filler phrase first ('Let me check that for you'), then "
+            "immediately invoke this tool in the same turn. "
             "Call this tool every time the caller asks about a specific date or time — "
             "never rely on results from a previous call, and never answer about a different "
             "time based on a check you ran for an earlier time. "
@@ -235,10 +240,19 @@ def create_check_availability_tool(deps: dict):
 
                 if matched_slot:
                     speech_text = format_slot_for_speech(matched_slot["start"], tenant_timezone)
+                    deps.setdefault("_tool_call_log", []).append({
+                        "name": "check_availability",
+                        "success": True,
+                        "result": "available",
+                        "date": date,
+                        "time": time,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
                     return (
-                        f"Yes, {speech_text} is available. "
-                        f"(start: {matched_slot['start']}, end: {matched_slot['end']})\n"
-                        "If the caller wants this slot, proceed to book using the start/end values above."
+                        f"AVAILABLE [start={matched_slot['start']}, end={matched_slot['end']}, "
+                        f"formatted={speech_text}]. Tell the caller {speech_text} is available, "
+                        f"then ask if they want to book it. Use the start/end values above when "
+                        f"invoking book_appointment."
                     )
                 else:
                     # Not available — find the closest alternatives
@@ -262,18 +276,36 @@ def create_check_availability_tool(deps: dict):
                             speech = format_slot_for_speech(slot["start"], tenant_timezone)
                             alt_lines.append(f"{i + 1}. {speech} (start: {slot['start']}, end: {slot['end']})")
                         alts_text = "\n".join(alt_lines)
+                        deps.setdefault("_tool_call_log", []).append({
+                            "name": "check_availability",
+                            "success": True,
+                            "result": "not_available_with_alternatives",
+                            "date": date,
+                            "time": time,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
                         return (
-                            f"{requested_speech} is not available. "
-                            f"The closest available times on {date_label} are:\n{alts_text}\n\n"
-                            "Offer the caller these alternatives. "
-                            "Use the start/end values when invoking book_appointment."
+                            f"NOT_AVAILABLE [requested={requested_speech}]. "
+                            f"Alternatives on {date_label}:\n{alts_text}\n\n"
+                            f"Tell the caller {requested_speech} is not available, then offer "
+                            f"one or two of these alternatives. Use the start/end values when "
+                            f"invoking book_appointment."
                         )
                     else:
                         biz_name = (tenant.get("business_name") if tenant else None) or "the team"
+                        deps.setdefault("_tool_call_log", []).append({
+                            "name": "check_availability",
+                            "success": True,
+                            "result": "not_available_no_alternatives",
+                            "date": date,
+                            "time": time,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
                         return (
-                            f"{requested_speech} is not available, and there are no other "
-                            f"slots on {date_label}. Ask the caller if another day works, "
-                            f"or capture their information so {biz_name} can call back."
+                            f"NOT_AVAILABLE [requested={requested_speech}, no_other_slots_on_date]. "
+                            f"Tell the caller {requested_speech} is not available and there are "
+                            f"no other slots on {date_label}. Ask if another day works, or "
+                            f"capture their information so {biz_name} can call back."
                         )
 
         # ── General availability: return all slots for the day(s) ──

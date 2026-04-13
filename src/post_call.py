@@ -231,6 +231,78 @@ async def run_post_call_pipeline(params: dict):
         lambda: supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
     )
 
+    # ── 8b. Silent hallucination detection (observability only) ──
+    # If the agent verbally confirmed a booking but book_appointment never returned
+    # success, flag it in call_metadata + Sentry. NO owner notification — Layers 1-3
+    # (prompt + tool descriptions + non-parrotable returns) are the prevention; this
+    # step is post-mortem visibility only. Recovery SMS still fires via the existing
+    # NULL-fallback above, which set booking_outcome='not_attempted' for these calls.
+    try:
+        tool_call_log = params.get("tool_call_log", []) or []
+        booked_via_tool = any(
+            entry.get("name") == "book_appointment" and entry.get("success") is True
+            for entry in tool_call_log
+        )
+        if not booked_via_tool:
+            hallucinated_phrases: list[str] = []
+            for turn in transcript_turns:
+                if turn.get("role") not in ("assistant", "agent"):
+                    continue
+                content = turn.get("content", "") or ""
+                for pattern in _HALLUCINATION_PATTERNS:
+                    for match in pattern.finditer(content):
+                        hallucinated_phrases.append(match.group(0).strip())
+
+            if hallucinated_phrases:
+                # Merge into call_metadata JSONB (additive — readers ignore unknown keys).
+                try:
+                    meta_resp = await asyncio.to_thread(
+                        lambda: supabase.table("calls")
+                        .select("call_metadata")
+                        .eq("call_id", call_id)
+                        .single()
+                        .execute()
+                    )
+                    existing_meta = (meta_resp.data or {}).get("call_metadata") or {}
+                    if not isinstance(existing_meta, dict):
+                        existing_meta = {}
+                    existing_meta["hallucination_detected"] = True
+                    existing_meta["hallucinated_phrases"] = hallucinated_phrases[:5]
+                    existing_meta["tool_call_log"] = [
+                        {"name": e.get("name"), "success": e.get("success"),
+                         "result": e.get("result"), "reason": e.get("reason")}
+                        for e in tool_call_log
+                    ]
+                    await asyncio.to_thread(
+                        lambda: supabase.table("calls")
+                        .update({"call_metadata": existing_meta})
+                        .eq("call_id", call_id)
+                        .execute()
+                    )
+                except Exception as meta_err:
+                    print(f"[post-call] Hallucination flag write error (non-fatal): {meta_err}")
+
+                # Sentry: engineering-side monitoring, not customer-facing.
+                try:
+                    import sentry_sdk
+                    sentry_sdk.capture_message(
+                        f"Agent hallucinated booking confirmation: "
+                        f"call_id={call_id} tenant_id={tenant_id} "
+                        f"phrases={hallucinated_phrases[:3]}",
+                        level="warning",
+                    )
+                except Exception:
+                    pass
+
+                print(
+                    f"[post-call] HALLUCINATION DETECTED: call_id={call_id} "
+                    f"phrases={hallucinated_phrases[:3]} "
+                    f"tool_calls={[e.get('name') for e in tool_call_log]}"
+                )
+    except Exception as halluc_err:
+        # Detection must never break the post-call pipeline.
+        print(f"[post-call] Hallucination detector error (non-fatal): {halluc_err}")
+
     # ── 9. Create/merge lead ──
     lead = None
     if call_uuid and duration_seconds >= 15:
@@ -374,6 +446,23 @@ _VIETNAMESE_MARKER = re.compile(
 
 _MALAY_MARKERS = [
     re.compile(r"\b(saya|anda|boleh|tolong|terima kasih|selamat)\b", re.IGNORECASE),
+]
+
+# High-precision phrases the agent only utters legitimately AFTER a successful
+# book_appointment. Used by the silent post-call hallucination detector to flag
+# calls where the model fabricated a confirmation. Patterns are deliberately
+# narrow: they avoid the legitimate filler "let me get that booked in for you"
+# and the address verification "the address is confirmed".
+_HALLUCINATION_PATTERNS = [
+    re.compile(r"appointment is confirmed", re.IGNORECASE),
+    re.compile(r"appointment is booked", re.IGNORECASE),
+    re.compile(r"appointment is (set|scheduled|locked in) for", re.IGNORECASE),
+    re.compile(r"i'?ve (just )?(booked|scheduled|locked) you", re.IGNORECASE),
+    re.compile(r"booking is confirmed", re.IGNORECASE),
+    re.compile(r"(all booked|you'?re booked) (for|in)", re.IGNORECASE),
+    re.compile(r"that'?s booked for", re.IGNORECASE),
+    re.compile(r"see you (tomorrow|today|on \w+day|at \d{1,2})", re.IGNORECASE),
+    re.compile(r"you'?ll receive (a confirmation|an? sms|an? email)", re.IGNORECASE),
 ]
 
 

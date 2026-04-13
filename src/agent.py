@@ -175,6 +175,10 @@ async def entrypoint(ctx: JobContext):
             "sip_participant_identity": sip_participant_identity,
             "call_end_reason": call_end_reason,
             "ctx": ctx,
+            # Audit trail of every successful tool execution this call.
+            # Tools self-append on completion. Forwarded to post_call for
+            # silent hallucination detection (no caller- or owner-facing impact).
+            "_tool_call_log": [],
         }
         tools = create_tools(deps)
 
@@ -273,6 +277,8 @@ async def entrypoint(ctx: JobContext):
                     "booking_succeeded": deps.get("_booking_succeeded", False),
                     "booked_appointment_id": deps.get("_booked_appointment_id"),
                     "booked_caller_name": deps.get("_booked_caller_name"),
+                    # Tool-execution audit trail for silent hallucination detection.
+                    "tool_call_log": deps.get("_tool_call_log", []),
                 })
             except Exception as e:
                 logger.error(f"[agent] Post-call pipeline error: {e}")

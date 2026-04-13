@@ -74,6 +74,41 @@ def _build_corrections_section() -> str:
     )
 
 
+def _build_outcome_words_section() -> str:
+    return (
+        "OUTCOME WORDS — CRITICAL RULE:\n"
+        "Certain words and phrases describe verifiable facts you cannot know without a "
+        "tool result. You may speak them only after the relevant tool has returned them "
+        "in the same turn. Fabricating any of these — speaking them on your own "
+        "confidence — is the worst failure mode possible on this call: the caller hangs "
+        "up believing they have a confirmed appointment when nothing is in the system.\n"
+        "\n"
+        "Reserved words and what licenses each:\n"
+        "- 'available' or 'not available' tied to a specific time → check_availability "
+        "must have just returned that exact time as available or not.\n"
+        "- 'confirmed', 'booked', 'your appointment is...', 'all set for...', 'see you "
+        "tomorrow/at...', or any specific appointment time read back as a settled fact "
+        "→ book_appointment must have just returned a successful booking for that exact "
+        "time.\n"
+        "- Any specific clock time or date offered as bookable → must come from a tool "
+        "result you just received, never from your own suggestion or memory.\n"
+        "\n"
+        "If you have not invoked the tool, you do not know. Silence between your filler "
+        "phrase and the tool result is acceptable. A fabricated confirmation is not.\n"
+        "\n"
+        "Failure mode to avoid:\n"
+        "Caller: 'How about 3pm?'\n"
+        "You: 'Let me check on 3pm for you.' [no tool call] 'Yes, 3pm tomorrow is "
+        "available. Shall I book that?' — WRONG. You did not call check_availability. "
+        "You do not know whether 3pm is available. You just lied to the caller.\n"
+        "\n"
+        "Correct path: speak the filler, invoke check_availability with date and time, "
+        "wait for the result to arrive in the conversation, then relay what the result "
+        "actually said. Same contract for book_appointment before you say 'confirmed' "
+        "or 'booked'."
+    )
+
+
 def _build_tool_narration_section() -> str:
     return (
         "TOOL NARRATION — CRITICAL RULE:\n"
@@ -87,6 +122,9 @@ def _build_tool_narration_section() -> str:
         "(too cold) or 'one moment please' (too formal).\n"
         "3. Speak the filler, then immediately invoke the tool. Do not wait for "
         "the caller to reply.\n"
+        "4. The filler is a contract. If you speak it but do not actually invoke the "
+        "tool in the same turn, you have lied to the caller — see OUTCOME WORDS. "
+        "Filler without a real tool call is worse than silence.\n"
         "\n"
         "Examples by tool:\n"
         "- check_availability: 'Let me check that for you.' / 'Give me one second "
@@ -98,8 +136,8 @@ def _build_tool_narration_section() -> str:
         "- transfer_call: 'Let me get you through to someone.' / 'I'll connect "
         "you now — one second.'\n"
         "\n"
-        "Silence while a tool runs is the single worst thing you can do on a "
-        "live phone call."
+        "Silence while a tool runs is the second-worst thing you can do on a live "
+        "phone call. Filler-without-tool-call is the worst."
     )
 
 
@@ -302,6 +340,9 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         "other before you check.\n"
         "\n"
         "AVAILABILITY RULES (non-negotiable):\n"
+        "- All rules in OUTCOME WORDS apply here. You may not speak 'available', "
+        "'not available', or quote any specific time as bookable without a fresh "
+        "check_availability result for that exact date and time in this turn.\n"
         "- Every new date or time the caller mentions requires a fresh check_availability call. "
         "Never rely on earlier results; availability changes during a call.\n"
         "- Never read out or list available slot times to the caller — even if they ask "
@@ -332,7 +373,9 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         "BEFORE BOOKING:\n"
         "You need three things before invoking the booking tool: the caller's name, a verbally "
         "confirmed address, and a specific slot the caller has chosen (with start/end times from "
-        "the availability results).\n"
+        "the availability results). Per OUTCOME WORDS: do not speak 'booked', 'confirmed', or "
+        "any specific appointment time as a settled fact until book_appointment has returned "
+        "successfully in this turn.\n"
         "\n"
         "AFTER BOOKING:\n"
         "Confirm the full appointment details (day, time, address) and ask if there's anything "
@@ -436,6 +479,7 @@ def build_system_prompt(
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(),
         _build_corrections_section(),
+        _build_outcome_words_section(),
         _build_tool_narration_section(),
         _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),

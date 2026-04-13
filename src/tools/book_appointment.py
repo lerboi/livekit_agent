@@ -131,7 +131,12 @@ def create_book_appointment_tool(deps: dict):
         name="book_appointment",
         description=(
             "Book a confirmed appointment slot. "
-            "Always tell the caller you're booking before calling this tool. "
+            "DO NOT speak the words 'confirmed', 'booked', 'all set', 'see you tomorrow/at...', "
+            "or any specific appointment time as a settled fact before invoking this tool. "
+            "The tool's return is the only authoritative confirmation — fabricating one leaves "
+            "the caller believing they have an appointment that does not exist. "
+            "Always speak a short filler phrase first ('Let me get that booked in for you'), "
+            "then immediately invoke this tool in the same turn. "
             "Only use after: "
             "(1) collecting caller name, street name, unit/apartment number, and postal/zip code, "
             "(2) reading the full address back and receiving verbal confirmation, "
@@ -295,7 +300,20 @@ def create_book_appointment_tool(deps: dict):
                     _send_recovery_sms(deps, tenant, urgency, caller_name)
                 )
 
-            return f"That slot was just taken. The next available time is {next_slot_text}. Would you like me to book that instead?"
+            deps.setdefault("_tool_call_log", []).append({
+                "name": "book_appointment",
+                "success": False,
+                "reason": "slot_taken",
+                "slot_start": slot_start,
+                "slot_end": slot_end,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+
+            return (
+                f"SLOT_TAKEN. Next available time is {next_slot_text}. "
+                f"Tell the caller that the slot was just taken, then offer the next "
+                f"available time as an alternative and ask if they want to book it."
+            )
 
         # Success — compute and cache the confirmation response SYNCHRONOUSLY before
         # any await. A concurrent duplicate invocation (that lost the race to
@@ -307,8 +325,9 @@ def create_book_appointment_tool(deps: dict):
 
         formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
         return_msg = (
-            f"Your appointment is confirmed for {formatted_time}. "
-            "You will receive a confirmation. Is there anything else I can help you with?"
+            f"BOOKED [appointment_id={appointment_id}, time={formatted_time}, "
+            f"address={service_address}]. Tell the caller their appointment is confirmed "
+            f"for {formatted_time}, then ask if there is anything else they need."
         )
 
         deps["_last_booked_slot_key"] = _slot_key
@@ -321,6 +340,16 @@ def create_book_appointment_tool(deps: dict):
         deps["_booking_succeeded"] = True
         deps["_booked_appointment_id"] = appointment_id
         deps["_booked_caller_name"] = caller_name or None
+
+        # Audit trail for post-call hallucination detection.
+        deps.setdefault("_tool_call_log", []).append({
+            "name": "book_appointment",
+            "success": True,
+            "appointment_id": appointment_id,
+            "slot_start": slot_start,
+            "slot_end": slot_end,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
 
         # Now safe to do the awaited follow-up work. Write booking_outcome immediately
         # so it persists even if the caller hangs up during calendar push or SMS.
