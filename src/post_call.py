@@ -213,23 +213,32 @@ async def run_post_call_pipeline(params: dict):
         "high" if triage_result["urgency"] in ("emergency", "urgent") else "standard"
     )
 
-    await asyncio.to_thread(
-        lambda: supabase.table("calls").update({
-            "urgency_classification": triage_result["urgency"],
-            "urgency_confidence": triage_result.get("confidence"),
-            "triage_layer_used": triage_result.get("layer"),
-            "detected_language": detected_language,
-            "language_barrier": language_barrier,
-            "barrier_language": detected_language if language_barrier else None,
-            "suggested_slots": suggested_slots,
-            "notification_priority": notification_priority,
-        }).eq("call_id", call_id).execute()
-    )
+    # Defensive: any failure here must NOT propagate up and skip steps 8b/9/10.
+    # A single failed update should never lose the lead, owner notification, and
+    # hallucination flag for the entire call.
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update({
+                "urgency_classification": triage_result["urgency"],
+                "urgency_confidence": triage_result.get("confidence"),
+                "triage_layer_used": triage_result.get("layer"),
+                "detected_language": detected_language,
+                "language_barrier": language_barrier,
+                "barrier_language": detected_language if language_barrier else None,
+                "suggested_slots": suggested_slots,
+                "notification_priority": notification_priority,
+            }).eq("call_id", call_id).execute()
+        )
+    except Exception as e:
+        print(f"[post-call] Triage update error (non-fatal): {e}")
 
     # Set booking_outcome to not_attempted if still null
-    await asyncio.to_thread(
-        lambda: supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
-    )
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
+        )
+    except Exception as e:
+        print(f"[post-call] booking_outcome NULL fallback error (non-fatal): {e}")
 
     # ── 8b. Silent hallucination detection (observability only) ──
     # If the agent verbally confirmed a booking but book_appointment never returned

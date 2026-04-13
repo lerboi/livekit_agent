@@ -226,10 +226,13 @@ async def entrypoint(ctx: JobContext):
         egress_id = None
         recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"
 
-        async def _on_close_async():
+        async def _on_close_async(reason: str = ""):
             end_timestamp = int(time.time() * 1000)
             duration_sec = round((end_timestamp - start_timestamp) / 1000)
-            logger.info(f"[agent] Session closed: room={call_id} duration={duration_sec}s")
+            logger.info(
+                f"[agent] Session closed: room={call_id} duration={duration_sec}s "
+                f"reason={reason or 'unspecified'}"
+            )
 
             # Ensure DB task completed (call_uuid populated) before post-call
             try:
@@ -241,59 +244,70 @@ async def entrypoint(ctx: JobContext):
                 try:
                     lk = api.LiveKitAPI()
                     await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
-                    # Wait for S3 upload to finish (poll up to 30s)
-                    for _ in range(15):
-                        await asyncio.sleep(2)
-                        try:
-                            info = await lk.egress.list_egress(api.ListEgressRequest(egress_id=egress_id))
-                            if info.items and info.items[0].status in (
-                                api.EgressStatus.EGRESS_COMPLETE,
-                                api.EgressStatus.EGRESS_FAILED,
-                            ):
-                                break
-                        except Exception:
-                            break
                     await lk.aclose()
+                    # Don't poll for S3 upload completion — LiveKit handles the upload
+                    # asynchronously on their infrastructure. recording_storage_path was
+                    # already written to the calls row at egress start, so the dashboard
+                    # finds the file once upload finishes regardless of timing.
+                    # Polling here (previously up to 30s) would consume the 10s
+                    # shutdown_process_timeout budget and SIGKILL the post-call pipeline.
                 except Exception as e:
                     logger.error(f"[agent] Failed to stop egress: {e}")
 
             try:
-                await run_post_call_pipeline({
-                    "supabase": supabase,
-                    "call_id": call_id,
-                    "call_uuid": deps["call_uuid"],
-                    "tenant_id": tenant_id,
-                    "tenant": tenant,
-                    "from_number": from_number,
-                    "to_number": to_number,
-                    "start_timestamp": start_timestamp,
-                    "end_timestamp": end_timestamp,
-                    "transcript_turns": transcript_turns,
-                    "recording_storage_path": recording_path if egress_id else None,
-                    "is_test_call": is_test_call,
-                    "disconnection_reason": call_end_reason[0],
-                    # In-memory truth about what booking tools did during the call,
-                    # used by post-call to reconcile the DB against mid-call races.
-                    "booking_succeeded": deps.get("_booking_succeeded", False),
-                    "booked_appointment_id": deps.get("_booked_appointment_id"),
-                    "booked_caller_name": deps.get("_booked_caller_name"),
-                    # Tool-execution audit trail for silent hallucination detection.
-                    "tool_call_log": deps.get("_tool_call_log", []),
-                })
+                # 8s timeout — safety belt against the SDK's shutdown_process_timeout=10s
+                # (worker.py:209). Better to abort cleanly with partial writes than be
+                # SIGKILLed mid-write by the parent worker.
+                await asyncio.wait_for(
+                    run_post_call_pipeline({
+                        "supabase": supabase,
+                        "call_id": call_id,
+                        "call_uuid": deps["call_uuid"],
+                        "tenant_id": tenant_id,
+                        "tenant": tenant,
+                        "from_number": from_number,
+                        "to_number": to_number,
+                        "start_timestamp": start_timestamp,
+                        "end_timestamp": end_timestamp,
+                        "transcript_turns": transcript_turns,
+                        "recording_storage_path": recording_path if egress_id else None,
+                        "is_test_call": is_test_call,
+                        "disconnection_reason": call_end_reason[0],
+                        # In-memory truth about what booking tools did during the call,
+                        # used by post-call to reconcile the DB against mid-call races.
+                        "booking_succeeded": deps.get("_booking_succeeded", False),
+                        "booked_appointment_id": deps.get("_booked_appointment_id"),
+                        "booked_caller_name": deps.get("_booked_caller_name"),
+                        # Tool-execution audit trail for silent hallucination detection.
+                        "tool_call_log": deps.get("_tool_call_log", []),
+                    }),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"[agent] Post-call pipeline TIMEOUT after 8s — partial writes possible. "
+                    f"callId={call_id}"
+                )
+                sentry_sdk.capture_message(
+                    f"Post-call pipeline timeout: callId={call_id} tenantId={tenant_id}",
+                    level="warning",
+                )
             except Exception as e:
                 logger.error(f"[agent] Post-call pipeline error: {e}")
                 sentry_sdk.capture_exception(e, tags={"callId": call_id, "tenantId": tenant_id, "phase": "post-call"})
 
-        # Strong references to background tasks to prevent garbage collection
-        _background_tasks = set()
-        close_complete = asyncio.Event()
-
-        @session.on("close")
-        def on_close(event):
-            task = asyncio.create_task(_on_close_async())
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
-            task.add_done_callback(lambda _: close_complete.set())
+        # Register post-call as a JobContext shutdown callback.
+        # The SDK awaits all shutdown callbacks inside _run_job_task
+        # (job_proc_lazy_main.py:371-379) BEFORE _monitor_task returns and BEFORE
+        # loop.shutdown_default_executor() runs (proc_client.py:79). This guarantees
+        # asyncio.to_thread() calls inside the post-call pipeline have a live executor.
+        #
+        # Replaces the previous session.on("close") + asyncio.create_task pattern,
+        # which spawned an unowned task that the SDK never awaited — racing the
+        # executor teardown and producing "Executor shutdown has been called" errors
+        # mid-pipeline (lead creation, owner notifications, hallucination detection
+        # were all silently lost).
+        ctx.add_shutdown_callback(_on_close_async)
 
         # ── Launch DB queries as a background task (don't block session start) ──
         # Event signals when session is ready to accept generate_reply() calls
@@ -455,13 +469,12 @@ async def entrypoint(ctx: JobContext):
         sentry_sdk.capture_exception(e)
         raise
 
-    # Keep entrypoint alive until the post-call pipeline completes.
-    # Without this, entrypoint returns immediately after session.start(),
-    # the LiveKit worker considers the job done, and the process exits —
-    # killing the _on_close_async task (post-call pipeline) mid-flight.
-    # The close_complete event is set by the on_close handler's done_callback
-    # after _on_close_async finishes (regardless of success or failure).
-    await close_complete.wait()
+    # Entrypoint returns here. The SDK does NOT await the entrypoint task to
+    # decide when the job is done — it awaits _shutdown_fut (which resolves on
+    # room disconnect or ctx.shutdown()). Post-call work is registered above as
+    # a JobContext shutdown_callback, which the SDK awaits inside _run_job_task
+    # before tearing down the asyncio default executor. This is the canonical
+    # LiveKit Agents 1.5 pattern for post-call cleanup with DB I/O.
 
 
 if __name__ == "__main__":
