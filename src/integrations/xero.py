@@ -237,9 +237,21 @@ async def _get_contacts_by_phone(
         logger.warning("xero: getContacts exception: %s", exc)
         return None
 
+    target_ten = re.sub(r"\D", "", phone_e164)[-10:]
+    if len(target_ten) < 7:
+        return None
     for c in contacts:
         for p in (c.get("Phones") or []):
-            if (p.get("PhoneNumber") or "").strip() == phone_e164:
+            # Xero stores phones three ways: full string in PhoneNumber, split
+            # across PhoneCountryCode + PhoneAreaCode + PhoneNumber, or a mix.
+            # Concatenate all three and compare digits-only (last 10).
+            combined = (
+                (p.get("PhoneCountryCode") or "")
+                + (p.get("PhoneAreaCode") or "")
+                + (p.get("PhoneNumber") or "")
+            )
+            digits = re.sub(r"\D", "", combined)
+            if digits and digits[-10:] == target_ten:
                 return c
     return None
 
