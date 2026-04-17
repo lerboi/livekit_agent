@@ -46,12 +46,25 @@ def _now_ts() -> float:
     return time.time()
 
 
-def _expiry_to_epoch(expiry_iso: Optional[str]) -> float:
-    """Parse ISO8601 timestamp to epoch seconds; 0 if unparseable (forces refresh)."""
-    if not expiry_iso:
+def _expiry_to_epoch(expiry_value) -> float:
+    """Parse accounting_credentials.expiry_date to epoch seconds.
+
+    The Next.js side stores expiry_date as a BIGINT column holding
+    ``Date.now() + expires_in * 1000`` (epoch milliseconds). The Python
+    side may also see ISO 8601 strings if another writer ever changes the
+    schema. Handle both. Returns 0 (forces refresh) on unparseable input.
+    """
+    if expiry_value is None:
         return 0.0
+    if isinstance(expiry_value, (int, float)):
+        return float(expiry_value) / 1000.0
+    s = str(expiry_value).strip()
+    if not s:
+        return 0.0
+    if s.lstrip("-").isdigit():
+        return float(s) / 1000.0
     try:
-        return datetime.fromisoformat(str(expiry_iso).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except Exception:  # noqa: BLE001
         return 0.0
 
