@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 XERO_API_BASE = "https://api.xero.com/api.xro/2.0"
 XERO_TOKEN_URL = "https://identity.xero.com/connect/token"
-HTTP_TIMEOUT_SECONDS = 0.7  # leave 100ms headroom under the 800ms agent budget
+HTTP_TIMEOUT_SECONDS = 1.5  # Xero cold API can exceed 500ms per call
 REFRESH_BUFFER_SECONDS = 300  # refresh if access_token expires in < 5 min
 E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
