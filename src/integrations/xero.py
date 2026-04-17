@@ -253,20 +253,43 @@ async def _get_contacts_by_phone(
         return None
 
     target_ten = re.sub(r"\D", "", phone_e164)[-10:]
+    target_seven = target_ten[-7:]
     if len(target_ten) < 7:
         return None
+
+    # Diagnostic: sample the first few contacts so we can see what Xero stores.
+    sample = []
+    for c in contacts[:5]:
+        name = c.get("Name", "?")
+        phone_shapes = []
+        for p in (c.get("Phones") or []):
+            phone_shapes.append({
+                "type": p.get("PhoneType"),
+                "cc": p.get("PhoneCountryCode"),
+                "ac": p.get("PhoneAreaCode"),
+                "num": p.get("PhoneNumber"),
+            })
+        sample.append({"name": name, "phones": phone_shapes})
+    logger.info(
+        "xero: getContacts returned %d contacts; target_seven=%s; sample=%s",
+        len(contacts), target_seven, sample,
+    )
+
     for c in contacts:
         for p in (c.get("Phones") or []):
             # Xero stores phones three ways: full string in PhoneNumber, split
             # across PhoneCountryCode + PhoneAreaCode + PhoneNumber, or a mix.
-            # Concatenate all three and compare digits-only (last 10).
+            # Concatenate all three and compare digits-only.
             combined = (
                 (p.get("PhoneCountryCode") or "")
                 + (p.get("PhoneAreaCode") or "")
                 + (p.get("PhoneNumber") or "")
             )
             digits = re.sub(r"\D", "", combined)
-            if digits and digits[-10:] == target_ten:
+            if not digits:
+                continue
+            # Try last-10 (US / full-E.164-stored) OR last-7 (SG local / subscriber-only).
+            if digits[-10:] == target_ten or digits[-7:] == target_seven:
                 return c
     return None
 
