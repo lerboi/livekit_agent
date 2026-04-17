@@ -4,6 +4,7 @@ Same pattern as createTools(deps) in src/tools/index.js.
 """
 
 from .check_caller_history import create_check_caller_history_tool
+from .check_customer_account import create_check_customer_account_tool
 from .capture_lead import create_capture_lead_tool
 from .end_call import create_end_call_tool
 from .transfer_call import create_transfer_call_tool
@@ -23,6 +24,7 @@ def create_tools(deps: dict) -> list:
         create_transfer_call_tool(deps),
         create_capture_lead_tool(deps),
         create_check_caller_history_tool(deps),
+        create_check_customer_account_tool(deps),
         create_end_call_tool(deps),
     ]
 

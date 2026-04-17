@@ -260,6 +260,33 @@ def _build_repeat_caller_section(onboarding_complete: bool) -> str:
     return ""
 
 
+def _build_customer_account_section(customer_context: dict | None) -> str:
+    """Phase 55 D-08/D-10: inject Xero caller-account context as a STATE+DIRECTIVE block.
+
+    Omitted entirely when customer_context is None (D-11 — uniform with cold call).
+    """
+    if customer_context is None:
+        return ""
+
+    # Local import avoids circular import at module load
+    from .tools.check_customer_account import format_customer_context_state
+
+    state_directive = format_customer_context_state(customer_context)
+
+    return (
+        "CALLER ACCOUNT CONTEXT:\n"
+        f"{state_directive}\n"
+        "\n"
+        "CRITICAL RULE: Treat the STATE above as silent background knowledge. "
+        "NEVER volunteer the contact name, outstanding balance, invoice details, or payment history. "
+        "Ask every question and gather every fact as if you have no records, UNLESS the caller "
+        "explicitly asks about their account, bill, or recent work. If they do ask, follow the "
+        "DIRECTIVE precisely. If they ask 'do you have my info?' or similar, confirm presence "
+        "WITHOUT specifics: say 'we have your contact on file' and offer to help with what they need. "
+        "Invoke the check_customer_account tool only when the caller explicitly asks for account specifics."
+    )
+
+
 def _build_info_gathering_section(t, postal_label: str) -> str:
     return (
         "INFORMATION GATHERING:\n"
@@ -443,6 +470,7 @@ def build_system_prompt(
     country: str = "US",
     working_hours: dict | None = None,
     tenant_timezone: str = "America/Chicago",
+    customer_context: dict | None = None,
 ) -> str:
     """
     Build the full system prompt for the Gemini Live voice agent.
@@ -485,6 +513,7 @@ def build_system_prompt(
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t),
         _build_repeat_caller_section(onboarding_complete),
+        _build_customer_account_section(customer_context),
         _build_info_gathering_section(t, postal_label),
         _build_intake_questions_section(intake_questions),
         _build_booking_section(business_name, onboarding_complete, postal_label),
