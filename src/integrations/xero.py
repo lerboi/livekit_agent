@@ -354,8 +354,12 @@ async def fetch_xero_customer_by_phone(
         if not contact_id:
             return None
 
-        outstanding_balance = await _get_outstanding_balance(client, cred, contact_id)
-        all_recent = await _get_recent_invoices(client, cred, contact_id)
+        # Run the two independent invoice queries concurrently — cuts latency
+        # from ~2× per-call to ~1× per-call on Xero's cold API.
+        outstanding_balance, all_recent = await asyncio.gather(
+            _get_outstanding_balance(client, cred, contact_id),
+            _get_recent_invoices(client, cred, contact_id),
+        )
 
     last_invoices = [
         {

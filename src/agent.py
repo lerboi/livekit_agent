@@ -148,8 +148,11 @@ async def entrypoint(ctx: JobContext):
         # to 800ms; on timeout/error returns None and the block is omitted (D-11).
         customer_context = None
         if tenant_id:
+            # 2.5s budget covers typical refresh + getContacts + 2x getInvoices
+            # sequentially on Xero's cold API (~300-500ms each). On timeout,
+            # customer_context stays None and the call proceeds as cold.
             customer_context = await fetch_xero_context_bounded(
-                tenant_id, from_number, timeout_seconds=0.8
+                tenant_id, from_number, timeout_seconds=2.5
             )
 
         system_prompt = build_system_prompt(
