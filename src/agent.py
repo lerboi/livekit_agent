@@ -37,6 +37,7 @@ from .tools import create_tools
 from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
+from .integrations.xero import fetch_xero_context_bounded
 from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
@@ -352,7 +353,26 @@ async def entrypoint(ctx: JobContext):
                 .execute()
             )
 
-            results = await asyncio.gather(sub_task, intake_task, call_task, return_exceptions=True)
+            # P55 D-04: 800ms-bounded Xero caller-context fetch. Runs in parallel
+            # with the 3 DB tasks; on timeout/exception, customer_context becomes
+            # None (prompt block omitted per D-11). Sentry capture inside the helper.
+            xero_context_task = asyncio.create_task(
+                fetch_xero_context_bounded(tenant_id, from_number, timeout_seconds=0.8)
+            )
+
+            results = await asyncio.gather(
+                sub_task, intake_task, call_task, xero_context_task,
+                return_exceptions=True,
+            )
+
+            # P55: stash customer_context on deps so Plan 07's prompt builder
+            # + check_customer_account tool can read it. None = no Xero match /
+            # disconnected / timeout / error (all cases indistinguishable downstream).
+            xero_result = results[3]
+            if isinstance(xero_result, Exception):
+                deps["customer_context"] = None
+            else:
+                deps["customer_context"] = xero_result
 
             # Subscription check — disconnect if blocked
             if not isinstance(results[0], Exception):
