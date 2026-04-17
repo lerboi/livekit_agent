@@ -230,18 +230,20 @@ async def _get_contacts_by_phone(
     cred: dict,
     phone_e164: str,
 ) -> Optional[dict]:
-    """Returns the Xero contact whose E.164 phone exactly matches, or None.
+    """Returns the Xero contact whose phone digits-match, or None.
 
-    Uses Phones[0].PhoneNumber.Contains(<lastTen>) as candidate filter, then
-    enforces E.164 exact equality across all phone slots in Python (D-01).
+    Phone storage varies wildly across Xero orgs and countries — full E.164,
+    8-digit SG local, 10-digit US local, compound PhoneCountryCode/AreaCode/
+    Number fields, formatted strings with spaces/dashes. An OData Contains
+    filter based on any single canonical form misses everything else. Instead
+    we fetch Xero's default page of contacts (up to 100) and match by digits
+    in Python. For orgs with >100 contacts this would need pagination;
+    deferred to P58 if hit in practice.
     """
-    last_ten = re.sub(r"\D", "", phone_e164)[-10:]
-    where = f'Phones[0].PhoneNumber.Contains("{last_ten}")'
     try:
         resp = await client.get(
             f"{XERO_API_BASE}/Contacts",
             headers=_xero_headers(cred["access_token"], cred["xero_tenant_id"]),
-            params={"where": where},
         )
         if getattr(resp, "status_code", 500) != 200:
             return None
