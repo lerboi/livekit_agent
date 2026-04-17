@@ -333,15 +333,21 @@ async def fetch_xero_customer_by_phone(
 
     cred = await _load_credentials(tenant_id)
     if not cred or not cred.get("xero_tenant_id"):
+        logger.info("xero: no credentials or xero_tenant_id for tenant=%s", tenant_id)
         return None
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
         cred = await _refresh_if_needed(client, cred)
         if not cred:
+            logger.info("xero: refresh returned None (failure) for tenant=%s", tenant_id)
             return None
 
         contact = await _get_contacts_by_phone(client, cred, phone_e164)
         if not contact:
+            logger.info(
+                "xero: getContacts found no exact-phone match for tenant=%s xero_org=%s",
+                tenant_id, cred.get("xero_tenant_id"),
+            )
             return None
 
         contact_id = contact.get("ContactID")
@@ -400,10 +406,24 @@ async def fetch_xero_context_bounded(
     import hashlib
 
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             fetch_xero_customer_by_phone(tenant_id, phone_e164),
             timeout=timeout_seconds,
         )
+        if result is None:
+            logger.info(
+                "xero_context: no match for caller (tenant=%s phone_hash=%s)",
+                tenant_id,
+                hashlib.sha256((phone_e164 or "").encode()).hexdigest()[:8],
+            )
+        else:
+            logger.info(
+                "xero_context: fetched (contact=%s outstanding=%s invoices=%d)",
+                (result.get("contact") or {}).get("name"),
+                result.get("outstanding_balance"),
+                len(result.get("last_invoices") or []),
+            )
+        return result
     except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
         try:
             import sentry_sdk
@@ -421,7 +441,8 @@ async def fetch_xero_context_bounded(
         except Exception:  # noqa: BLE001
             pass  # telemetry must never crash the caller
         logger.info(
-            "xero_context: skipped (%s)",
+            "xero_context: skipped (%s: %s)",
             "timeout" if isinstance(exc, asyncio.TimeoutError) else "error",
+            exc,
         )
         return None
