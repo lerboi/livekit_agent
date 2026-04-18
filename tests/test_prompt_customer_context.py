@@ -1,43 +1,67 @@
-"""Tests for prompt.py customer_context block injection (Phase 55 Plan 07)."""
+"""Tests for prompt.py customer_context block injection (Phase 56 Plan 06).
+
+Supersedes the P55 Xero-only tests — the prompt block now renders the merged
+Jobber+Xero dict per CONTEXT D-09 with (Jobber)/(Xero) source annotations.
+"""
 from src.prompt import build_system_prompt
 
 
 def test_no_customer_context_omits_block():
     prompt = build_system_prompt("en", business_name="Acme", customer_context=None)
-    assert "CALLER ACCOUNT CONTEXT" not in prompt
+    assert "CRITICAL RULE — CUSTOMER CONTEXT" not in prompt
     assert "STATE:" not in prompt  # no leakage from any other section
 
 
-def test_no_match_customer_context_injects_locked_string():
-    # ctx present but no contact — tool returns no_xero_contact_for_phone.
-    # The prompt block SHOULD still be emitted so the LLM knows "treat as cold".
-    prompt = build_system_prompt(
-        "en", business_name="Acme", customer_context={"contact": None},
-    )
-    assert "CALLER ACCOUNT CONTEXT" in prompt
-    assert "STATE: no_xero_contact_for_phone" in prompt
-    assert "CRITICAL RULE: Treat the STATE above as silent" in prompt
-
-
-def test_customer_context_injects_block_with_critical_rule():
+def test_jobber_only_context_renders_with_source():
     ctx = {
-        "contact": {"name": "John Smith"},
-        "outstanding_balance": 100.0,
-        "last_invoices": [
-            {"invoice_number": "INV-1", "date": "2026-04-10", "total": 100,
-             "amount_due": 100, "status": "AUTHORISED"},
+        "client": {"id": "j1", "name": "John", "email": "j@e.com"},
+        "recentJobs": [
+            {"jobNumber": "JBN-204", "title": "AC install", "status": "upcoming",
+             "nextVisitDate": "2026-04-20"},
         ],
-        "last_payment_date": None,
+        "lastVisitDate": "2026-04-15",
+        "_sources": {
+            "client": "Jobber", "recentJobs": "Jobber", "lastVisitDate": "Jobber",
+        },
     }
     prompt = build_system_prompt("en", business_name="Acme", customer_context=ctx)
-    assert "CALLER ACCOUNT CONTEXT" in prompt
-    assert "STATE: contact=John Smith" in prompt
-    assert "CRITICAL RULE: Treat the STATE above as silent" in prompt
-    assert "NEVER volunteer the contact name" in prompt
+    assert "CRITICAL RULE — CUSTOMER CONTEXT" in prompt
+    assert "STATE:" in prompt
+    assert "John" in prompt
+    assert "(Jobber)" in prompt
+    assert "JBN-204" in prompt
+    # Xero-only fields omitted when Xero missed
+    assert "outstanding_balance" not in prompt
+    assert "last_payment=" not in prompt
+    assert "DIRECTIVE:" in prompt
 
 
-def test_customer_context_block_contains_tool_hint():
-    ctx = {"contact": {"name": "X"}, "outstanding_balance": 0,
-           "last_invoices": [], "last_payment_date": None}
+def test_merged_context_renders_mixed_sources():
+    ctx = {
+        "client": {"name": "John"},
+        "recentJobs": [
+            {"jobNumber": "J-1", "title": "AC", "status": "upcoming",
+             "nextVisitDate": "2026-04-20"},
+        ],
+        "lastVisitDate": "2026-04-15",
+        "outstandingBalance": 847.25,
+        "lastInvoices": [{"invoice_number": "X-1"}, {"invoice_number": "X-2"}],
+        "lastPaymentDate": "2026-03-15",
+        "_sources": {
+            "client": "Jobber", "recentJobs": "Jobber", "lastVisitDate": "Jobber",
+            "outstandingBalance": "Xero", "lastInvoices": "Xero", "lastPaymentDate": "Xero",
+        },
+    }
     prompt = build_system_prompt("en", business_name="Acme", customer_context=ctx)
-    assert "check_customer_account" in prompt
+    assert "(Jobber)" in prompt
+    assert "(Xero)" in prompt
+    assert "847.25" in prompt or "847" in prompt
+    assert "2026-03-15" in prompt
+
+
+def test_critical_rule_phrasing_locked():
+    ctx = {"client": {"name": "X"}, "_sources": {"client": "Jobber"}}
+    prompt = build_system_prompt("en", business_name="Acme", customer_context=ctx)
+    # Anti-hallucination phrasing must be retained verbatim per D-09
+    assert "Never volunteer" in prompt
+    assert 'do you have my info' in prompt.lower()
