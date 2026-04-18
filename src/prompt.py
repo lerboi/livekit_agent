@@ -261,11 +261,14 @@ def _build_repeat_caller_section(onboarding_complete: bool) -> str:
 
 
 def _build_customer_account_section(customer_context: dict | None) -> str:
-    """Phase 55 D-08/D-10: inject Xero caller-account context as a STATE+DIRECTIVE block.
+    """Phase 56 D-08/D-09/D-10: inject MERGED Jobber+Xero caller-account context.
 
-    Omitted entirely when customer_context is None (D-11 — uniform with cold call).
+    Block is omitted entirely when customer_context is None (D-11 — both
+    providers missed). When present, renders STATE with per-field (Jobber)/
+    (Xero) source annotations per D-08 via the merged dict's `_sources` map.
+    Absent fields are omitted from STATE, never rendered as null.
     """
-    if customer_context is None:
+    if not customer_context:
         return ""
 
     # Local import avoids circular import at module load
@@ -274,16 +277,18 @@ def _build_customer_account_section(customer_context: dict | None) -> str:
     state_directive = format_customer_context_state(customer_context)
 
     return (
-        "CALLER ACCOUNT CONTEXT:\n"
+        "CRITICAL RULE — CUSTOMER CONTEXT:\n"
+        "The fields below come from the tenant's CRM/accounting systems. Do not speak\n"
+        "specific figures, invoice numbers, job numbers, visit dates, or amounts\n"
+        "unless the caller explicitly asks about their account, bill, or recent work.\n"
+        "Never volunteer. Never say \"confirmed,\" \"on file,\" or \"verified\" tied to\n"
+        "these fields. If asked \"do you have my info?\" acknowledge presence without\n"
+        "specifics.\n"
+        "\n"
         f"{state_directive}\n"
         "\n"
-        "CRITICAL RULE: Treat the STATE above as silent background knowledge. "
-        "NEVER volunteer the contact name, outstanding balance, invoice details, or payment history. "
-        "Ask every question and gather every fact as if you have no records, UNLESS the caller "
-        "explicitly asks about their account, bill, or recent work. If they do ask, follow the "
-        "DIRECTIVE precisely. If they ask 'do you have my info?' or similar, confirm presence "
-        "WITHOUT specifics: say 'we have your contact on file' and offer to help with what they need. "
-        "Invoke the check_customer_account tool only when the caller explicitly asks for account specifics."
+        "Invoke the check_customer_account tool only when the caller explicitly asks for "
+        "account specifics (balance, bill, recent work)."
     )
 
 
