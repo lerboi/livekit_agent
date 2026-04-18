@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 JOBBER_GRAPHQL_URL = "https://api.getjobber.com/api/graphql"
 JOBBER_TOKEN_URL = "https://api.getjobber.com/api/oauth/token"
-JOBBER_API_VERSION = "2024-04-01"  # keep in sync with Next.js Plan 01
+JOBBER_API_VERSION = "2025-04-16"  # keep in sync with Next.js Plan 01
 DEFAULT_PHONE_REGION = "US"
 E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
