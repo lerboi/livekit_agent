@@ -205,11 +205,27 @@ async def entrypoint(ctx: JobContext):
         ai_voice = tenant.get("ai_voice") if tenant else None
         voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "Kore")
 
+        # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
+        # calls on breaths or minor overlap (backlog 999.2). LOW sensitivity +
+        # larger prefix/silence padding tracks upstream guidance for
+        # livekit/agents#4441 ("Spurious Server VAD events cause unavoidable
+        # tool cancellation"). Barge-in still works — the thresholds just
+        # require deliberate caller speech instead of firing on breath/noise.
+        realtime_input_config = genai_types.RealtimeInputConfig(
+            automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
+                end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+                prefix_padding_ms=400,
+                silence_duration_ms=1000,
+            ),
+        )
+
         model = google.realtime.RealtimeModel(
             model="gemini-3.1-flash-live-preview",
             voice=voice_name,
             temperature=0.3,
             instructions=system_prompt,
+            realtime_input_config=realtime_input_config,
             thinking_config=genai_types.ThinkingConfig(
                 thinking_level="minimal",
                 include_thoughts=False,

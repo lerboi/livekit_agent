@@ -24,6 +24,31 @@ from ..utils import (
 logger = logging.getLogger(__name__)
 
 
+# DB constraint `appointments_urgency_check` only accepts these three values.
+# Gemini has been observed passing freeform strings (e.g. "high"), which causes
+# atomic_book_slot to fail with a CHECK constraint violation (backlog 999.1).
+_ALLOWED_URGENCY = {"emergency", "urgent", "routine"}
+_URGENCY_ALIASES = {
+    "high": "urgent",
+    "medium": "urgent",
+    "normal": "routine",
+    "low": "routine",
+    "standard": "routine",
+    "critical": "emergency",
+    "immediate": "emergency",
+    "asap": "emergency",
+}
+
+
+def _normalize_urgency(value: str | None) -> str:
+    if not value:
+        return "routine"
+    v = value.strip().lower()
+    if v in _ALLOWED_URGENCY:
+        return v
+    return _URGENCY_ALIASES.get(v, "routine")
+
+
 def _format_date_for_sms(iso_str: str, tenant_timezone: str) -> str:
     """Format ISO datetime to 'Tuesday, March 4th' for SMS."""
     if iso_str.endswith("Z"):
@@ -142,7 +167,9 @@ def create_book_appointment_tool(deps: dict):
             "(2) reading the full address back and receiving verbal confirmation, "
             "(3) the caller has selected a slot from the availability results. "
             "Pass unit_number as empty string only if the caller explicitly confirmed there is no unit. "
-            "Do NOT ask the caller about urgency -- infer it from the conversation."
+            "Do NOT ask the caller about urgency -- infer it from the conversation. "
+            "urgency MUST be exactly one of: 'emergency', 'urgent', 'routine'. "
+            "Never pass any other value (e.g. 'high', 'low', 'medium'); default to 'routine' if unsure."
         ),
     )
     async def book_appointment(
@@ -193,6 +220,18 @@ def create_book_appointment_tool(deps: dict):
         tenant = tenant_result.data if tenant_result.data else None
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
 
+        # Normalize urgency to a DB-constraint-valid value. Gemini has been observed
+        # passing freeform strings like "high" which violate appointments_urgency_check
+        # (backlog 999.1). Defense-in-depth alongside the tool-description enumeration.
+        normalized_urgency = _normalize_urgency(urgency)
+        if normalized_urgency != (urgency or "routine"):
+            logger.info(
+                "[agent] book_appointment: normalized urgency %r -> %r for call=%s",
+                urgency,
+                normalized_urgency,
+                deps.get("call_id"),
+            )
+
         # Attempt atomic slot booking
         try:
             result = await atomic_book_slot(
@@ -204,7 +243,7 @@ def create_book_appointment_tool(deps: dict):
                 address=service_address,
                 caller_name=caller_name or "Caller",
                 caller_phone=deps.get("from_number", ""),
-                urgency=urgency or "routine",
+                urgency=normalized_urgency,
                 zone_id=None,
                 postal_code=postal_code or None,
                 street_name=street_name or None,
@@ -297,7 +336,7 @@ def create_book_appointment_tool(deps: dict):
             if not deps.get("_recovery_sms_fired"):
                 deps["_recovery_sms_fired"] = True
                 asyncio.create_task(
-                    _send_recovery_sms(deps, tenant, urgency, caller_name)
+                    _send_recovery_sms(deps, tenant, normalized_urgency, caller_name)
                 )
 
             deps.setdefault("_tool_call_log", []).append({
