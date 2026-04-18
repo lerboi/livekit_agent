@@ -38,6 +38,7 @@ from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
 from .integrations.xero import fetch_xero_context_bounded
+from .lib.customer_context import fetch_merged_customer_context_bounded
 from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
@@ -143,15 +144,15 @@ async def entrypoint(ctx: JobContext):
         # ── Build system prompt immediately (intake questions injected later) ──
         start_timestamp = int(time.time() * 1000)
 
-        # P55 D-08: fetch Xero caller-context BEFORE build_system_prompt so the
-        # STATE+DIRECTIVE block is part of the initial system message. Bounded
-        # to 800ms; on timeout/error returns None and the block is omitted (D-11).
+        # P56 D-06/D-08: fetch MERGED Jobber+Xero caller-context BEFORE
+        # build_system_prompt so the STATE+DIRECTIVE block is part of the
+        # initial system message. Both providers race CONCURRENTLY within the
+        # 2.5s budget; on timeout/error for either, that half silent-skips
+        # (Sentry-logged with hashed phone, not raw PII). On BOTH-miss the
+        # block is omitted entirely (D-11).
         customer_context = None
         if tenant_id:
-            # 2.5s budget covers typical refresh + getContacts + 2x getInvoices
-            # sequentially on Xero's cold API (~300-500ms each). On timeout,
-            # customer_context stays None and the call proceeds as cold.
-            customer_context = await fetch_xero_context_bounded(
+            customer_context = await fetch_merged_customer_context_bounded(
                 tenant_id, from_number, timeout_seconds=2.5
             )
 
@@ -193,9 +194,10 @@ async def entrypoint(ctx: JobContext):
             # Tools self-append on completion. Forwarded to post_call for
             # silent hallucination detection (no caller- or owner-facing impact).
             "_tool_call_log": [],
-            # P55: Xero caller-context (pre-fetched above, bounded to 800ms).
-            # None means no match / disconnected / timeout — check_customer_account
-            # tool returns the locked no_xero_contact_for_phone string in that case.
+            # P56: merged Jobber+Xero caller-context (pre-fetched above,
+            # concurrent per-provider 2.5s budget). None means BOTH providers
+            # missed / timed out — check_customer_account tool returns the
+            # locked no_customer_match_for_phone string in that case.
             "customer_context": customer_context,
         }
         tools = create_tools(deps)
