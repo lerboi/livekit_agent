@@ -105,8 +105,10 @@ def create_check_availability_tool(deps: dict):
 
         if not tenant_id:
             return (
-                "I was unable to check availability right now. "
-                "Let me take your information and someone will call you back to schedule."
+                "STATE:availability_lookup_failed reason=no_tenant"
+                " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
+                " caller back; do not retry this lookup more than once in this call. Do not"
+                " repeat this message text on-air."
             )
 
         # Fetch tenant config
@@ -122,8 +124,10 @@ def create_check_availability_tool(deps: dict):
         except Exception as e:
             logger.error("[agent] check_availability: tenant config fetch failed: %s", e)
             return (
-                "I'm having trouble checking availability right now. "
-                "Let me take your information and someone will call you back to schedule."
+                "STATE:availability_lookup_failed reason=tenant_config_error"
+                " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
+                " caller back; do not retry this lookup more than once in this call. Do not"
+                " repeat this message text on-air."
             )
 
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
@@ -173,8 +177,10 @@ def create_check_availability_tool(deps: dict):
         except Exception as e:
             logger.error("[agent] check_availability: scheduling data fetch failed: %s", e)
             return (
-                "I'm having trouble checking availability right now. "
-                "Let me take your information and someone will call you back to schedule."
+                "STATE:availability_lookup_failed reason=scheduling_data_error"
+                " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
+                " caller back; do not retry this lookup more than once in this call. Do not"
+                " repeat this message text on-air."
             )
 
         # Determine which dates to check
@@ -183,8 +189,10 @@ def create_check_availability_tool(deps: dict):
         if date:
             if date < tenant_today:
                 return (
-                    f"That date has already passed. "
-                    f"Could you let me know a date from today ({tenant_today}) onwards?"
+                    f"STATE:date_in_past requested_date={date} tenant_today={tenant_today}"
+                    " | DIRECTIVE:ask the caller for a date from today onward; do not read the"
+                    " requested date back; do not fabricate times. Do not repeat this message"
+                    " text on-air."
                 )
             dates_to_check = [date]
         else:
@@ -218,8 +226,11 @@ def create_check_availability_tool(deps: dict):
                 if requested_utc < min_booking_time and date == tenant_today:
                     requested_speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
                     return (
-                        f"{requested_speech} is too soon — appointments need at least one hour's notice. "
-                        f"Ask the caller for a later time today, or check another day."
+                        f"STATE:requested_time_too_soon requested={requested_speech}"
+                        " min_notice_hours=1"
+                        " | DIRECTIVE:tell the caller that time is too soon (appointments need"
+                        " at least one hour's notice); ask for a later time today or another"
+                        " day; do not fabricate times. Do not repeat this message text on-air."
                     )
                 requested_end = requested_utc + timedelta(minutes=slot_duration)
 
@@ -249,10 +260,13 @@ def create_check_availability_tool(deps: dict):
                         "ts": datetime.now(timezone.utc).isoformat(),
                     })
                     return (
-                        f"AVAILABLE [start={matched_slot['start']}, end={matched_slot['end']}, "
-                        f"formatted={speech_text}]. Tell the caller {speech_text} is available, "
-                        f"then ask if they want to book it. Use the start/end values above when "
-                        f"invoking book_appointment."
+                        f"STATE:slot_available start={matched_slot['start']} end={matched_slot['end']}"
+                        f" speech={speech_text}"
+                        " | DIRECTIVE:tell the caller the requested time is available, then ask"
+                        " if they want to book it; do not read the full slots list out loud; do"
+                        " not fabricate times outside this slot; use the exact start/end values"
+                        " above when invoking book_appointment. Do not repeat this message text"
+                        " on-air."
                     )
                 else:
                     # Not available — find the closest alternatives
@@ -285,11 +299,14 @@ def create_check_availability_tool(deps: dict):
                             "ts": datetime.now(timezone.utc).isoformat(),
                         })
                         return (
-                            f"NOT_AVAILABLE [requested={requested_speech}]. "
-                            f"Alternatives on {date_label}:\n{alts_text}\n\n"
-                            f"Tell the caller {requested_speech} is not available, then offer "
-                            f"one or two of these alternatives. Use the start/end values when "
-                            f"invoking book_appointment."
+                            f"STATE:slot_not_available requested={requested_speech}"
+                            f" alternatives_count={len(closest)} date_label={date_label}"
+                            f"\nALTERNATIVES:\n{alts_text}\n"
+                            " | DIRECTIVE:tell the caller the requested time is not available,"
+                            " then offer one or two of the alternatives above; do not read the"
+                            " full alternatives list out loud; do not fabricate times outside"
+                            " these slots; use the exact start/end values above when invoking"
+                            " book_appointment. Do not repeat this message text on-air."
                         )
                     else:
                         biz_name = (tenant.get("business_name") if tenant else None) or "the team"
@@ -302,10 +319,12 @@ def create_check_availability_tool(deps: dict):
                             "ts": datetime.now(timezone.utc).isoformat(),
                         })
                         return (
-                            f"NOT_AVAILABLE [requested={requested_speech}, no_other_slots_on_date]. "
-                            f"Tell the caller {requested_speech} is not available and there are "
-                            f"no other slots on {date_label}. Ask if another day works, or "
-                            f"capture their information so {biz_name} can call back."
+                            f"STATE:no_slots_available requested={requested_speech}"
+                            f" date_label={date_label} business_name={biz_name}"
+                            " | DIRECTIVE:tell the caller the requested time is not available"
+                            " and nothing else is open that day; ask if another day works, or"
+                            " offer capture_lead so the business can call back; do not fabricate"
+                            " times. Do not repeat this message text on-air."
                         )
 
         # ── General availability: return all slots for the day(s) ──
@@ -316,9 +335,11 @@ def create_check_availability_tool(deps: dict):
                 date_label = "the next few days"
             biz_name = (tenant.get("business_name") if tenant else None) or "the team"
             return (
-                f"No available slots for {date_label}. "
-                f"Ask the caller if another date works, or capture their information "
-                f"so {biz_name} can call back to schedule."
+                f"STATE:no_slots_available date_label={date_label}"
+                f" business_name={biz_name}"
+                " | DIRECTIVE:tell the caller nothing is open in that window; offer to check"
+                " another date, or offer capture_lead so the business can call back; do not"
+                " fabricate times. Do not repeat this message text on-air."
             )
 
         # Return a clean confirmation without any specific times.
@@ -331,14 +352,17 @@ def create_check_availability_tool(deps: dict):
             date_label = "the next few days"
 
         return (
-            f"There is availability on {date_label}. You have NOT verified any specific slot "
-            f"yet — the caller must name a concrete time (like '2 o'clock' or 'around 10 in "
-            f"the morning') before you can confirm anything is bookable. If the caller only "
-            f"gave a vague window like 'afternoon' or 'morning,' ask them to narrow it to a "
-            f"specific hour. Then call this tool again with both the date and their preferred "
-            f"time to verify that exact slot. Do not mention or imply any specific times to "
-            f"the caller at this stage — not the earliest, not the latest, not anything in "
-            f"between."
+            f"STATE:slots_available_unverified date_label={date_label}"
+            f" slot_count={len(all_slots)}"
+            " | DIRECTIVE:the day has availability but no specific slot is verified yet; ask"
+            " the caller to name a concrete time (like '2 o'clock' or 'around 10 in the"
+            " morning') before confirming anything is bookable; if the caller gave a vague"
+            " window like 'afternoon' or 'morning,' ask them to narrow it to a specific hour;"
+            " then call this tool again with both the date and the preferred time to verify"
+            " that exact slot; do not read the full slots list out loud; do not fabricate"
+            " times; do not mention or imply any specific times to the caller at this stage"
+            " — not the earliest, not the latest, not anything in between. Do not repeat this"
+            " message text on-air."
         )
 
     return check_availability

@@ -37,7 +37,12 @@ def create_transfer_call_tool(deps: dict):
         supabase = deps["supabase"]
 
         if not owner_phone:
-            return "transfer_unavailable"
+            return (
+                "STATE:transfer_unavailable"
+                " | DIRECTIVE:tell the caller nobody is available to take the call right now; offer"
+                " to book an appointment or take a callback via capture_lead. Do not repeat this"
+                " message text on-air."
+            )
 
         # Write exception_reason to calls record
         exception_reason = reason or (
@@ -74,10 +79,20 @@ def create_transfer_call_tool(deps: dict):
                 )
             )
             await lk.aclose()
-            return "transfer_initiated"
+            return (
+                "STATE:transfer_initiated"
+                " | DIRECTIVE:tell the caller you are connecting them now; keep the utterance"
+                " short (one sentence); do not say you are hanging up. Do not repeat this"
+                " message text on-air."
+            )
 
         except Exception as err:
             logger.error("[agent] Transfer failed: %s", str(err))
-            return "transfer_failed"
+            return (
+                "STATE:transfer_failed reason=sip_error"
+                " | DIRECTIVE:apologize briefly; offer to book an appointment via"
+                " check_availability/book_appointment or take a callback via capture_lead; do"
+                " not retry the transfer in this call. Do not repeat this message text on-air."
+            )
 
     return transfer_call

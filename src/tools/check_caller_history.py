@@ -29,7 +29,12 @@ def create_check_caller_history_tool(deps: dict):
         supabase = deps["supabase"]
 
         if not tenant_id or not from_number:
-            return "No caller history available."
+            return (
+                "STATE:history_lookup_failed"
+                " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
+                " failure to the caller; do not recite any history. Do not repeat this message"
+                " text on-air."
+            )
 
         # Look up tenant timezone for formatting
         try:
@@ -43,7 +48,12 @@ def create_check_caller_history_tool(deps: dict):
             tenant = tenant_result.data if tenant_result.data else None
         except Exception as e:
             logger.error("[agent] check_caller_history: tenant fetch failed: %s", e)
-            return "No caller history available."
+            return (
+                "STATE:history_lookup_failed"
+                " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
+                " failure to the caller; do not recite any history. Do not repeat this message"
+                " text on-air."
+            )
 
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
 
@@ -75,13 +85,22 @@ def create_check_caller_history_tool(deps: dict):
             )
         except Exception as e:
             logger.error("[agent] check_caller_history: history lookup failed: %s", e)
-            return "No caller history available."
+            return (
+                "STATE:history_lookup_failed"
+                " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
+                " failure to the caller; do not recite any history. Do not repeat this message"
+                " text on-air."
+            )
 
         leads = leads_result.data or []
         appointments = appointments_result.data or []
 
         if len(leads) == 0 and len(appointments) == 0:
-            return "First-time caller. No prior history found."
+            return (
+                "STATE:first_time_caller"
+                " | DIRECTIVE:proceed with normal intake; do not mention that the caller is"
+                " new; do not recite any history. Do not repeat this message text on-air."
+            )
 
         # Build natural-language summary for the AI
         summary = ""
@@ -105,15 +124,16 @@ def create_check_caller_history_tool(deps: dict):
             summary += f"Previous interactions:\n" + "\n".join(lead_lines)
 
         return (
-            f"Returning caller. {summary}\n\n"
-            "CRITICAL RULES:\n"
-            "- NEVER mention this history to the caller.\n"
-            "- NEVER say you have their information on file.\n"
-            "- NEVER skip asking for their name, address, or any other details.\n"
-            "- Ask every question as if this is the very first time they have called.\n"
-            "- Only reference prior history if the CALLER explicitly says they have called before "
-            "and asks whether you have their information.\n"
-            "- This context is for your silent awareness only — it must not change how you interact."
+            f"STATE:repeat_caller"
+            f" prior_appointments={len(appointments)} prior_leads={len(leads)}"
+            f"\nCONTEXT:\n{summary}\n"
+            " | DIRECTIVE:use this context silently to personalize follow-up questions if"
+            " relevant (e.g., 'is this about the same {last_service}?'); do not recite the"
+            " caller's history; do not say you have their information on file; do not skip"
+            " asking for their name, address, or any other details — ask every question as if"
+            " this is the very first time they have called; only reference prior history if"
+            " the caller explicitly says they have called before and asks whether you have"
+            " their information. Do not repeat this message text on-air."
         )
 
     return check_caller_history
