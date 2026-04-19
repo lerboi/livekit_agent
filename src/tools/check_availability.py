@@ -107,28 +107,37 @@ def create_check_availability_tool(deps: dict):
             return (
                 "STATE:availability_lookup_failed reason=no_tenant"
                 " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
-                " caller back; do not retry this lookup more than once in this call. Do not"
-                " repeat this message text on-air."
+                " caller back; do not retry this lookup more than once in this call."
             )
 
-        # Fetch tenant config
-        try:
-            tenant_result = await asyncio.to_thread(
-                lambda: supabase.table("tenants")
-                .select("tenant_timezone, working_hours, slot_duration_mins, business_name")
-                .eq("id", tenant_id)
-                .single()
-                .execute()
-            )
-            tenant = tenant_result.data if tenant_result.data else None
-        except Exception as e:
-            logger.error("[agent] check_availability: tenant config fetch failed: %s", e)
-            return (
-                "STATE:availability_lookup_failed reason=tenant_config_error"
-                " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
-                " caller back; do not retry this lookup more than once in this call. Do not"
-                " repeat this message text on-air."
-            )
+        # Reuse the tenant dict already fetched during agent init (src/agent.py)
+        # and stashed on deps. Saves one Supabase round-trip (~100-200ms) per
+        # slot check, which compounds: a typical call runs check_availability
+        # 3-5 times as the caller explores slots. Cutting 100ms from each call
+        # narrows the silence-gap window that triggers server VAD cancellations.
+        tenant = deps.get("tenant")
+
+        # Fall back to a fresh fetch only if the cached tenant is missing the
+        # fields this tool needs. The agent-init fetch selects '*' so this
+        # branch is normally dead; keep it as a safety net for legacy callers.
+        needed_fields = ("tenant_timezone", "working_hours", "slot_duration_mins", "business_name")
+        if not tenant or any(k not in tenant for k in needed_fields):
+            try:
+                tenant_result = await asyncio.to_thread(
+                    lambda: supabase.table("tenants")
+                    .select("tenant_timezone, working_hours, slot_duration_mins, business_name")
+                    .eq("id", tenant_id)
+                    .single()
+                    .execute()
+                )
+                tenant = tenant_result.data if tenant_result.data else None
+            except Exception as e:
+                logger.error("[agent] check_availability: tenant config fetch failed: %s", e)
+                return (
+                    "STATE:availability_lookup_failed reason=tenant_config_error"
+                    " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call"
+                    " the caller back; do not retry this lookup more than once in this call."
+                )
 
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
         slot_duration = (tenant.get("slot_duration_mins") if tenant else None) or 60
@@ -191,8 +200,7 @@ def create_check_availability_tool(deps: dict):
                 return (
                     f"STATE:date_in_past requested_date={date} tenant_today={tenant_today}"
                     " | DIRECTIVE:ask the caller for a date from today onward; do not read the"
-                    " requested date back; do not fabricate times. Do not repeat this message"
-                    " text on-air."
+                    " requested date back; do not fabricate times."
                 )
             dates_to_check = [date]
         else:
@@ -230,7 +238,7 @@ def create_check_availability_tool(deps: dict):
                         " min_notice_hours=1"
                         " | DIRECTIVE:tell the caller that time is too soon (appointments need"
                         " at least one hour's notice); ask for a later time today or another"
-                        " day; do not fabricate times. Do not repeat this message text on-air."
+                        " day; do not fabricate times."
                     )
                 requested_end = requested_utc + timedelta(minutes=slot_duration)
 
@@ -331,7 +339,7 @@ def create_check_availability_tool(deps: dict):
                             " | DIRECTIVE:tell the caller the requested time is not available"
                             " and nothing else is open that day; ask if another day works, or"
                             " offer capture_lead so the business can call back; do not fabricate"
-                            " times. Do not repeat this message text on-air."
+                            " times."
                         )
 
         # ── General availability: return all slots for the day(s) ──
@@ -346,7 +354,7 @@ def create_check_availability_tool(deps: dict):
                 f" business_name={biz_name}"
                 " | DIRECTIVE:tell the caller nothing is open in that window; offer to check"
                 " another date, or offer capture_lead so the business can call back; do not"
-                " fabricate times. Do not repeat this message text on-air."
+                " fabricate times."
             )
 
         # Return a clean confirmation without any specific times.

@@ -45,7 +45,7 @@ def create_capture_lead_tool(deps: dict):
             return (
                 "STATE:lead_capture_failed reason=no_tenant_id"
                 " | DIRECTIVE:apologize briefly; tell the caller someone will follow up; do not"
-                " attempt to capture again. Do not repeat this message text on-air."
+                " attempt to capture again."
             )
 
         # Compute mid-call duration from start_timestamp (milliseconds) (avoids 15s filter issue)
@@ -94,7 +94,7 @@ def create_capture_lead_tool(deps: dict):
                 "STATE:lead_captured"
                 f" business={biz_name}"
                 " | DIRECTIVE:confirm verbally that someone will get back to the caller; ask if"
-                " there is anything else before wrapping up. Do not repeat this message text on-air."
+                " there is anything else before wrapping up."
             )
 
         except Exception as err:
@@ -102,7 +102,7 @@ def create_capture_lead_tool(deps: dict):
             return (
                 "STATE:lead_capture_failed reason=db_error"
                 " | DIRECTIVE:apologize briefly; assure the caller that someone will follow up;"
-                " do not attempt to capture again in this call. Do not repeat this message text on-air."
+                " do not attempt to capture again in this call."
             )
 
     return capture_lead

@@ -32,8 +32,7 @@ def create_check_caller_history_tool(deps: dict):
             return (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
-                " failure to the caller; do not recite any history. Do not repeat this message"
-                " text on-air."
+                " failure to the caller; do not recite any history."
             )
 
         # Look up tenant timezone for formatting
@@ -51,8 +50,7 @@ def create_check_caller_history_tool(deps: dict):
             return (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
-                " failure to the caller; do not recite any history. Do not repeat this message"
-                " text on-air."
+                " failure to the caller; do not recite any history."
             )
 
         tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
@@ -88,8 +86,7 @@ def create_check_caller_history_tool(deps: dict):
             return (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
-                " failure to the caller; do not recite any history. Do not repeat this message"
-                " text on-air."
+                " failure to the caller; do not recite any history."
             )
 
         leads = leads_result.data or []
@@ -99,7 +96,7 @@ def create_check_caller_history_tool(deps: dict):
             return (
                 "STATE:first_time_caller"
                 " | DIRECTIVE:proceed with normal intake; do not mention that the caller is"
-                " new; do not recite any history. Do not repeat this message text on-air."
+                " new; do not recite any history."
             )
 
         # Build natural-language summary for the AI
@@ -133,7 +130,7 @@ def create_check_caller_history_tool(deps: dict):
             " asking for their name, address, or any other details — ask every question as if"
             " this is the very first time they have called; only reference prior history if"
             " the caller explicitly says they have called before and asks whether you have"
-            " their information. Do not repeat this message text on-air."
+            " their information."
         )
 
     return check_caller_history

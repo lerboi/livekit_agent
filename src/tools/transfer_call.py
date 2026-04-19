@@ -92,7 +92,7 @@ def create_transfer_call_tool(deps: dict):
                 "STATE:transfer_failed reason=sip_error"
                 " | DIRECTIVE:apologize briefly; offer to book an appointment via"
                 " check_availability/book_appointment or take a callback via capture_lead; do"
-                " not retry the transfer in this call. Do not repeat this message text on-air."
+                " not retry the transfer in this call."
             )
 
     return transfer_call

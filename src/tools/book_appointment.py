@@ -320,7 +320,7 @@ def create_book_appointment_tool(deps: dict):
                     "STATE:booking_succeeded reason=idempotent_duplicate"
                     " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
                     " read back; do not restate the time; ask if there is anything else before wrapping"
-                    " up. Do not repeat this message text on-air.",
+                    " up.",
                 )
 
             # Slot was taken -- recalculate next available
@@ -406,7 +406,7 @@ def create_book_appointment_tool(deps: dict):
                 f" next_available={next_slot_text}"
                 " | DIRECTIVE:tell the caller that slot was just booked by someone else; offer"
                 " the next available time listed above as an alternative and ask if they want"
-                " to book it. Do not repeat this message text on-air."
+                " to book it."
             )
 
         # Success — compute and cache the confirmation response SYNCHRONOUSLY before
