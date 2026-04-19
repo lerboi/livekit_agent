@@ -49,10 +49,32 @@ def _normalize_urgency(value: str | None) -> str:
     return _URGENCY_ALIASES.get(v, "routine")
 
 
-def _format_date_for_sms(iso_str: str, tenant_timezone: str) -> str:
-    """Format ISO datetime to 'Tuesday, March 4th' for SMS."""
+def _ensure_utc_iso(iso_str: str) -> str:
+    """
+    Canonicalize any ISO string Gemini may emit to a UTC-offset form.
+
+    Gemini occasionally strips the '+00:00' offset when re-emitting the
+    slot_start / slot_end values from check_availability's STATE line
+    (especially since Phase 60 added a human-readable `speech=` field
+    alongside the UTC ISO). A naive datetime flowing into .astimezone()
+    is treated as system-local time — on Railway that is UTC, on other
+    hosts it could be anything — which silently shifts the wall-clock
+    time seen by SMS/calendar/RPC consumers.
+
+    Contract: check_availability returns slot_start/slot_end as UTC ISO.
+    If Gemini drops the offset, we re-attach UTC here.
+    """
     if iso_str.endswith("Z"):
         iso_str = iso_str[:-1] + "+00:00"
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _format_date_for_sms(iso_str: str, tenant_timezone: str) -> str:
+    """Format ISO datetime to 'Tuesday, March 4th' for SMS."""
+    iso_str = _ensure_utc_iso(iso_str)
     dt = datetime.fromisoformat(iso_str).astimezone(ZoneInfo(tenant_timezone))
     weekday = dt.strftime("%A")
     month = dt.strftime("%B")
@@ -66,8 +88,7 @@ def _format_date_for_sms(iso_str: str, tenant_timezone: str) -> str:
 
 def _format_time_for_sms(iso_str: str, tenant_timezone: str) -> str:
     """Format ISO datetime to 'h:mm AM/PM' for SMS."""
-    if iso_str.endswith("Z"):
-        iso_str = iso_str[:-1] + "+00:00"
+    iso_str = _ensure_utc_iso(iso_str)
     dt = datetime.fromisoformat(iso_str).astimezone(ZoneInfo(tenant_timezone))
     hour = dt.hour % 12
     if hour == 0:
@@ -192,7 +213,23 @@ def create_book_appointment_tool(deps: dict):
             return (
                 "STATE:booking_invalid reason=missing_slot_fields"
                 " | DIRECTIVE:apologize briefly; ask the caller to confirm the time they would like;"
-                " call book_appointment again once complete. Do not repeat this message text on-air."
+                " call book_appointment again once complete."
+            )
+
+        # Canonicalize slot_start / slot_end to UTC ISO up front. Gemini may
+        # drop the '+00:00' offset (especially after Phase 60 added a
+        # human-readable `speech=` field to check_availability's STATE line),
+        # which silently shifts the wall-clock seen by SMS / calendar / RPC
+        # consumers. Fix it once here so every downstream caller sees UTC.
+        try:
+            slot_start = _ensure_utc_iso(slot_start)
+            slot_end = _ensure_utc_iso(slot_end)
+        except ValueError:
+            return (
+                "STATE:booking_invalid reason=malformed_slot_iso"
+                " | DIRECTIVE:apologize briefly; call check_availability again for the"
+                " same date and time to get a fresh slot, then call book_appointment"
+                " with the exact start/end values from the fresh result."
             )
 
         if not tenant_id:

@@ -260,13 +260,14 @@ def create_check_availability_tool(deps: dict):
                         "ts": datetime.now(timezone.utc).isoformat(),
                     })
                     return (
-                        f"STATE:slot_available start={matched_slot['start']} end={matched_slot['end']}"
-                        f" speech={speech_text}"
-                        " | DIRECTIVE:tell the caller the requested time is available, then ask"
-                        " if they want to book it; do not read the full slots list out loud; do"
-                        " not fabricate times outside this slot; use the exact start/end values"
-                        " above when invoking book_appointment. Do not repeat this message text"
-                        " on-air."
+                        f"STATE:slot_available slot_start_utc={matched_slot['start']}"
+                        f" slot_end_utc={matched_slot['end']} speech={speech_text}"
+                        " | DIRECTIVE:tell the caller the requested time is available, then"
+                        " ask if they want to book it. When you call book_appointment, pass"
+                        " slot_start_utc VERBATIM as the slot_start parameter and slot_end_utc"
+                        " VERBATIM as slot_end — do not reformat, convert, or rebuild from the"
+                        " speech string (the +00:00 offset MUST be preserved). Do not read the"
+                        " full slots list out loud; do not fabricate times outside this slot."
                     )
                 else:
                     # Not available — find the closest alternatives
@@ -288,7 +289,10 @@ def create_check_availability_tool(deps: dict):
                         alt_lines = []
                         for i, slot in enumerate(closest):
                             speech = format_slot_for_speech(slot["start"], tenant_timezone)
-                            alt_lines.append(f"{i + 1}. {speech} (start: {slot['start']}, end: {slot['end']})")
+                            alt_lines.append(
+                                f"{i + 1}. {speech} (slot_start_utc={slot['start']},"
+                                f" slot_end_utc={slot['end']})"
+                            )
                         alts_text = "\n".join(alt_lines)
                         deps.setdefault("_tool_call_log", []).append({
                             "name": "check_availability",
@@ -303,10 +307,13 @@ def create_check_availability_tool(deps: dict):
                             f" alternatives_count={len(closest)} date_label={date_label}"
                             f"\nALTERNATIVES:\n{alts_text}\n"
                             " | DIRECTIVE:tell the caller the requested time is not available,"
-                            " then offer one or two of the alternatives above; do not read the"
-                            " full alternatives list out loud; do not fabricate times outside"
-                            " these slots; use the exact start/end values above when invoking"
-                            " book_appointment. Do not repeat this message text on-air."
+                            " then offer one or two of the alternatives above. If the caller"
+                            " picks one, call book_appointment passing the alternative's"
+                            " slot_start_utc VERBATIM as slot_start and slot_end_utc VERBATIM"
+                            " as slot_end — do not reformat, convert, or rebuild from the"
+                            " speech string (the +00:00 offset MUST be preserved). Do not read"
+                            " the full alternatives list out loud; do not fabricate times"
+                            " outside these slots."
                         )
                     else:
                         biz_name = (tenant.get("business_name") if tenant else None) or "the team"
