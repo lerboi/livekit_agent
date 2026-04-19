@@ -14,7 +14,7 @@ Fix H. Plan 03's executor will:
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -46,14 +46,32 @@ TRANSFER_CALL_PHRASES = {
 def _minimal_deps() -> dict:
     """Build a deps dict with the minimum keys each tool expects.
 
-    Wave 1 executor will extend this helper with whatever fake tenant /
-    supabase / logger entries the tool bodies require in order to reach
-    (or mock) the await session.say() line without crashing earlier.
+    Plan 03 (Fix H) inserts the filler await as the first statement of each
+    tool's inner coroutine, BEFORE any early-return guards. We populate
+    `supabase` (touched before `tenant_id` / `owner_phone` guards) so every
+    tool reaches the filler, then exits via its own early-return path with
+    a STATE+DIRECTIVE string — no real DB/network access.
     """
-    # Plan 03 executor: extend as needed to let each tool reach the filler.
-    # Keep stubs lightweight — use MagicMock for any dep that's only
-    # touched AFTER the filler call.
-    return {}
+    return {
+        "supabase": MagicMock(),
+        # Required by transfer_call tool body AFTER the filler await.
+        "call_end_reason": [None],
+    }
+
+
+# Minimum kwargs each tool needs to clear Python's signature-validation step.
+# Tools return early via their own `if not tenant_id / slot_start / ...` guards;
+# we just need to satisfy required positional args so the body runs.
+_BOOK_APPOINTMENT_MIN_KWARGS = {
+    "slot_start": "",
+    "slot_end": "",
+    "street_name": "",
+    "postal_code": "",
+    "caller_name": "",
+}
+_CAPTURE_LEAD_MIN_KWARGS = {
+    "caller_name": "",
+}
 
 
 async def _invoke(tool_factory, mock_ctx, deps, **kwargs):
@@ -80,7 +98,12 @@ async def test_check_availability_plays_filler(mock_run_context, deps_factory):
 @pytest.mark.asyncio
 async def test_book_appointment_plays_filler(mock_run_context, deps_factory):
     deps = _minimal_deps()
-    await _invoke(create_book_appointment_tool, mock_run_context, deps)
+    await _invoke(
+        create_book_appointment_tool,
+        mock_run_context,
+        deps,
+        **_BOOK_APPOINTMENT_MIN_KWARGS,
+    )
     assert mock_run_context.session.say.await_count >= 1
     spoken = mock_run_context.session.say.await_args.args[0]
     assert spoken in BOOK_APPOINTMENT_PHRASES
@@ -89,7 +112,12 @@ async def test_book_appointment_plays_filler(mock_run_context, deps_factory):
 @pytest.mark.asyncio
 async def test_capture_lead_plays_filler(mock_run_context, deps_factory):
     deps = _minimal_deps()
-    await _invoke(create_capture_lead_tool, mock_run_context, deps)
+    await _invoke(
+        create_capture_lead_tool,
+        mock_run_context,
+        deps,
+        **_CAPTURE_LEAD_MIN_KWARGS,
+    )
     assert mock_run_context.session.say.await_count >= 1
     spoken = mock_run_context.session.say.await_args.args[0]
     assert spoken in CAPTURE_LEAD_PHRASES
