@@ -13,17 +13,8 @@ from ..lib.leads import create_or_merge_lead
 
 logger = logging.getLogger(__name__)
 
-# Phase 60.2 Fix H: deterministic pre-tool filler audio.
-_FILLER_PHRASES = [
-    "Let me make a note of your details so the team can follow up.",
-    "Let me get all that saved down for you — one second.",
-]
-
 
 def create_capture_lead_tool(deps: dict):
-    # Per-session filler rotation counter (NOT module-global — see RESEARCH §R4).
-    deps.setdefault("_filler_idx_capture_lead", 0)
-
     @function_tool(
         name="capture_lead",
         description=(
@@ -47,16 +38,6 @@ def create_capture_lead_tool(deps: dict):
         job_type: str = "",
         notes: str = "",
     ) -> str:
-        # Phase 60.2 Fix H: deterministic pre-tool filler audio. See
-        # check_availability.py for design note.
-        idx = deps.get("_filler_idx_capture_lead", 0)
-        phrase = _FILLER_PHRASES[idx % len(_FILLER_PHRASES)]
-        deps["_filler_idx_capture_lead"] = idx + 1
-        try:
-            await context.session.say(phrase, allow_interruptions=False)
-        except Exception as e:
-            logger.warning("[capture_lead] filler say() failed: %s", e)
-
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 

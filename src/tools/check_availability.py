@@ -20,16 +20,6 @@ from ..utils import (
 
 logger = logging.getLogger(__name__)
 
-# Phase 60.2 Fix H: deterministic pre-tool filler audio.
-# Rotating phrases avoid robotic repetition when the same tool is
-# invoked 2-3 times in one call. Phrases lifted verbatim from the
-# Phase 60.1 TOOL NARRATION examples — proven to sound natural.
-_FILLER_PHRASES = [
-    "Let me pull up the calendar for you real quick — one moment.",
-    "Give me just a second to look at what we have open that day.",
-    "Let me take a look at the schedule for you — one sec.",
-]
-
 
 def _ordinal(n: int) -> str:
     """Return day number with ordinal suffix (1st, 2nd, 3rd, 4th, ...)."""
@@ -81,9 +71,6 @@ def _parse_requested_time(time_str: str, date_str: str, tenant_timezone: str) ->
 
 
 def create_check_availability_tool(deps: dict):
-    # Per-session filler rotation counter (NOT module-global — see RESEARCH §R4).
-    deps.setdefault("_filler_idx_check_availability", 0)
-
     @function_tool(
         name="check_availability",
         description=(
@@ -113,29 +100,6 @@ def create_check_availability_tool(deps: dict):
         time: str = "",
         urgency: str = "routine",
     ) -> str:
-        # Phase 60.2 Fix H: play deterministic filler audio BEFORE tool logic so
-        # the caller hears speech during the (previously silent) tool-execution
-        # window. This replaces reliance on prompt prose to emit a filler — Gemini
-        # used to generate filler text and function_call in the same turn, racing
-        # them at the text-generation layer and truncating filler mid-syllable
-        # when the tool response arrived.
-        #
-        # NOTE: allow_interruptions=False is silently downgraded to NOT_GIVEN by
-        # livekit-agents 1.5.1 when the LLM is a RealtimeModel with server-side
-        # turn detection (agent_activity.py:905-914). We pass it for intent
-        # documentation only — the actual un-interruption win comes from Fix G
-        # (raised server-VAD silence_duration_ms=1500 in src/agent.py).
-        idx = deps.get("_filler_idx_check_availability", 0)
-        phrase = _FILLER_PHRASES[idx % len(_FILLER_PHRASES)]
-        deps["_filler_idx_check_availability"] = idx + 1
-        try:
-            await context.session.say(phrase, allow_interruptions=False)
-        except Exception as e:
-            # Filler is cosmetic — never block tool execution on audio failure.
-            # Exception (not BaseException) is correct: CancelledError still
-            # propagates for session-teardown scenarios (RESEARCH Pitfall 3).
-            logger.warning("[check_availability] filler say() failed: %s", e)
-
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
