@@ -208,17 +208,19 @@ async def entrypoint(ctx: JobContext):
         voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "Kore")
 
         # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
-        # calls on breaths or minor overlap (backlog 999.2). LOW sensitivity +
-        # larger prefix/silence padding tracks upstream guidance for
-        # livekit/agents#4441 ("Spurious Server VAD events cause unavoidable
-        # tool cancellation"). Barge-in still works — the thresholds just
-        # require deliberate caller speech instead of firing on breath/noise.
+        # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
+        # threshold (raised from 1000ms in Phase 60.2) tracks upstream guidance
+        # for livekit/agents#4441 ("Spurious Server VAD events cause unavoidable
+        # tool cancellation") and mitigates the user-visible symptom of
+        # livekit/agents#4486 ("Agent audio cuts off after one word"). Barge-in
+        # still works — the thresholds just require deliberate caller speech
+        # (>1.5s) instead of firing on breath/noise.
         realtime_input_config = genai_types.RealtimeInputConfig(
             automatic_activity_detection=genai_types.AutomaticActivityDetection(
                 start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=400,
-                silence_duration_ms=1000,
+                silence_duration_ms=1500,  # phase 60.2 (was 1000 in phase 55 999.2 fix)
             ),
         )
 
