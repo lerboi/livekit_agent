@@ -23,6 +23,15 @@ from ..utils import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 60.2 Fix H: deterministic pre-tool filler audio.
+# Rotating phrases avoid robotic repetition when book_appointment is
+# invoked more than once in a session (e.g., caller changes slot).
+_FILLER_PHRASES = [
+    "Alright, let me go ahead and lock that in for you now.",
+    "Let me get that booked in for you — give me just a second.",
+    "Perfect, booking that slot now — one moment.",
+]
+
 
 # DB constraint `appointments_urgency_check` only accepts these three values.
 # Gemini has been observed passing freeform strings (e.g. "high"), which causes
@@ -152,6 +161,9 @@ async def _send_recovery_sms(deps: dict, tenant: dict | None, urgency: str, call
 
 
 def create_book_appointment_tool(deps: dict):
+    # Per-session filler rotation counter (NOT module-global — see RESEARCH §R4).
+    deps.setdefault("_filler_idx_book_appointment", 0)
+
     @function_tool(
         name="book_appointment",
         description=(
@@ -182,6 +194,18 @@ def create_book_appointment_tool(deps: dict):
         unit_number: str = "",
         urgency: str = "routine",
     ) -> str:
+        # Phase 60.2 Fix H: deterministic pre-tool filler audio. See
+        # check_availability.py for the full design note. allow_interruptions=False
+        # is silently downgraded by 1.5.1 — Fix G (raised VAD silence_duration_ms)
+        # is what actually prevents truncation.
+        idx = deps.get("_filler_idx_book_appointment", 0)
+        phrase = _FILLER_PHRASES[idx % len(_FILLER_PHRASES)]
+        deps["_filler_idx_book_appointment"] = idx + 1
+        try:
+            await context.session.say(phrase, allow_interruptions=False)
+        except Exception as e:
+            logger.warning("[book_appointment] filler say() failed: %s", e)
+
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
