@@ -14,8 +14,17 @@ from ..lib.whisper_message import build_whisper_message
 
 logger = logging.getLogger(__name__)
 
+# Phase 60.2 Fix H: deterministic pre-tool filler audio.
+_FILLER_PHRASES = [
+    "Let me get you through to someone on the team — one moment.",
+    "Connecting you over now, just a second.",
+]
+
 
 def create_transfer_call_tool(deps: dict):
+    # Per-session filler rotation counter (NOT module-global — see RESEARCH §R4).
+    deps.setdefault("_filler_idx_transfer_call", 0)
+
     @function_tool(
         name="transfer_call",
         description=(
@@ -33,6 +42,15 @@ def create_transfer_call_tool(deps: dict):
         summary: str = "",
         reason: str = "caller_requested",
     ) -> str:
+        # Phase 60.2 Fix H: deterministic pre-tool filler audio.
+        idx = deps.get("_filler_idx_transfer_call", 0)
+        phrase = _FILLER_PHRASES[idx % len(_FILLER_PHRASES)]
+        deps["_filler_idx_transfer_call"] = idx + 1
+        try:
+            await context.session.say(phrase, allow_interruptions=False)
+        except Exception as e:
+            logger.warning("[transfer_call] filler say() failed: %s", e)
+
         owner_phone = deps.get("owner_phone")
         supabase = deps["supabase"]
 
