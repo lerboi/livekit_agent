@@ -155,17 +155,16 @@ def create_book_appointment_tool(deps: dict):
     @function_tool(
         name="book_appointment",
         description=(
-            "Book a confirmed appointment slot. "
+            "Book an appointment into the caller's selected slot. "
+            "CRITICAL PRECONDITION: before calling this tool, you must have read back the caller's "
+            "name (if captured) and full service address in one utterance, and the caller must have "
+            "acknowledged or silently accepted the readback (see the BEFORE BOOKING — READBACK rule "
+            "in the system prompt). Do not call this tool until the readback is complete. "
+            "This tool's return is a state+directive string — do not read it aloud. "
             "DO NOT speak the words 'confirmed', 'booked', 'all set', 'see you tomorrow/at...', "
             "or any specific appointment time as a settled fact before invoking this tool. "
-            "The tool's return is the only authoritative confirmation — fabricating one leaves "
-            "the caller believing they have an appointment that does not exist. "
             "Always speak a short filler phrase first ('Let me get that booked in for you'), "
             "then immediately invoke this tool in the same turn. "
-            "Only use after: "
-            "(1) collecting caller name, street name, unit/apartment number, and postal/zip code, "
-            "(2) reading the full address back and receiving verbal confirmation, "
-            "(3) the caller has selected a slot from the availability results. "
             "Pass unit_number as empty string only if the caller explicitly confirmed there is no unit. "
             "Do NOT ask the caller about urgency -- infer it from the conversation. "
             "urgency MUST be exactly one of: 'emergency', 'urgent', 'routine'. "
@@ -190,10 +189,19 @@ def create_book_appointment_tool(deps: dict):
         service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
         if not slot_start or not slot_end:
-            return "I need a bit more information to complete the booking. Could you confirm the time you would like?"
+            return (
+                "STATE:booking_invalid reason=missing_slot_fields"
+                " | DIRECTIVE:apologize briefly; ask the caller to confirm the time they would like;"
+                " call book_appointment again once complete. Do not repeat this message text on-air."
+            )
 
         if not tenant_id:
-            return "I was unable to confirm the booking. Please call back and we will try again."
+            return (
+                "STATE:booking_failed reason=no_tenant_id"
+                " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
+                " capture_lead; do not attempt to book again in this call. Do not repeat this"
+                " message text on-air."
+            )
 
         # Idempotency guard: if this exact slot was already successfully booked earlier
         # in this call, return the cached confirmation without re-running the booking.
@@ -250,7 +258,12 @@ def create_book_appointment_tool(deps: dict):
             )
         except Exception as booking_err:
             logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
-            return "I was unable to confirm the booking right now. Let me take your information and someone will call you back to schedule."
+            return (
+                "STATE:booking_failed reason=rpc_error"
+                " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
+                " capture_lead; do not attempt to book again in this call. Do not repeat this"
+                " message text on-air."
+            )
 
         if not result.get("success"):
             # Late duplicate guard: if a prior successful booking of THIS EXACT slot
@@ -267,7 +280,10 @@ def create_book_appointment_tool(deps: dict):
                 )
                 return deps.get(
                     "_last_booked_slot_response",
-                    "Your appointment is already confirmed. Is there anything else I can help you with?",
+                    "STATE:booking_succeeded reason=idempotent_duplicate"
+                    " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
+                    " read back; do not restate the time; ask if there is anything else before wrapping"
+                    " up. Do not repeat this message text on-air.",
                 )
 
             # Slot was taken -- recalculate next available
@@ -349,9 +365,11 @@ def create_book_appointment_tool(deps: dict):
             })
 
             return (
-                f"SLOT_TAKEN. Next available time is {next_slot_text}. "
-                f"Tell the caller that the slot was just taken, then offer the next "
-                f"available time as an alternative and ask if they want to book it."
+                "STATE:slot_taken"
+                f" next_available={next_slot_text}"
+                " | DIRECTIVE:tell the caller that slot was just booked by someone else; offer"
+                " the next available time listed above as an alternative and ask if they want"
+                " to book it. Do not repeat this message text on-air."
             )
 
         # Success — compute and cache the confirmation response SYNCHRONOUSLY before
@@ -364,9 +382,12 @@ def create_book_appointment_tool(deps: dict):
 
         formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
         return_msg = (
-            f"BOOKED [appointment_id={appointment_id}, time={formatted_time}, "
-            f"address={service_address}]. Tell the caller their appointment is confirmed "
-            f"for {formatted_time}, then ask if there is anything else they need."
+            "STATE:booking_succeeded"
+            f" appointment_id={appointment_id}"
+            " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
+            " read back; do not restate the time (the caller already heard it during the slot"
+            " offer); ask if there is anything else before wrapping up. Do not repeat this"
+            " message text on-air."
         )
 
         deps["_last_booked_slot_key"] = _slot_key
