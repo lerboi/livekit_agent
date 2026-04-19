@@ -27,10 +27,14 @@ def create_capture_lead_tool(deps: dict):
     @function_tool(
         name="capture_lead",
         description=(
-            "Capture caller information as a lead when the caller has firmly declined booking. "
-            "Always tell the caller you're noting their details before calling this tool. "
-            "Use when you're confident they don't want to book right now and you're about to "
-            "wrap up the call. Must be used before ending the call."
+            "Capture the caller's contact information and intent when they decline to book (the decline"
+            " path). CRITICAL PRECONDITIONS: (1) gather the caller's name, the service issue, and the"
+            " service address using the same single-question address rule as the booking path — ask one"
+            " natural question ('What\\'s the address where you need the service?'), loop one targeted"
+            " follow-up at a time, capture enough to find the place; (2) read back the name (if captured)"
+            " and full address once before calling this tool (same readback rule as book_appointment)."
+            " Do not call this tool until both preconditions are met. This tool's return is a"
+            " state+directive string — do not read it aloud."
         ),
     )
     async def capture_lead(
@@ -57,7 +61,11 @@ def create_capture_lead_tool(deps: dict):
         supabase = deps["supabase"]
 
         if not tenant_id:
-            return "I've noted your details and someone will follow up."
+            return (
+                "STATE:lead_capture_failed reason=no_tenant_id"
+                " | DIRECTIVE:apologize briefly; tell the caller someone will follow up; do not"
+                " attempt to capture again."
+            )
 
         # Compute mid-call duration from start_timestamp (milliseconds) (avoids 15s filter issue)
         start_timestamp = deps.get("start_timestamp") or int(time.time() * 1000)
@@ -101,10 +109,19 @@ def create_capture_lead_tool(deps: dict):
             tenant = tenant_result.data if tenant_result.data else None
             biz_name = (tenant.get("business_name") if tenant else None) or "our team"
 
-            return f"I've saved your information. {biz_name} will reach out soon."
+            return (
+                "STATE:lead_captured"
+                f" business={biz_name}"
+                " | DIRECTIVE:confirm verbally that someone will get back to the caller; ask if"
+                " there is anything else before wrapping up."
+            )
 
         except Exception as err:
             logger.error("[agent] capture_lead error: %s", str(err))
-            return "I've noted your details and someone will follow up."
+            return (
+                "STATE:lead_capture_failed reason=db_error"
+                " | DIRECTIVE:apologize briefly; assure the caller that someone will follow up;"
+                " do not attempt to capture again in this call."
+            )
 
     return capture_lead

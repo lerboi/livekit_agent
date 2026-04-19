@@ -35,28 +35,40 @@ def _format_datetime_for_speech(dt: datetime) -> str:
     return f"{weekday} {month} {day} at {hour}:{minute} {ampm}"
 
 
+def _coerce_utc_aware(date: str | datetime) -> datetime:
+    """
+    Parse a Date/ISO string (or accept a datetime) and return a tz-aware
+    datetime. Naive inputs are treated as UTC — NEVER fall through to
+    Python's .astimezone() behavior that silently assumes the system
+    local timezone (which on Railway is UTC but is host-dependent).
+
+    Contract: slot_start / slot_end flowing from check_availability are
+    produced as UTC ISO by slot_calculator. If any caller (Gemini, a
+    legacy path) drops the offset, this function re-attaches UTC.
+    """
+    if isinstance(date, str):
+        if date.endswith("Z"):
+            date = date[:-1] + "+00:00"
+        date = datetime.fromisoformat(date)
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date
+
+
 def format_slot_for_speech(date: str | datetime, tz: str | None = None) -> str:
     """
     Format a UTC Date/ISO string into natural speech for AI to read aloud.
     Example: 'Tuesday March 23rd at 10:00 AM'
     """
     tz = tz or "America/Chicago"
-    if isinstance(date, str):
-        if date.endswith("Z"):
-            date = date[:-1] + "+00:00"
-        date = datetime.fromisoformat(date)
-    zoned = date.astimezone(ZoneInfo(tz))
+    zoned = _coerce_utc_aware(date).astimezone(ZoneInfo(tz))
     return _format_datetime_for_speech(zoned)
 
 
 def to_local_date_string(date: str | datetime, tz: str | None = None) -> str:
     """Format a Date/ISO string into a 'YYYY-MM-DD' string in the given timezone."""
     tz = tz or "America/Chicago"
-    if isinstance(date, str):
-        if date.endswith("Z"):
-            date = date[:-1] + "+00:00"
-        date = datetime.fromisoformat(date)
-    zoned = date.astimezone(ZoneInfo(tz))
+    zoned = _coerce_utc_aware(date).astimezone(ZoneInfo(tz))
     return zoned.strftime("%Y-%m-%d")
 
 
