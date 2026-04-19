@@ -152,8 +152,23 @@ async def entrypoint(ctx: JobContext):
         # block is omitted entirely (D-11).
         customer_context = None
         if tenant_id:
+            # P56 UAT Test 4 instrumentation: log elapsed + source-provider
+            # presence (no PII). Used to verify concurrent-fetch latency
+            # stays inside the 2.5s budget when both Jobber + Xero are
+            # connected and the system prompt receives both provider
+            # markers.
+            _ctx_t0 = time.perf_counter()
             customer_context = await fetch_merged_customer_context_bounded(
                 tenant_id, from_number, timeout_seconds=2.5
+            )
+            _ctx_elapsed = time.perf_counter() - _ctx_t0
+            _sources = (customer_context or {}).get("_sources") or {}
+            _unique_providers = sorted(set(_sources.values()))
+            logger.info(
+                "[agent] customer_context fetch elapsed=%.3fs providers=%s field_sources=%s",
+                _ctx_elapsed,
+                _unique_providers or "none",
+                _sources or "{}",
             )
 
         system_prompt = build_system_prompt(
@@ -355,6 +370,7 @@ async def entrypoint(ctx: JobContext):
                 logger.warning(f"[agent] No tenant for {to_number} — skipping DB queries")
                 return
 
+            _db_t0 = time.perf_counter()
             sub_task = asyncio.to_thread(
                 lambda: supabase.table("subscriptions")
                 .select("status")
@@ -393,6 +409,7 @@ async def entrypoint(ctx: JobContext):
             # already — no xero task needed inside _run_db_queries.
 
             results = await asyncio.gather(sub_task, intake_task, call_task, return_exceptions=True)
+            logger.info("[agent] _run_db_queries elapsed=%.3fs", time.perf_counter() - _db_t0)
 
             # Subscription check — disconnect if blocked
             if not isinstance(results[0], Exception):
