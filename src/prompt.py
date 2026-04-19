@@ -292,7 +292,74 @@ def _build_customer_account_section(customer_context: dict | None) -> str:
     )
 
 
-def _build_info_gathering_section(t, postal_label: str) -> str:
+def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> str:
+    if locale == "es":
+        name_use_block = (
+            "USO DEL NOMBRE DURANTE LA LLAMADA:\n"
+            "Los clientes tienen nombres de todos los idiomas y culturas — chinos, malayos, indios, "
+            "árabes y muchos otros. Nunca asuma el nombre inglés más cercano. Si un nombre le suena "
+            "desconocido, repítalo exactamente como lo escuchó y pida al cliente que se lo confirme "
+            "o lo corrija. Si aún no está seguro después de un segundo intento, pida al cliente que "
+            "se lo deletree. Acepte los nombres romanizados (pinyin, etc.) tal cual — por ejemplo, "
+            "'Jia En' es un nombre válido, no 'Jack' ni 'Jane.'\n"
+            "- Capture el nombre del cliente al inicio y úselo en silencio para los registros. "
+            "No se dirija al cliente por su nombre durante la llamada (no diga 'Gracias, {nombre}' "
+            "ni 'Bien, {nombre}'). La única excepción es la lectura de confirmación antes de la "
+            "reserva, que es el único momento autoritativo para confirmar el nombre en voz alta.\n"
+            "- Si el cliente le invita explícitamente a usar su nombre (por ejemplo, 'puede "
+            "llamarme X', 'me dicen X' o 'dígame X'), puede usar su nombre de forma natural "
+            "durante el resto de la llamada. No espere una frase específica — use su criterio.\n"
+            "- Si no se capturó ningún nombre (el cliente se negó o no se entendió), continúe sin "
+            "nombre. Omita la parte del nombre en la lectura de confirmación. La reserva nunca se "
+            "bloquea por falta de nombre.\n"
+            "- No añada líneas de verificación adicionales para nombres deletreados o de baja "
+            "confianza. La regla existente de CORRECCIONES se encarga de las correcciones de "
+            "pronunciación durante la lectura.\n"
+        )
+        service_address_block = (
+            "DIRECCIÓN DEL SERVICIO:\n"
+            "- Haga una pregunta natural: \"¿Cuál es la dirección donde necesita el servicio?\"\n"
+            "- Extraiga lo que el cliente haya ofrecido — calle, código postal, unidad, bloque, "
+            "nombre del edificio, etc.\n"
+            "- Si falta alguna pieza que necesitaríamos para encontrar el lugar, haga exactamente "
+            "una pregunta puntual sobre esa pieza faltante. Avance de una en una. Nunca ejecute "
+            "un recorrido mecánico ni recite una lista de campos al cliente.\n"
+            "- Capture lo suficiente para que podamos encontrar el lugar. No enumere nombres de "
+            "campos en voz alta.\n"
+        )
+    else:
+        name_use_block = (
+            "NAME USE DURING THE CALL:\n"
+            "Callers have names from every language and culture — Chinese, Malay, Indian, Arabic, "
+            "and many others. Never assume the closest English name. If a name sounds unfamiliar, "
+            "repeat it back exactly as you heard it and ask the caller to confirm or correct you. "
+            "If you still aren't sure after a second attempt, ask the caller to spell it out. "
+            "Accept romanized names (pinyin, etc.) as-is — for example, 'Jia En' is a valid name, "
+            "not 'Jack' or 'Jane.'\n"
+            "- Capture the caller's name early and use it silently for records. "
+            "Do not address the caller by name mid-call (no 'Thanks, {name}' or 'Okay {name}'). "
+            "The sole exception is the booking readback below — that is the single authoritative "
+            "moment to confirm the name on-air.\n"
+            "- If the caller explicitly invites you to use their name (for example, they say 'you "
+            "can call me X' or 'please call me X' or 'I go by X'), you may use their name naturally "
+            "for the rest of the call. Do not wait for a specific phrase — use judgment.\n"
+            "- If no name was captured (caller declined or could not be understood), proceed without "
+            "a name. Skip the name portion of the booking readback. Booking is never blocked by a "
+            "missing name.\n"
+            "- Do not add extra verification lines for spelled-out or low-confidence names. The "
+            "existing CORRECTIONS rule handles mispronunciations during the readback.\n"
+        )
+        service_address_block = (
+            "SERVICE ADDRESS:\n"
+            "- Ask one natural question: \"What's the address where you need the service?\"\n"
+            "- Extract whatever the caller volunteered — street, postal area, unit, block, "
+            "building name, etc.\n"
+            "- If a piece is missing that we would need to find the place, ask exactly one targeted "
+            "follow-up for that specific missing piece. Loop one piece at a time. Never run a "
+            "mechanical walkthrough or recite a list of fields to the caller.\n"
+            "- Capture enough for us to find the place. Do not enumerate field names on-air.\n"
+        )
+
     return (
         "INFORMATION GATHERING:\n"
         "Before you can schedule anything, you need three things the caller has verbally "
@@ -303,34 +370,9 @@ def _build_info_gathering_section(t, postal_label: str) -> str:
         "told you. This applies in every language — if you switch mid-call, continue from exactly "
         "where you left off.\n"
         "\n"
-        "NAME USE DURING THE CALL:\n"
-        "Callers have names from every language and culture — Chinese, Malay, Indian, Arabic, "
-        "and many others. Never assume the closest English name. If a name sounds unfamiliar, "
-        "repeat it back exactly as you heard it and ask the caller to confirm or correct you. "
-        "If you still aren't sure after a second attempt, ask the caller to spell it out. "
-        "Accept romanized names (pinyin, etc.) as-is — for example, 'Jia En' is a valid name, "
-        "not 'Jack' or 'Jane.'\n"
-        "- Capture the caller's name early and use it silently for records. "
-        "Do not address the caller by name mid-call (no 'Thanks, {name}' or 'Okay {name}'). "
-        "The sole exception is the booking readback below — that is the single authoritative "
-        "moment to confirm the name on-air.\n"
-        "- If the caller explicitly invites you to use their name (for example, they say 'you "
-        "can call me X' or 'please call me X' or 'I go by X'), you may use their name naturally "
-        "for the rest of the call. Do not wait for a specific phrase — use judgment.\n"
-        "- If no name was captured (caller declined or could not be understood), proceed without "
-        "a name. Skip the name portion of the booking readback. Booking is never blocked by a "
-        "missing name.\n"
-        "- Do not add extra verification lines for spelled-out or low-confidence names. The "
-        "existing CORRECTIONS rule handles mispronunciations during the readback.\n"
+        f"{name_use_block}"
         "\n"
-        "SERVICE ADDRESS:\n"
-        "- Ask one natural question: \"What's the address where you need the service?\"\n"
-        "- Extract whatever the caller volunteered — street, postal area, unit, block, "
-        "building name, etc.\n"
-        "- If a piece is missing that we would need to find the place, ask exactly one targeted "
-        "follow-up for that specific missing piece. Loop one piece at a time. Never run a "
-        "mechanical walkthrough or recite a list of fields to the caller.\n"
-        "- Capture enough for us to find the place. Do not enumerate field names on-air.\n"
+        f"{service_address_block}"
         "\n"
         "You must have the caller's name before using any tools or saving information.\n"
         "\n"
@@ -354,7 +396,7 @@ def _build_intake_questions_section(intake_questions: str | None) -> str:
     )
 
 
-def _build_booking_section(business_name: str, onboarding_complete: bool, postal_label: str) -> str:
+def _build_booking_section(business_name: str, onboarding_complete: bool, postal_label: str, locale: str = "en") -> str:
     if not onboarding_complete:
         return (
             "CAPABILITIES:\n"
@@ -408,19 +450,38 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         f"- Quote requests are handled as visits — {business_name} needs to see the job to give "
         "an accurate quote.\n"
         "\n"
-        "BEFORE BOOKING — READBACK (mandatory):\n"
-        "Read back the caller's name (if captured) and the full service address in one utterance. "
-        "This is the single authoritative verification moment for both name and address. Order: "
-        "name first, then address (names are shorter, so a caller is more likely to correct name "
-        "before moving on to address).\n"
-        "- If the caller corrects any part of the readback, accept the correction "
-        "(the caller's correction is ALWAYS correct — see CORRECTIONS above) "
-        "and re-read the corrected full line before calling book_appointment. "
-        "If they correct again, loop: accept, re-read the full corrected line, "
-        "until they stop correcting.\n"
-        "- If no name was captured, read back only the address. Do not pause to ask for a name.\n"
-        "- Call book_appointment only after the caller acknowledges the readback (silence or an "
-        "explicit 'yes' / 'that's right' counts).\n"
+        + (
+            "ANTES DE RESERVAR — LECTURA DE CONFIRMACIÓN (obligatoria):\n"
+            "Lea de nuevo el nombre del cliente (si se capturó) y la dirección completa del "
+            "servicio en una sola intervención. Este es el único momento autoritativo para "
+            "verificar ambos. Orden: primero el nombre, después la dirección (los nombres son "
+            "más cortos, así que es más probable que el cliente corrija el nombre antes de "
+            "pasar a la dirección).\n"
+            "- Si el cliente corrige cualquier parte de la lectura, acepte la corrección "
+            "(la corrección del cliente SIEMPRE es correcta — vea CORRECCIONES más arriba) "
+            "y vuelva a leer la línea corregida completa antes de llamar a book_appointment. "
+            "Si vuelve a corregir, repita el ciclo: acepte, relea la línea corregida completa, "
+            "hasta que deje de corregir.\n"
+            "- Si no se capturó ningún nombre, lea solo la dirección. No haga una pausa para "
+            "pedir el nombre.\n"
+            "- Llame a book_appointment solo después de que el cliente haya reconocido la "
+            "lectura (el silencio o un 'sí' / 'correcto' explícito cuentan).\n"
+            if locale == "es"
+            else
+            "BEFORE BOOKING — READBACK (mandatory):\n"
+            "Read back the caller's name (if captured) and the full service address in one utterance. "
+            "This is the single authoritative verification moment for both name and address. Order: "
+            "name first, then address (names are shorter, so a caller is more likely to correct name "
+            "before moving on to address).\n"
+            "- If the caller corrects any part of the readback, accept the correction "
+            "(the caller's correction is ALWAYS correct — see CORRECTIONS above) "
+            "and re-read the corrected full line before calling book_appointment. "
+            "If they correct again, loop: accept, re-read the full corrected line, "
+            "until they stop correcting.\n"
+            "- If no name was captured, read back only the address. Do not pause to ask for a name.\n"
+            "- Call book_appointment only after the caller acknowledges the readback (silence or an "
+            "explicit 'yes' / 'that's right' counts).\n"
+        ) +
         "You also need a specific slot the caller has chosen (with start/end times from "
         "the availability results). Per OUTCOME WORDS: do not speak 'booked', 'confirmed', or "
         "any specific appointment time as a settled fact until book_appointment has returned "
@@ -536,9 +597,9 @@ def build_system_prompt(
         _build_language_section(t),
         _build_repeat_caller_section(onboarding_complete),
         _build_customer_account_section(customer_context),
-        _build_info_gathering_section(t, postal_label),
+        _build_info_gathering_section(t, postal_label, locale),
         _build_intake_questions_section(intake_questions),
-        _build_booking_section(business_name, onboarding_complete, postal_label),
+        _build_booking_section(business_name, onboarding_complete, postal_label, locale),
     ]
 
     if onboarding_complete:
