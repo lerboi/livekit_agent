@@ -205,6 +205,10 @@ async def entrypoint(ctx: JobContext):
             "sip_participant_identity": sip_participant_identity,
             "call_end_reason": call_end_reason,
             "ctx": ctx,
+            # Exposed so end_call's _delayed_disconnect can await
+            # session.current_speech.wait_for_playout() before tearing down —
+            # replaces the legacy 12s fixed sleep that cut off long farewells.
+            "session": None,  # populated below after AgentSession(...) is constructed
             # Audit trail of every successful tool execution this call.
             # Tools self-append on completion. Forwarded to post_call for
             # silent hallucination detection (no caller- or owner-facing impact).
@@ -253,6 +257,7 @@ async def entrypoint(ctx: JobContext):
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
         session = AgentSession(llm=model)
+        deps["session"] = session
 
         # ── Collect transcript in real-time ──
         transcript_turns = []

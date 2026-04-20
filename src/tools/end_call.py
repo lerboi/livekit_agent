@@ -14,8 +14,28 @@ logger = logging.getLogger(__name__)
 
 
 async def _delayed_disconnect(deps: dict) -> None:
-    """Wait for farewell audio to finish playing, then remove the SIP participant."""
-    await asyncio.sleep(12)
+    """Wait for the agent's current speech to finish playing, then tear down the call.
+
+    Uses livekit-agents 1.5.1 native `SpeechHandle.wait_for_playout()` via
+    `session.current_speech` for deterministic waiting — replaces the old fixed
+    12s `asyncio.sleep()` that cut off longer farewells and fired too early on
+    shorter ones. Capped at 20s as a hung-generation safety belt.
+    """
+    session = deps.get("session")
+    try:
+        current = session.current_speech if session else None
+        if current:
+            await asyncio.wait_for(current.wait_for_playout(), timeout=20)
+        else:
+            # No active speech when end_call returned — still allow a brief
+            # moment for any SIP-side RTP jitter buffer to drain before the
+            # hard disconnect.
+            await asyncio.sleep(1)
+    except asyncio.TimeoutError:
+        logger.warning("[agent] end_call: playout wait exceeded 20s; disconnecting anyway")
+    except Exception as e:
+        logger.warning("[agent] end_call: playout wait error (%s); disconnecting anyway", e)
+
     lk = api.LiveKitAPI()
     try:
         await lk.room.remove_participant(
@@ -59,6 +79,13 @@ def create_end_call_tool(deps: dict):
     async def end_call(context: RunContext) -> str:
         deps["call_end_reason"][0] = "agent_ended"
         asyncio.create_task(_delayed_disconnect(deps))
-        return "[Call disconnected — do not produce any further speech.]"
+        # Let any in-flight sentence finish naturally (the disconnect task
+        # waits for playout). The directive only prevents Gemini from
+        # starting a NEW turn after the current one completes.
+        return (
+            "STATE:call_ending | DIRECTIVE:the line is about to disconnect; "
+            "do not start a new turn or produce further speech after your "
+            "current sentence completes."
+        )
 
     return end_call
