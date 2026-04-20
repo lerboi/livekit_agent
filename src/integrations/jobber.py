@@ -26,10 +26,16 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+
+# Imported at module level (not lazily) so Phase 58 telemetry can resolve the
+# admin client at call time AND tests can patch `jobber_mod.get_supabase_admin`.
+from ..supabase_client import get_supabase_admin
+from ..lib.telemetry import emit_integration_fetch
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +138,6 @@ def _expiry_to_epoch(expiry_value) -> float:
 
 async def _load_credentials(tenant_id: str) -> Optional[dict]:
     """Service-role read of accounting_credentials for (tenant_id, provider='jobber')."""
-    from ..supabase_client import get_supabase_admin
 
     def _query() -> Optional[dict]:
         admin = get_supabase_admin()
@@ -164,8 +169,6 @@ async def _persist_refreshed_tokens(
     Critical — Jobber rotates refresh_token on every refresh (Pitfall 3).
     Losing the new one = auth break on the next refresh cycle.
     """
-    from ..supabase_client import get_supabase_admin
-
     def _update() -> None:
         admin = get_supabase_admin()
         (
@@ -191,8 +194,6 @@ async def _persist_refreshed_tokens(
 
 async def _persist_refresh_failure(cred_id: str) -> None:
     """Mark credential row error_state='token_refresh_failed'. Silent on failure."""
-    from ..supabase_client import get_supabase_admin
-
     def _update() -> None:
         admin = get_supabase_admin()
         (
@@ -210,8 +211,6 @@ async def _persist_refresh_failure(cred_id: str) -> None:
 
 async def _touch_last_context_fetch_at(cred_id: str) -> None:
     """Telemetry seed — best-effort UPDATE; silent on failure."""
-    from ..supabase_client import get_supabase_admin
-
     def _update() -> None:
         admin = get_supabase_admin()
         (
@@ -421,6 +420,12 @@ async def fetch_jobber_customer_by_phone(
         if not E164_RE.match(phone_e164):
             return None
 
+        # Phase 58 CTX-01: per-fetch latency measurement. `_cache_hit` is
+        # always False (no in-agent cache layer today). See xero.py for the
+        # symmetric note.
+        _fetch_start = time.perf_counter()
+        _cache_hit = False
+
         cred = await _load_credentials(tenant_id)
         if not cred:
             return None
@@ -470,8 +475,37 @@ async def fetch_jobber_customer_by_phone(
 
             shaped = _shape_response(matched)
 
-        # Telemetry (outside the httpx client context — non-fatal)
-        await _touch_last_context_fetch_at(cred["id"])
+        # Phase 58 CTX-01: parallelize last_context_fetch_at UPDATE with the
+        # integration_fetch activity_log INSERT via asyncio.gather (outside
+        # the httpx client context). Both writes are silent-on-failure.
+        # Fall back to touch-only if admin client unavailable (test harness).
+        _duration_ms = int((time.perf_counter() - _fetch_start) * 1000)
+        _counts = {
+            "customers": 1 if shaped.get("client") else 0,
+            "jobs": len(shaped.get("recentJobs") or []),
+            "invoices": len(shaped.get("outstandingInvoices") or []),
+        }
+        try:
+            admin = get_supabase_admin()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("jobber: telemetry skipped — admin client unavailable: %s", exc)
+            admin = None
+
+        if admin is not None:
+            await asyncio.gather(
+                _touch_last_context_fetch_at(cred["id"]),
+                emit_integration_fetch(
+                    admin,
+                    tenant_id=tenant_id,
+                    provider="jobber",
+                    duration_ms=_duration_ms,
+                    cache_hit=_cache_hit,
+                    counts=_counts,
+                    phone_e164=phone_e164,
+                ),
+            )
+        else:
+            await _touch_last_context_fetch_at(cred["id"])
         return shaped
     except Exception:  # noqa: BLE001
         # Never raise — Plan 06's 800ms race silently skips on None.

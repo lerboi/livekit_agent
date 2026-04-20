@@ -33,6 +33,11 @@ from typing import Optional
 
 import httpx
 
+# Imported at module level (not lazily) so Phase 58 telemetry can resolve the
+# admin client at call time AND tests can patch `xero_mod.get_supabase_admin`.
+from ..supabase_client import get_supabase_admin
+from ..lib.telemetry import emit_integration_fetch
+
 logger = logging.getLogger(__name__)
 
 XERO_API_BASE = "https://api.xero.com/api.xro/2.0"
@@ -71,7 +76,6 @@ def _expiry_to_epoch(expiry_value) -> float:
 
 async def _load_credentials(tenant_id: str) -> Optional[dict]:
     """Service-role read of accounting_credentials for (tenant_id, provider='xero')."""
-    from ..supabase_client import get_supabase_admin
 
     def _query() -> Optional[dict]:
         admin = get_supabase_admin()
@@ -103,7 +107,6 @@ async def _persist_refreshed_tokens(
     Critical — without write-back, the Next.js side sees stale tokens and
     re-refreshes redundantly, racing with us on Xero's refresh-token rotation.
     """
-    from ..supabase_client import get_supabase_admin
 
     def _update() -> None:
         admin = get_supabase_admin()
@@ -129,7 +132,6 @@ async def _persist_refreshed_tokens(
 
 async def _persist_refresh_failure(cred_id: str) -> None:
     """Mark credential row error_state='token_refresh_failed'. Silent on failure."""
-    from ..supabase_client import get_supabase_admin
 
     def _update() -> None:
         admin = get_supabase_admin()
@@ -148,7 +150,6 @@ async def _persist_refresh_failure(cred_id: str) -> None:
 
 async def _touch_last_context_fetch_at(cred_id: str) -> None:
     """Telemetry seed — updates last_context_fetch_at on successful fetch."""
-    from ..supabase_client import get_supabase_admin
 
     def _update() -> None:
         admin = get_supabase_admin()
@@ -356,6 +357,14 @@ async def fetch_xero_customer_by_phone(
     if not E164_RE.match(phone_e164):
         return None
 
+    # Phase 58 CTX-01: per-fetch latency measurement. `_cache_hit` is always
+    # False here (no in-memory cache in the Python adapter today — the cache
+    # layer lives in Next.js via `'use cache'` + revalidateTag). Column
+    # retained so the activity_log schema is forward-compatible if an
+    # in-agent cache lands later.
+    _fetch_start = time.perf_counter()
+    _cache_hit = False
+
     cred = await _load_credentials(tenant_id)
     if not cred or not cred.get("xero_tenant_id"):
         logger.info("xero: no credentials or xero_tenant_id for tenant=%s", tenant_id)
@@ -405,9 +414,7 @@ async def fetch_xero_customer_by_phone(
     ]
     last_payment_date = max(paid_dates) if paid_dates else None
 
-    await _touch_last_context_fetch_at(cred["id"])
-
-    return {
+    shaped = {
         "contact": {
             "contact_id": contact.get("ContactID"),
             "name": contact.get("Name"),
@@ -419,6 +426,42 @@ async def fetch_xero_customer_by_phone(
         "last_invoices": last_invoices,
         "last_payment_date": last_payment_date,
     }
+
+    # Phase 58 CTX-01: parallelize the last_context_fetch_at UPDATE with the
+    # integration_fetch activity_log INSERT via asyncio.gather so telemetry
+    # adds ZERO latency to the fetch return path. Both writes are
+    # silent-on-failure inside their helpers.
+    _duration_ms = int((time.perf_counter() - _fetch_start) * 1000)
+    _counts = {
+        "customers": 1 if shaped.get("contact") else 0,
+        "invoices": len(shaped.get("last_invoices") or []),
+    }
+    # Resolve admin client for telemetry. If unavailable (missing env vars in
+    # test harness), skip the activity_log insert but preserve the existing
+    # last_context_fetch_at UPDATE so Phase 55 behavior is unchanged.
+    try:
+        admin = get_supabase_admin()
+    except Exception as exc:  # noqa: BLE001 — telemetry must not break return path
+        logger.warning("xero: telemetry skipped — admin client unavailable: %s", exc)
+        admin = None
+
+    if admin is not None:
+        await asyncio.gather(
+            _touch_last_context_fetch_at(cred["id"]),
+            emit_integration_fetch(
+                admin,
+                tenant_id=tenant_id,
+                provider="xero",
+                duration_ms=_duration_ms,
+                cache_hit=_cache_hit,
+                counts=_counts,
+                phone_e164=phone_e164,
+            ),
+        )
+    else:
+        await _touch_last_context_fetch_at(cred["id"])
+
+    return shaped
 
 
 async def fetch_xero_context_bounded(
