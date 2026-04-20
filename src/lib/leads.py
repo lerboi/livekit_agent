@@ -40,9 +40,14 @@ async def create_or_merge_lead(
     if existing_leads and len(existing_leads) > 0:
         existing_lead = existing_leads[0]
         if call_id:
+            # Upsert (not insert) because mid-call capture_lead and post-call
+            # pipeline both route here for the same (lead, call) pair. Plain
+            # INSERT raises lead_calls_pkey 23505 on the second invocation.
             await asyncio.to_thread(
-                lambda: supabase.table("lead_calls").insert(
-                    {"lead_id": existing_lead["id"], "call_id": call_id}
+                lambda: supabase.table("lead_calls").upsert(
+                    {"lead_id": existing_lead["id"], "call_id": call_id},
+                    on_conflict="lead_id,call_id",
+                    ignore_duplicates=True,
                 ).execute()
             )
         # Point the lead at the newest appointment so the calendar flyout's
@@ -116,9 +121,12 @@ async def create_or_merge_lead(
         ),
     ]
     if call_id:
+        # Upsert for idempotency — see rationale on the repeat-caller branch above.
         parallel_tasks.insert(0, asyncio.to_thread(
-            lambda: supabase.table("lead_calls").insert(
-                {"lead_id": new_lead["id"], "call_id": call_id}
+            lambda: supabase.table("lead_calls").upsert(
+                {"lead_id": new_lead["id"], "call_id": call_id},
+                on_conflict="lead_id,call_id",
+                ignore_duplicates=True,
             ).execute()
         ))
     await asyncio.gather(*parallel_tasks)

@@ -245,6 +245,7 @@ async def _get_contacts_by_phone(
         resp = await client.get(
             f"{XERO_API_BASE}/Contacts",
             headers=_xero_headers(cred["access_token"], cred["xero_tenant_id"]),
+            params={"summaryOnly": "false"},
         )
         if getattr(resp, "status_code", 500) != 200:
             return None
