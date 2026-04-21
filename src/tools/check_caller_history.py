@@ -103,8 +103,12 @@ def create_check_caller_history_tool(deps: dict):
             try:
                 jobs_result, inquiries_result = await asyncio.gather(
                     asyncio.to_thread(
+                        # Note: `jobs` has no `job_type` column (it lives on the
+                        # linked `appointments` row for booked work). We read
+                        # status + timestamp only here; for repeat-caller context
+                        # the job type isn't essential — status is what matters.
                         lambda: supabase.table("jobs")
-                        .select("job_type, status, created_at")
+                        .select("status, created_at")
                         .eq("tenant_id", tenant_id)
                         .eq("customer_id", customer["id"])
                         .order("created_at", desc=True)
