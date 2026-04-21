@@ -416,8 +416,13 @@ async def run_post_call_pipeline(params: dict):
                 else:
                     outcome_prefs = prefs.get(final_outcome, {"sms": True, "email": True})
 
+                # Phase 59: route owners to the correct dashboard surface and
+                # flip notification wording by outcome. Booked → /dashboard/jobs
+                # + "New booking"; unbooked → /dashboard/inquiries + "New inquiry".
+                is_booked = (final_outcome == "booked")
                 callback_link = f"tel:{lead.get('from_number', '') or from_number}"
-                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}/dashboard/jobs"
+                dashboard_path = "/dashboard/jobs" if is_booked else "/dashboard/inquiries"
+                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}{dashboard_path}"
                 business_name = tenant_info.get("business_name", "Your Business")
 
                 tasks = []
@@ -434,6 +439,7 @@ async def run_post_call_pipeline(params: dict):
                         address=lead.get("service_address"),
                         callback_link=callback_link,
                         dashboard_link=dashboard_link,
+                        is_booked=is_booked,
                     ))
 
                 if outcome_prefs.get("email") and tenant_info.get("owner_email"):
@@ -441,6 +447,7 @@ async def run_post_call_pipeline(params: dict):
                         send_owner_email,
                         to=tenant_info["owner_email"],
                         lead=lead,
+                        is_booked=is_booked,
                         business_name=business_name,
                         dashboard_url=dashboard_link,
                     ))

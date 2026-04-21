@@ -73,6 +73,7 @@ def send_owner_sms(
     address: str | None = None,
     callback_link: str | None = None,
     dashboard_link: str | None = None,
+    is_booked: bool = False,
 ):
     """Send an SMS alert to the business owner about a new call/booking.
 
@@ -80,6 +81,11 @@ def send_owner_sms(
     dialed). Falls back to the `TWILIO_FROM_NUMBER` env var for backwards
     compatibility, but each tenant has their own number so the explicit arg
     is preferred.
+
+    `is_booked` flips the wording between "New booking" (appointment was taken)
+    and "New inquiry" (caller did not book — owner follow-up needed). Emergency
+    is a separate branch and always takes the urgent-callback wording regardless
+    of booking outcome.
     """
     is_emergency = urgency == "emergency"
     name = caller_name or "Unknown"
@@ -91,10 +97,15 @@ def send_owner_sms(
             f"EMERGENCY: {business_name} -- {name} needs urgent {job} at {addr}. "
             f"Call NOW: {callback_link} | Dashboard: {dashboard_link}"
         )
-    else:
+    elif is_booked:
         body = (
             f"{business_name}: New booking -- {name}, {job} at {addr}. "
             f"Callback: {callback_link} | Dashboard: {dashboard_link}"
+        )
+    else:
+        body = (
+            f"{business_name}: New inquiry -- {name}, {job} at {addr}. "
+            f"Not booked — follow up. Callback: {callback_link} | Dashboard: {dashboard_link}"
         )
 
     try:
@@ -118,21 +129,32 @@ def send_owner_email(
     lead: dict | None = None,
     business_name: str,
     dashboard_url: str | None = None,
+    is_booked: bool = False,
 ):
-    """Send an email alert to the business owner about a new lead."""
+    """Send an email alert to the business owner about a new lead.
+
+    `is_booked` flips the subject and heading between "New booking" (caller
+    took an appointment) and "New inquiry" (caller did not book — follow-up
+    needed). Emergency always takes the EMERGENCY wording regardless.
+    """
     lead = lead or {}
     urgency = lead.get("urgency_classification") or lead.get("urgency") or "routine"
     is_emergency = urgency == "emergency"
     caller_name = lead.get("caller_name") or "Unknown caller"
 
     if is_emergency:
-        subject = f"EMERGENCY: New booking -- {caller_name}"
-    else:
+        subject = f"EMERGENCY: {'New booking' if is_booked else 'New inquiry'} -- {caller_name}"
+        heading_label = "EMERGENCY"
+    elif is_booked:
         subject = f"New booking -- {caller_name}"
+        heading_label = "New booking"
+    else:
+        subject = f"New inquiry -- {caller_name}"
+        heading_label = "New inquiry (not booked — follow up)"
 
     # Plain HTML email (no React Email dependency in the agent)
     html = f"""
-    <h2>{"EMERGENCY" if is_emergency else "New Lead"}: {caller_name}</h2>
+    <h2>{heading_label}: {caller_name}</h2>
     <p><strong>Business:</strong> {business_name}</p>
     <p><strong>Job Type:</strong> {lead.get("job_type") or "Not specified"}</p>
     <p><strong>Address:</strong> {lead.get("service_address") or "Not provided"}</p>
