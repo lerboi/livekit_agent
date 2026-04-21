@@ -72,4 +72,4 @@ identify which tool), and rewrite the return to `STATE: ... | DIRECTIVE: ...` fo
 - If you observe a new pattern not covered by these queries, add it here before the
   Phase 60 UAT sign-off.
 - Phase 60 does not ship a Sentry alert rule or dashboard widget — these are manual
-  reviewer queries for the UAT cycle only.
+  reviewer queries for the UAT cycle only
