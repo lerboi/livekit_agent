@@ -57,16 +57,21 @@ def create_check_caller_history_tool(deps: dict):
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Parallel lookup: leads + appointments for this caller
+        # Phase 59: Lookup via customers → jobs/inquiries instead of legacy leads.
+        # Resolve the customer by (tenant_id, phone_e164); if present, fetch their
+        # last 3 interactions across jobs + inquiries. Parallel with upcoming
+        # appointments (appointments.caller_phone is the E.164 caller number).
+        from ..lib.phone import _normalize_phone
+        phone_e164 = _normalize_phone(from_number) if from_number else None
+
         try:
-            leads_result, appointments_result = await asyncio.gather(
+            customer_result, appointments_result = await asyncio.gather(
                 asyncio.to_thread(
-                    lambda: supabase.table("leads")
-                    .select("id, caller_name, job_type, service_address, status, created_at")
+                    lambda: supabase.table("customers")
+                    .select("id, name")
                     .eq("tenant_id", tenant_id)
-                    .eq("from_number", from_number)
-                    .order("created_at", desc=True)
-                    .limit(3)
+                    .eq("phone_e164", phone_e164)
+                    .limit(1)
                     .execute()
                 ),
                 asyncio.to_thread(
@@ -89,10 +94,46 @@ def create_check_caller_history_tool(deps: dict):
                 " failure to the caller; do not recite any history."
             )
 
-        leads = leads_result.data or []
+        customer = (customer_result.data or [None])[0]
         appointments = appointments_result.data or []
 
-        if len(leads) == 0 and len(appointments) == 0:
+        # Fetch last 3 jobs + inquiries for this customer (if any)
+        interactions: list[dict] = []
+        if customer:
+            try:
+                jobs_result, inquiries_result = await asyncio.gather(
+                    asyncio.to_thread(
+                        lambda: supabase.table("jobs")
+                        .select("job_type, status, created_at")
+                        .eq("tenant_id", tenant_id)
+                        .eq("customer_id", customer["id"])
+                        .order("created_at", desc=True)
+                        .limit(3)
+                        .execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("inquiries")
+                        .select("job_type, status, created_at")
+                        .eq("tenant_id", tenant_id)
+                        .eq("customer_id", customer["id"])
+                        .order("created_at", desc=True)
+                        .limit(3)
+                        .execute()
+                    ),
+                )
+                # Merge + sort by created_at desc, keep top 3 overall
+                merged: list[dict] = []
+                for row in (jobs_result.data or []):
+                    merged.append({"kind": "job", **row})
+                for row in (inquiries_result.data or []):
+                    merged.append({"kind": "inquiry", **row})
+                merged.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+                interactions = merged[:3]
+            except Exception as e:
+                logger.error("[agent] check_caller_history: interactions lookup failed: %s", e)
+                # Soft-fail — proceed with whatever we have (customer + appointments).
+
+        if not customer and len(appointments) == 0:
             return (
                 "STATE:first_time_caller"
                 " | DIRECTIVE:proceed with normal intake; do not mention that the caller is"
@@ -111,18 +152,19 @@ def create_check_caller_history_tool(deps: dict):
                 appt_lines.append(f"- {date_str} at {addr} ({status})")
             summary += f"Upcoming appointments:\n" + "\n".join(appt_lines) + "\n\n"
 
-        if len(leads) > 0:
-            lead_lines = []
-            for l in leads:
-                name = l.get("caller_name") or "Unknown"
-                job = l.get("job_type") or "unspecified"
-                status = l.get("status", "unknown")
-                lead_lines.append(f"- {name}: {job} (status: {status})")
-            summary += f"Previous interactions:\n" + "\n".join(lead_lines)
+        if interactions:
+            interaction_lines = []
+            name = (customer or {}).get("name") or "Unknown"
+            for i in interactions:
+                kind = i.get("kind", "inquiry")
+                job = i.get("job_type") or "unspecified"
+                status = i.get("status", "unknown")
+                interaction_lines.append(f"- {kind}: {job} (status: {status})")
+            summary += f"Previous interactions ({name}):\n" + "\n".join(interaction_lines)
 
         return (
             f"STATE:repeat_caller"
-            f" prior_appointments={len(appointments)} prior_leads={len(leads)}"
+            f" prior_appointments={len(appointments)} prior_interactions={len(interactions)}"
             f"\nCONTEXT:\n{summary}\n"
             " | DIRECTIVE:use this context silently to personalize follow-up questions if"
             " relevant (e.g., 'is this about the same {last_service}?'); do not recite the"

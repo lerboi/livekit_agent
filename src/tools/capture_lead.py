@@ -9,7 +9,7 @@ import time
 
 from livekit.agents import function_tool, RunContext
 
-from ..lib.leads import create_or_merge_lead
+from ..lib.write_outcome import record_outcome, RecordOutcomeError
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +56,30 @@ def create_capture_lead_tool(deps: dict):
         parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else None
 
+        call_uuid = deps.get("call_uuid")
+        if not call_uuid:
+            # Background db_task hasn't written the calls row yet — rare; fail closed
+            # for this tool since record_call_outcome RPC requires a valid call UUID.
+            return (
+                "STATE:lead_capture_failed reason=call_not_ready"
+                " | DIRECTIVE:apologize briefly; tell the caller someone will follow up;"
+                " do not attempt to capture again."
+            )
+
         try:
-            await create_or_merge_lead(
+            # Phase 59 D-10 inquiry path: appointment_id=None → record_call_outcome
+            # upserts the customer and creates an inquiry row (not a job). No direct
+            # writes to legacy leads/lead_calls (D-02a).
+            await record_outcome(
                 supabase,
                 tenant_id=tenant_id,
-                call_id=deps.get("call_uuid"),
-                from_number=deps.get("from_number") or phone or "",
+                raw_phone=deps.get("from_number") or phone or "",
                 caller_name=caller_name or None,
-                job_type=job_type or None,
                 service_address=service_address,
-                postal_code=postal_code or None,
-                street_name=street_name or None,
-                triage_result={"urgency": "routine"},
                 appointment_id=None,
-                call_duration=duration_seconds,
+                urgency="routine",
+                call_id=call_uuid,
+                job_type=job_type or None,
             )
 
             # Write booking_outcome: 'declined' (conditional -- don't overwrite 'booked')

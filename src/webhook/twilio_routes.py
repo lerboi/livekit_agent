@@ -116,27 +116,13 @@ async def _is_vip_caller(tenant: dict, from_number: str) -> bool:
         if entry.get("number") == from_number:
             return True
 
-    # Source 2: Lead-based VIP (requires DB query per D-02)
-    try:
-        from src.supabase_client import get_supabase_admin
-
-        def _query():
-            return (
-                get_supabase_admin()
-                .table("leads")
-                .select("id")
-                .eq("tenant_id", tenant["id"])
-                .eq("from_number", from_number)
-                .eq("is_vip", True)
-                .limit(1)
-                .execute()
-            )
-
-        response = await asyncio.to_thread(_query)
-        return bool(response.data)
-    except Exception as e:
-        logger.warning("[webhook] VIP lead lookup failed (fail-open): %s", e)
-        return False
+    # Source 2: Legacy lead-based VIP lookup was removed in Phase 59 (migration 061
+    # dropped the leads table, and `customers` does not yet have an `is_vip` column
+    # — that belongs to a follow-up phase that plumbs is_vip from customers and
+    # updates the VIP settings UI). Until then, only the tenant.vip_numbers JSONB
+    # source (checked above) is authoritative. This is a conservative fail-closed
+    # for Source 2; no false VIP matches, no crashes against a missing table.
+    return False
 
 
 # --- /twilio/incoming-call ---------------------------------------------------

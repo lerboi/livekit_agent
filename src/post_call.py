@@ -11,7 +11,7 @@ import stripe
 from datetime import datetime, timedelta, timezone
 
 from .lib.triage.classifier import classify_call
-from .lib.leads import create_or_merge_lead
+from .lib.write_outcome import record_outcome, RecordOutcomeError
 from .lib.notifications import send_owner_sms, send_owner_email
 from .lib.slot_calculator import calculate_available_slots
 from .utils import to_local_date_string, format_zone_pair_buffers
@@ -117,13 +117,13 @@ async def run_post_call_pipeline(params: dict):
             test_appt = test_appt_resp.data[0] if test_appt_resp.data else None
 
             if test_appt:
-                await asyncio.gather(
-                    asyncio.to_thread(
-                        lambda: supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
-                    ),
-                    asyncio.to_thread(
-                        lambda: supabase.table("leads").update({"status": "new", "appointment_id": None}).eq("appointment_id", test_appt["id"]).eq("tenant_id", tenant_id).execute()
-                    ),
+                # Phase 59 D-02a: legacy `leads` table is dropped (migration 061).
+                # Cancelling the appointment alone suffices — the associated
+                # customer row stays (desirable: remembers the test caller) and
+                # any linked job can be cleaned up by a follow-up phase if the
+                # appointment-cancel cascade proves insufficient.
+                await asyncio.to_thread(
+                    lambda: supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
                 )
         except Exception as e:
             print(f"[post-call] Test call auto-cancel error: {e}")
@@ -312,8 +312,18 @@ async def run_post_call_pipeline(params: dict):
         # Detection must never break the post-call pipeline.
         print(f"[post-call] Hallucination detector error (non-fatal): {halluc_err}")
 
-    # ── 9. Create/merge lead ──
-    lead = None
+    # ── 9. Record call outcome (Phase 59: customer + job/inquiry via RPC) ──
+    # Replaces create_or_merge_lead. The record_call_outcome RPC atomically
+    # upserts the customer by (tenant_id, phone_e164) and creates either a
+    # job (when appointment_id is set) or an inquiry (when None), plus links
+    # the call to customer_calls and job_calls junctions.
+    #
+    # D-02a: NO fallback to legacy leads — if the RPC raises, log and move on.
+    # The owner notification block below uses the locally captured fields
+    # (caller_name / job_type / from_number) rather than re-reading from DB.
+    caller_name = None
+    job_type = None
+    lead: dict | None = None  # shape-compat dict for Section 10 notification block
     if call_uuid and duration_seconds >= 15:
         try:
             # Prefer the caller_name captured at booking time (verified by the AI)
@@ -325,8 +335,7 @@ async def run_post_call_pipeline(params: dict):
             job_type = _extract_field_from_transcript(transcript_turns, "job")
 
             # Prefer the appointment_id returned directly from the booking tool;
-            # fall back to the FK lookup only if we don't have it (covers the
-            # capture_lead-only path).
+            # fall back to the FK lookup only if we don't have it.
             appointment_id = booked_appointment_id
             if booking_outcome == "booked" and not appointment_id:
                 appt_resp = await asyncio.to_thread(
@@ -339,19 +348,36 @@ async def run_post_call_pipeline(params: dict):
                 appt_row = appt_resp.data[0] if appt_resp.data else None
                 appointment_id = appt_row.get("id") if appt_row else None
 
-            lead = await create_or_merge_lead(
+            outcome = await record_outcome(
                 supabase,
                 tenant_id=tenant_id,
-                call_id=call_uuid,
-                from_number=from_number,
+                raw_phone=from_number,
                 caller_name=caller_name,
-                job_type=job_type,
-                triage_result={"urgency": triage_result["urgency"]},
+                service_address=None,  # address is on the appointment row for booked calls
                 appointment_id=appointment_id,
-                call_duration=duration_seconds,
+                urgency=triage_result["urgency"],
+                call_id=call_uuid,
+                job_type=job_type,
             )
+
+            # Build a lead-compat dict for Section 10 (owner notifications).
+            # Keys mirror the old `lead` shape consumed by the notification
+            # path — from_number, caller_name, job_type, service_address —
+            # plus the new customer/job/inquiry IDs for deep-linking.
+            lead = {
+                "from_number": from_number,
+                "caller_name": caller_name,
+                "job_type": job_type,
+                "service_address": None,
+                "customer_id": outcome.get("customer_id"),
+                "job_id": outcome.get("job_id"),
+                "inquiry_id": outcome.get("inquiry_id"),
+            }
+        except RecordOutcomeError as e:
+            # T-59-05-04: only log call_id + tenant_id; never the raw phone or name.
+            print(f"[post-call] record_outcome failed: call_id={call_id} tenant_id={tenant_id}: {e}")
         except Exception as e:
-            print(f"[post-call] Lead creation error: {e}")
+            print(f"[post-call] record_outcome unexpected error (call_id={call_id}): {e}")
 
     # ── 10. Send owner notifications ──
     if tenant_id and tenant:
@@ -384,7 +410,7 @@ async def run_post_call_pipeline(params: dict):
                     outcome_prefs = prefs.get(final_outcome, {"sms": True, "email": True})
 
                 callback_link = f"tel:{lead.get('from_number', '') or from_number}"
-                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}/dashboard/leads"
+                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}/dashboard/jobs"
                 business_name = tenant_info.get("business_name", "Your Business")
 
                 tasks = []
