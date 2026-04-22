@@ -484,7 +484,40 @@ def _build_customer_account_section(customer_context: dict | None) -> str:
 
 
 def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> str:
+    # Phase 60.3 Plan 10: invariant-lock + D6 compression + outer-frame parity.
+    #
+    # Audit dimension decisions (60.3-PROMPT-AUDIT.md §_build_info_gathering_section):
+    # - D1 (anti-hallucination): ✓ "Never re-ask something they already told you"
+    #   + silent urgency classification preserved verbatim in both locales.
+    # - D2 (realtime-model): ✓ adaptive conversational framing preserved.
+    # - D3 (ordering): ✓ position unchanged.
+    # - D4 (STATE+DIRECTIVE): ~ "You must have the caller's name before using any
+    #   tools" retained — borderline but functional.
+    # - D5 (VAD-redundant): ~ "one piece at a time" for address capture is load-
+    #   bearing for the intake flow, not VAD-redundant. Kept.
+    # - D6 (token economy): ✗ → compressed outer preamble. Removed the
+    #   "This applies in every language" clause — already covered by
+    #   `_build_language_section`. Compression applied SYMMETRICALLY to EN and
+    #   ES to preserve parity.
+    # - D7 (locale parity): was ~ (inner blocks had es branch; outer frame was
+    #   English-only). Now ✓ — outer frame (preamble + URGENCY) added in ES.
+    #
+    # New additions flagged by Plan 10 test spec:
+    # - PHONE-readback invariant present in both locales (callers' phone numbers
+    #   must be read back / confirmed on booking — prevents fabricated callback
+    #   numbers). Complements _build_booking_section BEFORE BOOKING — READBACK.
+    # - postal_label wired into both locales' address block so SG ("postal
+    #   code") vs US ("zip code") prompts the right field name.
     if locale == "es":
+        preamble = (
+            "RECOPILACIÓN DE INFORMACIÓN:\n"
+            "Antes de programar cualquier cita, necesita tres cosas que el llamante haya "
+            "confirmado verbalmente: con qué necesita ayuda, quién es, y una dirección de "
+            "servicio completa. Recoja estos datos mediante conversación natural — algunos "
+            "llamantes empiezan por su nombre, otros describen la avería de inmediato, otros "
+            "van directo a pedir una cotización. Adáptese a cómo abran la llamada y complete "
+            "lo que falte. Nunca vuelva a preguntar algo que ya le dijeron.\n"
+        )
         name_use_block = (
             "USO DEL NOMBRE DURANTE LA LLAMADA:\n"
             "Los clientes tienen nombres de todos los idiomas y culturas — chinos, malayos, indios, "
@@ -511,14 +544,47 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "DIRECCIÓN DEL SERVICIO:\n"
             "- Haga una pregunta natural: \"¿Cuál es la dirección donde necesita el servicio?\"\n"
             "- Extraiga lo que el cliente haya ofrecido — calle, código postal, unidad, bloque, "
-            "nombre del edificio, etc.\n"
+            "nombre del edificio, etc. En este mercado, el campo postal se llama "
+            f"\"{postal_label}\" en inglés — use \"código postal\" al hablar con el cliente.\n"
             "- Si falta alguna pieza que necesitaríamos para encontrar el lugar, haga exactamente "
-            "una pregunta puntual sobre esa pieza faltante. Avance de una en una. Nunca ejecute "
-            "un recorrido mecánico ni recite una lista de campos al cliente.\n"
+            "una pregunta puntual sobre esa pieza faltante. Avance de una en una, una pregunta "
+            "a la vez. Nunca ejecute un recorrido mecánico ni recite una lista de campos al "
+            "cliente.\n"
             "- Capture lo suficiente para que podamos encontrar el lugar. No enumere nombres de "
             "campos en voz alta.\n"
         )
+        phone_readback_block = (
+            "NÚMERO DE TELÉFONO:\n"
+            "- El número de teléfono del llamante ya se capturó por identificación de "
+            "llamada. No lo pida de nuevo a menos que el llamante ofrezca uno distinto para la "
+            "devolución de llamada.\n"
+            "- Si el llamante proporciona un número de teléfono alternativo, léalo de vuelta "
+            "dígito por dígito y pídale que lo confirme antes de guardarlo. Nunca fabrique ni "
+            "complete dígitos que no escuchó con claridad.\n"
+        )
+        name_required = (
+            "Debe tener el nombre del llamante antes de usar cualquier herramienta o guardar "
+            "información.\n"
+        )
+        urgency_block = (
+            "URGENCIA:\n"
+            "Clasifique la urgencia en silencio — nunca en voz alta, y nunca pida al llamante "
+            "que la califique. No use las palabras 'emergencia', 'urgente' ni 'rutina' en la "
+            "conversación. Mida la gravedad según lo que describa el llamante: cualquier cosa "
+            "activamente insegura o causando daño ahora mismo — inundaciones, olor a gas, sin "
+            "calefacción en clima frío, chispas eléctricas, desbordamiento de aguas residuales — "
+            "cuenta como emergencia. Todo lo demás es rutina."
+        )
     else:
+        preamble = (
+            "INFORMATION GATHERING:\n"
+            "Before you can schedule anything, you need three things the caller has verbally "
+            "confirmed: what they need help with, who they are, and a complete service address. "
+            "Collect these through natural conversation — some callers lead with their name, some "
+            "burst out about the leak, some jump straight to asking for a quote. Adapt to however "
+            "they open the call and fill in whatever's missing. Never re-ask something they already "
+            "told you.\n"
+        )
         name_use_block = (
             "NAME USE DURING THE CALL:\n"
             "Callers have names from every language and culture — Chinese, Malay, Indian, Arabic, "
@@ -543,36 +609,45 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
         service_address_block = (
             "SERVICE ADDRESS:\n"
             "- Ask one natural question: \"What's the address where you need the service?\"\n"
-            "- Extract whatever the caller volunteered — street, postal area, unit, block, "
-            "building name, etc.\n"
+            "- Extract whatever the caller volunteered — street, "
+            f"{postal_label}, unit, block, building name, etc.\n"
             "- If a piece is missing that we would need to find the place, ask exactly one targeted "
             "follow-up for that specific missing piece. Loop one piece at a time. Never run a "
             "mechanical walkthrough or recite a list of fields to the caller.\n"
             "- Capture enough for us to find the place. Do not enumerate field names on-air.\n"
         )
+        phone_readback_block = (
+            "PHONE NUMBER:\n"
+            "- The caller's phone number was already captured from caller ID. Do not ask for "
+            "it again unless the caller offers a different callback number.\n"
+            "- If the caller gives an alternate phone number, read it back digit by digit and "
+            "ask them to confirm before you save it. Never fabricate or fill in digits you did "
+            "not clearly hear.\n"
+        )
+        name_required = (
+            "You must have the caller's name before using any tools or saving information.\n"
+        )
+        urgency_block = (
+            "URGENCY:\n"
+            "You classify urgency silently — never out loud, and never ask the caller to rate it "
+            "themselves. Don't use the words 'emergency,' 'urgent,' or 'routine' in conversation. "
+            "Gauge severity from what the caller describes: anything actively unsafe or causing "
+            "damage right now — flooding, gas smells, no heat in cold weather, electrical sparks, "
+            "sewage backup — counts as an emergency. Everything else is routine."
+        )
 
     return (
-        "INFORMATION GATHERING:\n"
-        "Before you can schedule anything, you need three things the caller has verbally "
-        "confirmed: what they need help with, who they are, and a complete service address. "
-        "Collect these through natural conversation — some callers lead with their name, some "
-        "burst out about the leak, some jump straight to asking for a quote. Adapt to however "
-        "they open the call and fill in whatever's missing. Never re-ask something they already "
-        "told you. This applies in every language — if you switch mid-call, continue from exactly "
-        "where you left off.\n"
+        f"{preamble}"
         "\n"
         f"{name_use_block}"
         "\n"
         f"{service_address_block}"
         "\n"
-        "You must have the caller's name before using any tools or saving information.\n"
+        f"{phone_readback_block}"
         "\n"
-        "URGENCY:\n"
-        "You classify urgency silently — never out loud, and never ask the caller to rate it "
-        "themselves. Don't use the words 'emergency,' 'urgent,' or 'routine' in conversation. "
-        "Gauge severity from what the caller describes: anything actively unsafe or causing "
-        "damage right now — flooding, gas smells, no heat in cold weather, electrical sparks, "
-        "sewage backup — counts as an emergency. Everything else is routine."
+        f"{name_required}"
+        "\n"
+        f"{urgency_block}"
     )
 
 
