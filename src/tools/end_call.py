@@ -6,7 +6,9 @@ Gemini generates the farewell, then we disconnect the SIP participant.
 
 import asyncio
 import logging
+import time
 
+import sentry_sdk
 from livekit import api
 from livekit.agents import function_tool, RunContext
 
@@ -77,6 +79,23 @@ def create_end_call_tool(deps: dict):
         ),
     )
     async def end_call(context: RunContext) -> str:
+        # Phase 60.3 Stream A: capture end_call invocation timestamp on the
+        # per-call diagnostic record (R-A4). diag_record is seeded in
+        # agent.py entrypoint as deps["_diag_record"] = [{...}].
+        now_ms = int(time.time() * 1000)
+        diag = deps.get("_diag_record")
+        if diag and isinstance(diag, list) and len(diag) > 0 and diag[0] is not None:
+            diag[0]["end_call_invoked_at"] = now_ms
+        try:
+            sentry_sdk.add_breadcrumb(
+                category="goodbye_race",
+                message="end_call invoked",
+                data={"ts_ms": now_ms, "call_id": deps.get("call_id")},
+                level="info",
+            )
+        except Exception:
+            pass  # diagnostic breadcrumb must never block tool execution
+
         deps["call_end_reason"][0] = "agent_ended"
         asyncio.create_task(_delayed_disconnect(deps))
         # Let any in-flight sentence finish naturally (the disconnect task

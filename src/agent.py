@@ -12,8 +12,10 @@ Architecture:
 """
 
 import os
+import re
 import json
 import time
+import hashlib
 import asyncio
 import logging
 from datetime import datetime
@@ -55,6 +57,82 @@ BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
 
 # Timeout for SIP participant to join the room (seconds)
 PARTICIPANT_TIMEOUT_S = 30
+
+
+# ── Phase 60.3 Stream A: goodbye-race diagnostic instrumentation ──────────
+
+class _GoodbyeDiagHandler(logging.Handler):
+    """Captures text_done/audio_done from the livekit.agents
+    _SegmentSynchronizerImpl.playback_finished warning (R-A3).
+
+    Attached to logging.getLogger("livekit.agents") per-call; removed in
+    _flush_goodbye_diag() to prevent per-call handler accumulation.
+
+    The warning is emitted at synchronizer.py:268-279 with extra=
+    {"text_done": bool, "audio_done": bool}, which standard logging
+    semantics surface as attributes on the LogRecord.
+    """
+    def __init__(self, diag_record):
+        super().__init__()
+        self._diag_record = diag_record
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if "playback_finished called before text/audio" in record.getMessage():
+                self._diag_record[0]["playback_finished_at"] = int(time.time() * 1000)
+                self._diag_record[0]["text_done"] = getattr(record, "text_done", None)
+                self._diag_record[0]["audio_done"] = getattr(record, "audio_done", None)
+        except Exception:
+            pass  # diagnostic handler must never raise
+
+
+# Redaction regex for E.164-shaped phone numbers in transcript tails.
+# Matches an optional '+' followed by 7-15 digits (E.164 standard length).
+# Applied to transcript_tail so caller-spoken or otherwise-captured numbers
+# never land in Railway logs / Sentry breadcrumbs (T-60.3-01 mitigation).
+_PHONE_REDACT_RE = re.compile(r"\+?\d{7,15}")
+
+
+async def _flush_goodbye_diag(
+    *,
+    diag_record: list,
+    transcript_turns: list,
+    tool_call_log: list,
+    goodbye_handler: logging.Handler,
+) -> None:
+    """Phase 60.3 Stream A (R-A7): flush the goodbye-race diagnostic record
+    as a [goodbye_race] logger.info line + Sentry breadcrumb, then remove
+    the _GoodbyeDiagHandler from the livekit.agents logger.
+
+    This helper is invoked as the FIRST statement of _on_close_async so the
+    record survives the post-call pipeline's 8s timeout (Fix I monitoring).
+
+    transcript_tail is phone-redacted (T-60.3-01): any E.164-shaped substring
+    is replaced with '[PHONE]' before serialization — protects both the
+    SIP-attrs-known from_number AND anything the caller spoke aloud.
+    """
+    try:
+        rec = diag_record[0]
+        tail_parts = []
+        for turn in transcript_turns[-3:]:
+            tail_parts.append(f"{turn.get('role', '?')}: {turn.get('content', '')}")
+        transcript_tail = " | ".join(tail_parts)[:500]
+        rec["transcript_tail"] = _PHONE_REDACT_RE.sub("[PHONE]", transcript_tail)
+        rec["tool_call_log_tail"] = list((tool_call_log or []))[-5:]
+        logger.info("[goodbye_race] %s", json.dumps(rec, default=str))
+        sentry_sdk.add_breadcrumb(
+            category="goodbye_race",
+            message="Call ended — diag record",
+            data=rec,
+            level=("warning" if rec.get("text_done") is False else "info"),
+        )
+    except Exception as e:
+        logger.warning("[goodbye_race] flush failed: %s", e)
+    finally:
+        try:
+            logging.getLogger("livekit.agents").removeHandler(goodbye_handler)
+        except Exception:
+            pass
 
 
 class VocoAgent(Agent):
@@ -188,6 +266,29 @@ async def entrypoint(ctx: JobContext):
         # Default disconnect reason — tools update this via deps closure
         call_end_reason = ["caller_hangup"]
 
+        # Phase 60.3 Stream A: per-call goodbye-race diagnostic record (R-A6).
+        # Single-element-list closure pattern mirrors call_end_reason above.
+        # The SAME list is referenced via `deps["_diag_record"]` (for tool
+        # writes) AND via the entrypoint closure `diag_record` (for
+        # session-level handler writes).
+        diag_record = [{
+            "schema_version": 1,
+            "call_id": call_id,
+            "tenant_id": tenant_id,
+            "caller_phone_sha256": (
+                hashlib.sha256(from_number.encode("utf-8")).hexdigest()[:16]
+                if from_number else None
+            ),
+            "started_at_ms": int(time.time() * 1000),
+        }]
+
+        # Install the _GoodbyeDiagHandler on the livekit.agents logger so the
+        # _SegmentSynchronizerImpl.playback_finished warning's text_done /
+        # audio_done extra= fields land on diag_record[0] (R-A3). The handler
+        # is removed in _flush_goodbye_diag() at call close.
+        _goodbye_handler = _GoodbyeDiagHandler(diag_record)
+        logging.getLogger("livekit.agents").addHandler(_goodbye_handler)
+
         # ── Create tools with mutable deps (call_uuid filled in after DB query) ──
         deps = {
             "supabase": supabase,
@@ -213,6 +314,11 @@ async def entrypoint(ctx: JobContext):
             # Tools self-append on completion. Forwarded to post_call for
             # silent hallucination detection (no caller- or owner-facing impact).
             "_tool_call_log": [],
+            # Phase 60.3 Stream A: per-call goodbye-race diagnostic record.
+            # Same list reference as the entrypoint closure `diag_record`
+            # above — tools write via deps, session-level handlers write via
+            # the closure. end_call.py writes end_call_invoked_at here.
+            "_diag_record": diag_record,
             # P56: merged Jobber+Xero caller-context (pre-fetched above,
             # concurrent per-provider 2.5s budget). None means BOTH providers
             # missed / timed out — check_customer_account tool returns the
@@ -272,6 +378,35 @@ async def entrypoint(ctx: JobContext):
                     "content": text,
                     "timestamp": int(time.time() * 1000),
                 })
+                # Phase 60.3 Stream A (R-A1): capture last_text_token_at on
+                # agent turns only — the last agent turn before end_call IS
+                # the goodbye.
+                if role == "agent":
+                    diag_record[0]["last_text_token_at"] = int(event.created_at * 1000)
+
+        # Phase 60.3 Stream A (R-A5): session-level close event →
+        # session_close_at + close_reason enum string.
+        @session.on("close")
+        def _on_close_event(event):
+            try:
+                diag_record[0]["session_close_at"] = int(event.created_at * 1000)
+                diag_record[0]["close_reason"] = event.reason.value
+            except Exception:
+                pass
+
+        # Phase 60.3 Stream A (R-A5): room-level participant_disconnected →
+        # disconnect_reason (CLIENT_INITIATED vs SERVER_INITIATED) which
+        # CloseEvent does not expose. Only captures the SIP caller; agent-side
+        # disconnects route through session.on("close").
+        @ctx.room.on("participant_disconnected")
+        def _on_participant_disconnected(participant):
+            try:
+                if participant.identity == sip_participant_identity:
+                    diag_record[0]["participant_disconnect_at"] = int(time.time() * 1000)
+                    dr = participant.disconnect_reason or rtc.DisconnectReason.UNKNOWN_REASON
+                    diag_record[0]["disconnect_reason"] = rtc.DisconnectReason.Name(dr)
+            except Exception:
+                pass
 
         # ── Session error handler ──
         @session.on("error")
@@ -285,6 +420,18 @@ async def entrypoint(ctx: JobContext):
         recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"
 
         async def _on_close_async(reason: str = ""):
+            # Phase 60.3 Stream A (R-A7): flush goodbye-race diagnostic record
+            # FIRST. If run_post_call_pipeline below times out (8s Fix I
+            # monitoring), the record is already logged to Railway and
+            # attached as a Sentry breadcrumb. Handler cleanup happens inside
+            # the helper's finally block so it runs even on flush error.
+            await _flush_goodbye_diag(
+                diag_record=diag_record,
+                transcript_turns=transcript_turns,
+                tool_call_log=deps.get("_tool_call_log", []) or [],
+                goodbye_handler=_goodbye_handler,
+            )
+
             end_timestamp = int(time.time() * 1000)
             duration_sec = round((end_timestamp - start_timestamp) / 1000)
             logger.info(
@@ -479,6 +626,22 @@ async def entrypoint(ctx: JobContext):
             ),
         )
         logger.info(f"[agent] Session started: room={call_id}")
+
+        # Phase 60.3 Stream A (R-A2): wrap session.output.audio.capture_frame
+        # to stamp last_audio_frame_at on every emitted frame. Per Pitfall 2
+        # this wrap MUST happen AFTER session.start() — audio is None before.
+        # Null-guarded because some session configurations may lack audio.
+        try:
+            if session.output.audio is not None:
+                _original_capture_frame = session.output.audio.capture_frame
+
+                async def _timed_capture_frame(frame):
+                    diag_record[0]["last_audio_frame_at"] = int(time.time() * 1000)
+                    return await _original_capture_frame(frame)
+
+                session.output.audio.capture_frame = _timed_capture_frame  # type: ignore[method-assign]
+        except Exception as e:
+            logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
         # ── Generate greeting immediately after session starts ──
         session.generate_reply(

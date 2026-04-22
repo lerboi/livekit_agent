@@ -220,10 +220,17 @@ async def test_flush_is_first_in_on_close_even_if_pipeline_times_out(
             goodbye_handler=goodbye_handler,
         )
 
-    # Breadcrumb fired.
-    mock_breadcrumb.assert_called_once()
-    call_kwargs = mock_breadcrumb.call_args.kwargs
-    assert call_kwargs.get("category") == "goodbye_race"
+    # Breadcrumb fired with category="goodbye_race". Sentry's logging
+    # integration may also auto-emit an info-log breadcrumb from the
+    # logger.info call, so we filter rather than assert_called_once.
+    goodbye_breadcrumbs = [
+        call for call in mock_breadcrumb.call_args_list
+        if call.kwargs.get("category") == "goodbye_race"
+    ]
+    assert len(goodbye_breadcrumbs) == 1, (
+        f"expected exactly one goodbye_race breadcrumb; "
+        f"got {len(goodbye_breadcrumbs)} (all: {mock_breadcrumb.call_args_list})"
+    )
 
     # Logger emitted one [goodbye_race] line with JSON-parseable payload.
     goodbye_lines = [
