@@ -543,16 +543,29 @@ def _build_transfer_section(business_name: str) -> str:
 
 def _build_call_duration_section(t) -> str:
     return (
-        "CALL DURATION:\n"
-        "- At 9 minutes, begin wrapping up the conversation.\n"
-        "- Hard maximum: 10 minutes.\n"
+        "ENDING THE CALL — CRITICAL RULE:\n"
+        "Your farewell must be FULLY spoken and heard by the caller before the line "
+        "disconnects. Completing the goodbye is a two-step commitment: (1) speak the "
+        "entire goodbye phrase, (2) let a brief silence follow, (3) THEN in a "
+        "separate turn with no additional speech, call end_call.\n"
         "\n"
-        "ENDING THE CALL:\n"
-        "Your farewell must be fully spoken and heard by the caller before the line "
-        "disconnects. Complete your goodbye naturally and let a brief pause follow. "
-        "Then, in a separate step with no additional speech, call end_call. "
-        "If you speak and disconnect simultaneously, the caller hears your voice cut off "
-        "mid-sentence — this damages their experience."
+        "If you speak and call end_call in the same turn, the audio pipeline truncates "
+        "your final words and the caller hears your voice cut off mid-sentence. This "
+        "damages the caller's experience and is the worst possible end to an otherwise "
+        "successful call.\n"
+        "\n"
+        "Failure mode — WRONG:\n"
+        "  You (speaking): 'Thank you for calling Voco — have a great' [end_call invoked here]\n"
+        "  Caller hears: 'Thank you for calling Voco — have a' *click*\n"
+        "\n"
+        "Correct path — RIGHT:\n"
+        "  You (speaking): 'Thank you for calling Voco — have a great day. Goodbye.'\n"
+        "  [SILENCE — at least one full beat, do not speak]\n"
+        "  You: [call end_call tool with no additional speech]\n"
+        "\n"
+        "CALL DURATION BOUNDS:\n"
+        "- At 9 minutes, begin wrapping up the conversation.\n"
+        "- Hard maximum: 10 minutes."
     )
 
 
@@ -607,6 +620,7 @@ def build_system_prompt(
         _build_voice_behavior_section(),
         _build_corrections_section(),
         _build_outcome_words_section(),
+        _build_call_duration_section(t),          # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P)
         _build_tool_narration_section(),
         _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
@@ -624,7 +638,6 @@ def build_system_prompt(
     sections.extend(
         [
             _build_transfer_section(business_name),
-            _build_call_duration_section(t),
         ]
     )
 
