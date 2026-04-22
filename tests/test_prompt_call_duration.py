@@ -127,10 +127,11 @@ def test_section_is_position_5_or_earlier_in_both_locales():
     """D3: in the assembled prompt (both locales), the call_duration
     CRITICAL RULE header must appear BEFORE the tool_narration header —
     i.e. inside the top-attention band (Plan 3 Branch P invariant,
-    extended to the es branch by Plan 5)."""
-    for locale, cd_header in (
-        ("en", "ENDING THE CALL — CRITICAL RULE"),
-        ("es", "TERMINAR LA LLAMADA — REGLA CRÍTICA"),
+    extended to the es branch by Plan 5; tool_narration es header added
+    by Plan 6)."""
+    for locale, cd_header, tn_header in (
+        ("en", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION — CRITICAL RULE"),
+        ("es", "TERMINAR LA LLAMADA — REGLA CRÍTICA", "NARRACIÓN DE HERRAMIENTAS — REGLA CRÍTICA"),
     ):
         assembled = build_system_prompt(
             locale=locale,
@@ -138,11 +139,9 @@ def test_section_is_position_5_or_earlier_in_both_locales():
             onboarding_complete=True,
         )
         idx_cd = assembled.index(cd_header)
-        # tool_narration header is English-only in the current codebase
-        # (Plan 6 will add the es branch). For locale='es' the assembled
-        # prompt still contains the English tool_narration header — this
-        # is expected pre-Plan-6.
-        idx_tn = assembled.index("TOOL NARRATION — CRITICAL RULE")
+        # Post-Plan-6: tool_narration has a locale-aware header. Pick the
+        # one matching the current locale under test.
+        idx_tn = assembled.index(tn_header)
         assert idx_cd < idx_tn, (
             f"[locale={locale}] call_duration CRITICAL RULE header must "
             f"appear before tool_narration header in the assembled prompt"

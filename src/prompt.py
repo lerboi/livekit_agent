@@ -109,7 +109,60 @@ def _build_outcome_words_section() -> str:
     )
 
 
-def _build_tool_narration_section() -> str:
+def _build_tool_narration_section(locale: str) -> str:
+    # Phase 60.3 Plan 06: locale-aware builder (D7 parity).
+    # EN body preserved verbatim from the post-60.2 state — the 60.2 Plan 05
+    # Pitfall 6 inverted assertions (no runtime/session.say; model speaks
+    # filler) are hard invariants. D5/D6 compression deferred because the
+    # 60.2 guard-rail text is the source of the invariant — reworking it
+    # invites regression. See 60.3-PROMPT-AUDIT.md §_build_tool_narration_section.
+    if locale == "es":
+        return (
+            "NARRACIÓN DE HERRAMIENTAS — REGLA CRÍTICA:\n"
+            "Antes de llamar a CUALQUIER herramienta, DEBE primero pronunciar "
+            "una frase de relleno natural lo suficientemente larga como para "
+            "cubrir el tiempo de ejecución de la herramienta. Las herramientas "
+            "tardan de uno a tres segundos en ejecutarse, y el silencio en una "
+            "llamada telefónica en vivo se siente roto para el llamante — si "
+            "se queda en silencio, el llamante a menudo dice '¿Hola?', lo cual "
+            "cancela la herramienta en vuelo y reinicia todo el turno. Esto no "
+            "es opcional.\n"
+            "\n"
+            "Reglas:\n"
+            "1. Nunca emita una llamada a una herramienta sin hablar primero.\n"
+            "2. El relleno debe ser natural y conversacional — no 'por favor "
+            "espere' (demasiado frío) ni 'un momento por favor' (demasiado "
+            "formal).\n"
+            "3. APUNTE A ~3 SEGUNDOS de habla (no 1 segundo). Un relleno de "
+            "dos palabras como 'Un segundo.' termina antes de que la "
+            "herramienta responda y crea el hueco de silencio que dispara "
+            "cancelaciones. Un relleno más largo y cálido cubre la latencia "
+            "limpiamente.\n"
+            "4. Pronuncie el relleno, luego invoque la herramienta "
+            "inmediatamente. No espere a que el llamante responda.\n"
+            "5. El relleno es un contrato. Si lo pronuncia pero no invoca la "
+            "herramienta en el mismo turno, le ha mentido al llamante — vea "
+            "PALABRAS DE RESULTADO. Relleno sin llamada real a herramienta es "
+            "peor que el silencio.\n"
+            "\n"
+            "Ejemplos por herramienta (elija uno y varíe — estas son frases "
+            "de ~3 segundos):\n"
+            "- check_availability: 'Déjeme revisar el calendario un momento.' "
+            "/ 'Déme un segundo para ver qué tenemos abierto ese día.' / "
+            "'Déjeme echar un vistazo al horario — un segundo.'\n"
+            "- book_appointment: 'Muy bien, déjeme reservar ese horario para "
+            "usted ahora.' / 'Déjeme reservárselo — déme un segundo.' / "
+            "'Perfecto, reservando ese horario ahora — un momento.'\n"
+            "- capture_lead: 'Déjeme anotar sus datos para que el equipo dé "
+            "seguimiento.' / 'Déjeme guardar toda esa información — un "
+            "segundo.'\n"
+            "- transfer_call: 'Déjeme conectarle con alguien del equipo — un "
+            "momento.' / 'Conectándole ahora, un segundo.'\n"
+            "\n"
+            "El silencio mientras una herramienta se ejecuta es lo segundo "
+            "peor que puede hacer en una llamada en vivo. Relleno sin llamada "
+            "real a herramienta es lo peor."
+        )
     return (
         "TOOL NARRATION — CRITICAL RULE:\n"
         "Before calling ANY tool, you MUST first speak a natural filler phrase "
@@ -648,7 +701,7 @@ def build_system_prompt(
         _build_corrections_section(),
         _build_outcome_words_section(),
         _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
-        _build_tool_narration_section(),
+        _build_tool_narration_section(locale),
         _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t),

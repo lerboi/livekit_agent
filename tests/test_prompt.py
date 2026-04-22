@@ -48,7 +48,11 @@ from src.prompt import (
 
 
 def test_tool_narration_does_not_claim_runtime_filler():
-    section = _build_tool_narration_section()
+    # Phase 60.3 Plan 06: signature changed from () to (locale) for D7 locale
+    # parity. Passing locale='en' preserves the exact 60.2 Pitfall 6
+    # invariants being asserted here — this is a signature change, not a
+    # semantics change. EN body is verbatim-preserved.
+    section = _build_tool_narration_section("en")
     assert isinstance(section, str)
     lowered = section.lower()
     assert "runtime automatically plays" not in lowered
@@ -58,7 +62,11 @@ def test_tool_narration_does_not_claim_runtime_filler():
 
 
 def test_tool_narration_instructs_model_to_speak_filler():
-    section = _build_tool_narration_section()
+    # Phase 60.3 Plan 06: signature changed from () to (locale) for D7 locale
+    # parity. Passing locale='en' preserves the exact 60.2 Pitfall 6
+    # invariants being asserted here — this is a signature change, not a
+    # semantics change. EN body is verbatim-preserved.
+    section = _build_tool_narration_section("en")
     lowered = section.lower()
     # The model IS the filler source — ensure the rule is present.
     assert "speak" in lowered and "filler" in lowered

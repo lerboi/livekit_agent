@@ -63,10 +63,15 @@ def test_en_instructs_model_to_speak_filler():
 
 
 def test_en_instructs_three_second_target():
-    """EN branch keeps the ~3-second filler duration target (Rule 3)."""
+    """EN branch keeps the ~3-second filler duration target (Rule 3).
+
+    Case-insensitive match — Rule 3's "AIM FOR ~3 SECONDS" header uses
+    uppercase; the example-list prefix "these are ~3-second phrases"
+    uses lowercase. Either form satisfies the invariant.
+    """
     section = _build_tool_narration_section("en")
-    # Either "~3 seconds" or "3 seconds" acceptable.
-    assert ("~3 seconds" in section) or ("3 seconds" in section)
+    lowered = section.lower()
+    assert ("~3 seconds" in lowered) or ("3 seconds" in lowered)
 
 
 # --- ES invariants (new Spanish branch, D7 locale parity) ---
