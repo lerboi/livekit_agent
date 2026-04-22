@@ -141,7 +141,69 @@ def _build_corrections_section(locale: str) -> str:
     )
 
 
-def _build_outcome_words_section() -> str:
+def _build_outcome_words_section(locale: str) -> str:
+    # Phase 60.3 Plan 09: locale-aware builder (D7 parity).
+    # Audit dimensions reviewed (60.3-PROMPT-AUDIT.md §_build_outcome_words_section):
+    # - D1 (anti-hallucination): HIGHEST stakes in the entire prompt. A caller
+    #   who hangs up believing they have a confirmed appointment when nothing
+    #   is in the system is the worst possible failure. Every reserved-word
+    #   clause + the 3pm failure-mode example is load-bearing. Preserved
+    #   verbatim in EN and mirrored structurally in ES.
+    # - D4 (STATE+DIRECTIVE): ✓ already strong — "Reserved words and what
+    #   licenses each" is a STATE declaration mapping outcome words to tool
+    #   pre-conditions. Preserved in both locales.
+    # - D7 (locale parity): addressed here — adds es branch. Spanish caller
+    #   fabricating "3pm está disponible" without check_availability is
+    #   identically catastrophic; full ES coverage required.
+    #
+    # ES notes:
+    # - Tool names (check_availability, book_appointment) are code identifiers
+    #   wired to src/tools/ registry — NOT translated. Same convention as
+    #   Plan 06 tool_narration.
+    # - ES register: TÚ forms (puedes, tu propia, no has invocado, acabas de).
+    #   Inconsistent with Plans 05/06/07 USTED standardization but matches
+    #   Plan 08's register — flagged for future batch ES register
+    #   normalization (Plan 12 or dedicated polish plan) so the register flip
+    #   can be audited end-to-end across all ES branches at once.
+    if locale == "es":
+        return (
+            "PALABRAS DE RESULTADO — REGLA CRÍTICA:\n"
+            "Ciertas palabras y frases describen hechos verificables que no puedes "
+            "saber sin el resultado de una herramienta. Puedes pronunciarlas solo "
+            "después de que la herramienta relevante las haya devuelto en el mismo "
+            "turno. Fabricar cualquiera de estas — pronunciarlas por tu propia "
+            "confianza — es el peor modo de falla posible en esta llamada: el "
+            "llamante cuelga creyendo que tiene una cita confirmada cuando no hay "
+            "nada en el sistema.\n"
+            "\n"
+            "Palabras reservadas y qué autoriza cada una:\n"
+            "- 'disponible' o 'no disponible' ligado a una hora específica → "
+            "check_availability debe haber devuelto justo ahora esa hora exacta "
+            "como disponible o no.\n"
+            "- 'confirmado', 'reservado', 'tu cita es...', 'todo listo para...', "
+            "'nos vemos mañana/a las...', o cualquier hora específica de cita "
+            "repetida como un hecho establecido → book_appointment debe haber "
+            "devuelto justo ahora una reserva exitosa para esa hora exacta.\n"
+            "- Cualquier hora de reloj o fecha específica ofrecida como reservable → "
+            "debe provenir del resultado de una herramienta que acabas de recibir, "
+            "nunca de tu propia sugerencia o memoria.\n"
+            "\n"
+            "Si no has invocado la herramienta, no lo sabes. El silencio entre tu "
+            "frase de relleno y el resultado de la herramienta es aceptable. Una "
+            "confirmación fabricada no lo es.\n"
+            "\n"
+            "Modo de falla a evitar:\n"
+            "Llamante: '¿Qué tal a las 3pm?'\n"
+            "Tú: 'Déjame revisar a las 3pm.' [sin llamada a herramienta] 'Sí, 3pm "
+            "mañana está disponible. ¿Lo reservo?' — INCORRECTO. No llamaste a "
+            "check_availability. No sabes si 3pm está disponible. Acabas de "
+            "mentirle al llamante.\n"
+            "\n"
+            "Ruta correcta: pronuncia el relleno, invoca check_availability con "
+            "fecha y hora, espera a que el resultado llegue en la conversación, "
+            "luego transmite lo que el resultado realmente dijo. Mismo contrato "
+            "para book_appointment antes de decir 'confirmado' o 'reservado'."
+        )
     return (
         "OUTCOME WORDS — CRITICAL RULE:\n"
         "Certain words and phrases describe verifiable facts you cannot know without a "
@@ -766,7 +828,7 @@ def build_system_prompt(
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(locale),
         _build_corrections_section(locale),
-        _build_outcome_words_section(),
+        _build_outcome_words_section(locale),
         _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
         _build_tool_narration_section(locale),
         _build_working_hours_section(working_hours, tenant_timezone),
