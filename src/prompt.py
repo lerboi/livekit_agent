@@ -663,12 +663,153 @@ def _build_intake_questions_section(intake_questions: str | None) -> str:
 
 
 def _build_booking_section(business_name: str, onboarding_complete: bool, postal_label: str, locale: str = "en") -> str:
+    # Phase 60.3 Plan 11: invariant-lock + D7 outer-frame parity (was ~85%
+    # English-only — ES covered only the readback block; now both locales
+    # carry the full BOOKING / SCHEDULING / AVAILABILITY / HANDLING THE
+    # RESULT / BEFORE BOOKING — READBACK / AFTER BOOKING protocol).
+    #
+    # Audit dimension decisions (60.3-PROMPT-AUDIT.md §_build_booking_section):
+    # - D1 (anti-hallucination — CRITICAL): ✓ Two-step contract
+    #   (check_availability BEFORE book_appointment), mandatory readback,
+    #   and anti-fabrication rule ("do not say booked/confirmed until
+    #   book_appointment returns success") preserved VERBATIM in EN and
+    #   mirrored in ES. This is the prompt's single most-important
+    #   anti-hallucination surface — the final checkpoint before commit.
+    # - D2 (realtime-model): ✓ Concrete examples preserved (2pm/3pm
+    #   fresh-check example in EN; mirrored in ES with a parallel
+    #   2pm/3pm example).
+    # - D3 (ordering): ✓ Position 13 unchanged.
+    # - D4 (STATE+DIRECTIVE): ✓ "NO TIME-CONFIRMATION QUESTIONS BEFORE
+    #   CHECKING" and readback-acknowledgment preserved in both locales.
+    # - D5 (VAD-redundant): ✓ No pacing prose.
+    # - D6 (token economy): ~ Long section but each block earns its
+    #   place. Minor compression on the vague-time-windows bullet
+    #   DEFERRED — rewording the D1 spine invites regression.
+    # - D7 (locale parity): was ~ (readback-only ES), now ✓ — full
+    #   outer frame in ES with parallel structure to EN.
+    #
+    # Preservation of existing content:
+    # - EN body preserved verbatim from pre-60.3-11 state (the audit
+    #   flagged the ES gap, not EN prose quality).
+    # - ES readback block preserved verbatim from R-B1 — already
+    #   correct; wrapped with new ES outer frame rather than rewritten.
+    # - postal_label now wired into BOTH locales' readback prose for
+    #   address-field parametrization (SG "postal code" / US "zip code").
+    # - onboarding_complete=False path now includes business_name in
+    #   both locales for consistency.
+    #
+    # ES register: USTED (consistent with pre-60.3 ES readback block
+    # which already used USTED: "Lea", "acepte", "vuelva"). Extends the
+    # same register to the new outer frame.
+
+    if locale == "es":
+        if not onboarding_complete:
+            return (
+                "CAPACIDADES:\n"
+                f"Capture la información del llamante (nombre, teléfono, dirección, problema). "
+                f"La reserva aún no está disponible para {business_name} — hágale saber al "
+                "llamante que su información ha quedado anotada y que alguien del equipo dará "
+                "seguimiento."
+            )
+
+        return (
+            "RESERVA:\n"
+            "Su objetivo principal en cada llamada es dejar al llamante con una cita "
+            "confirmada: una fecha específica, una hora específica y una dirección de "
+            "servicio verificada. Guíe la conversación hacia eso de forma natural — no "
+            "fuerce si el llamante no está listo, pero tampoco se rinda a la primera "
+            "señal de duda.\n"
+            "\n"
+            "PROGRAMACIÓN:\n"
+            "Solo discuta la programación una vez que tenga el nombre del llamante, su "
+            "problema y una dirección confirmada. Las citas son solo para fechas y horas "
+            "futuras — si el llamante menciona una fecha pasada o una hora demasiado "
+            "pronta, dígaselo y guíelo hacia algo factible. La programación necesita día "
+            "y hora; si le dan uno, ayúdelo a decidir el otro antes de verificar.\n"
+            "\n"
+            "REGLAS DE DISPONIBILIDAD (no negociables):\n"
+            "- Todas las reglas de PALABRAS DE RESULTADO aplican aquí. No puede decir "
+            "'disponible', 'no disponible', ni mencionar ninguna hora específica como "
+            "reservable sin un resultado fresco de check_availability para esa fecha y "
+            "hora exactas en este turno.\n"
+            "- Cada nueva fecha u hora que el llamante mencione requiere una nueva "
+            "llamada a check_availability. Nunca confíe en resultados anteriores; la "
+            "disponibilidad cambia durante una llamada.\n"
+            "- Nunca lea ni enumere horarios disponibles al llamante — aunque pregunte "
+            "'¿qué tienen disponible?' o '¿tienen algún espacio?'. El llamante nombra "
+            "una hora, y usted la verifica.\n"
+            "- Si el llamante pregunta por una hora distinta de la que acaba de "
+            "verificar, debe llamar a check_availability de nuevo para la nueva hora. "
+            "Su respuesta anterior sobre un espacio distinto no prueba nada sobre si "
+            "el nuevo está libre.\n"
+            "- Para ventanas vagas como 'tarde', 'mañana', 'noche' o 'algún día de "
+            "esta semana', pida al llamante que nombre una hora específica antes de "
+            "verificar. No elija una hora por el llamante, y nunca invente ni insinúe "
+            "horas específicas usted mismo.\n"
+            "- SIN PREGUNTAS DE CONFIRMACIÓN DE HORA ANTES DE VERIFICAR. Cuando el "
+            "llamante nombre una fecha y hora específicas (ej. 'mañana a las 10', "
+            "'lunes a las 2'), diga su frase de relleno e invoque inmediatamente "
+            "check_availability con esa fecha y hora. NO pregunte '¿Entonces quiere "
+            "decir 10 de la mañana el lunes?' antes de la llamada a la herramienta — "
+            "el llamante ya le dijo la hora, y volver a preguntar añade 10+ segundos "
+            "de silencio muerto mientras esperan que verifique. Guarde el único "
+            "momento de confirmación para el bloque ANTES DE RESERVAR — LECTURA DE "
+            "CONFIRMACIÓN de abajo (dirección + nombre en una sola intervención, "
+            "una vez).\n"
+            "\n"
+            "Por ejemplo: si el llamante pregunta '¿está libre a las 2?' y usted "
+            "verifica que sí, luego preguntan '¿y a las 3?' — debe llamar a "
+            "check_availability de nuevo con las 3. Nunca diga 'solo las 2 está "
+            "libre' basándose en su respuesta anterior; solo verificó las 2, no la "
+            "ausencia de otros espacios.\n"
+            "\n"
+            "MANEJO DEL RESULTADO:\n"
+            "- Si el horario está disponible, proceda a reservar y confirme los "
+            "detalles completos al llamante (día, hora, dirección).\n"
+            "- Si la hora preferida del llamante no está disponible, ofrezca las 2-3 "
+            "alternativas más cercanas de forma natural — nunca una lista larga.\n"
+            "- Si nada funciona en su día preferido, pregunte si otro día funcionaría.\n"
+            f"- Si el día está completamente reservado, capture sus datos para que "
+            f"{business_name} dé seguimiento.\n"
+            f"- Las solicitudes de cotización se manejan como visitas — {business_name} "
+            "necesita ver el trabajo para dar una cotización precisa.\n"
+            "\n"
+            "ANTES DE RESERVAR — LECTURA DE CONFIRMACIÓN (obligatoria):\n"
+            "Lea de nuevo el nombre del cliente (si se capturó) y la dirección completa del "
+            f"servicio (calle, ciudad, estado/país, {postal_label}) en una sola intervención. "
+            "Este es el único momento autoritativo para verificar ambos. Orden: primero "
+            "el nombre, después la dirección (los nombres son más cortos, así que es "
+            "más probable que el cliente corrija el nombre antes de pasar a la dirección).\n"
+            "- Si el cliente corrige cualquier parte de la lectura, acepte la corrección "
+            "(la corrección del cliente SIEMPRE es correcta — vea CORRECCIONES más arriba) "
+            "y vuelva a leer la línea corregida completa antes de llamar a book_appointment. "
+            "Si vuelve a corregir, repita el ciclo: acepte, relea la línea corregida completa, "
+            "hasta que deje de corregir.\n"
+            "- Si no se capturó ningún nombre, lea solo la dirección. No haga una pausa para "
+            "pedir el nombre.\n"
+            "- Llame a book_appointment solo después de que el cliente haya reconocido la "
+            "lectura (el silencio o un 'sí' / 'correcto' explícito cuentan).\n"
+            "También necesita un espacio específico que el llamante haya elegido (con "
+            "horas de inicio/fin de los resultados de disponibilidad). Según PALABRAS "
+            "DE RESULTADO: no diga 'reservado', 'confirmado' ni ninguna hora específica "
+            "de la cita como un hecho consumado hasta que book_appointment haya "
+            "devuelto éxito en este turno.\n"
+            "\n"
+            "DESPUÉS DE RESERVAR:\n"
+            "Confirme los detalles completos de la cita (día, hora, dirección) y "
+            "pregunte si hay algo más en lo que pueda ayudar. Si un espacio fue tomado "
+            "entre su verificación y la reserva, ofrezca la alternativa más cercana "
+            "de inmediato."
+        )
+
+    # EN branch — preserved verbatim from pre-Plan-11 state. postal_label
+    # now wired into the readback address fields for SG/US parity.
     if not onboarding_complete:
         return (
             "CAPABILITIES:\n"
-            "Capture the caller's information (name, phone, address, issue). Booking is not yet "
-            "available — let the caller know their information has been noted and someone from "
-            "the team will follow up."
+            f"Capture the caller's information (name, phone, address, issue). Booking is not yet "
+            f"available for {business_name} — let the caller know their information has been noted "
+            "and someone from the team will follow up."
         )
 
     return (
@@ -723,38 +864,20 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         f"- Quote requests are handled as visits — {business_name} needs to see the job to give "
         "an accurate quote.\n"
         "\n"
-        + (
-            "ANTES DE RESERVAR — LECTURA DE CONFIRMACIÓN (obligatoria):\n"
-            "Lea de nuevo el nombre del cliente (si se capturó) y la dirección completa del "
-            "servicio en una sola intervención. Este es el único momento autoritativo para "
-            "verificar ambos. Orden: primero el nombre, después la dirección (los nombres son "
-            "más cortos, así que es más probable que el cliente corrija el nombre antes de "
-            "pasar a la dirección).\n"
-            "- Si el cliente corrige cualquier parte de la lectura, acepte la corrección "
-            "(la corrección del cliente SIEMPRE es correcta — vea CORRECCIONES más arriba) "
-            "y vuelva a leer la línea corregida completa antes de llamar a book_appointment. "
-            "Si vuelve a corregir, repita el ciclo: acepte, relea la línea corregida completa, "
-            "hasta que deje de corregir.\n"
-            "- Si no se capturó ningún nombre, lea solo la dirección. No haga una pausa para "
-            "pedir el nombre.\n"
-            "- Llame a book_appointment solo después de que el cliente haya reconocido la "
-            "lectura (el silencio o un 'sí' / 'correcto' explícito cuentan).\n"
-            if locale == "es"
-            else
-            "BEFORE BOOKING — READBACK (mandatory):\n"
-            "Read back the caller's name (if captured) and the full service address in one utterance. "
-            "This is the single authoritative verification moment for both name and address. Order: "
-            "name first, then address (names are shorter, so a caller is more likely to correct name "
-            "before moving on to address).\n"
-            "- If the caller corrects any part of the readback, accept the correction "
-            "(the caller's correction is ALWAYS correct — see CORRECTIONS above) "
-            "and re-read the corrected full line before calling book_appointment. "
-            "If they correct again, loop: accept, re-read the full corrected line, "
-            "until they stop correcting.\n"
-            "- If no name was captured, read back only the address. Do not pause to ask for a name.\n"
-            "- Call book_appointment only after the caller acknowledges the readback (silence or an "
-            "explicit 'yes' / 'that's right' counts).\n"
-        ) +
+        "BEFORE BOOKING — READBACK (mandatory):\n"
+        "Read back the caller's name (if captured) and the full service address "
+        f"(street, city, state/country, {postal_label}) in one utterance. "
+        "This is the single authoritative verification moment for both name and address. Order: "
+        "name first, then address (names are shorter, so a caller is more likely to correct name "
+        "before moving on to address).\n"
+        "- If the caller corrects any part of the readback, accept the correction "
+        "(the caller's correction is ALWAYS correct — see CORRECTIONS above) "
+        "and re-read the corrected full line before calling book_appointment. "
+        "If they correct again, loop: accept, re-read the full corrected line, "
+        "until they stop correcting.\n"
+        "- If no name was captured, read back only the address. Do not pause to ask for a name.\n"
+        "- Call book_appointment only after the caller acknowledges the readback (silence or an "
+        "explicit 'yes' / 'that's right' counts).\n"
         "You also need a specific slot the caller has chosen (with start/end times from "
         "the availability results). Per OUTCOME WORDS: do not speak 'booked', 'confirmed', or "
         "any specific appointment time as a settled fact until book_appointment has returned "
