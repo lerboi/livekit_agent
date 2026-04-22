@@ -541,7 +541,34 @@ def _build_transfer_section(business_name: str) -> str:
     )
 
 
-def _build_call_duration_section(t) -> str:
+def _build_call_duration_section(t, locale: str = "en") -> str:
+    if locale == "es":
+        return (
+            "TERMINAR LA LLAMADA — REGLA CRÍTICA:\n"
+            "Su despedida debe pronunciarse COMPLETAMENTE y ser escuchada por el "
+            "llamante antes de que la línea se desconecte. Completar la despedida "
+            "es un compromiso de dos pasos: (1) pronuncie la frase de despedida "
+            "completa, (2) deje que siga un breve silencio, (3) LUEGO en un turno "
+            "separado sin ninguna palabra adicional, llame a end_call.\n"
+            "\n"
+            "Si habla y llama a end_call en el mismo turno, el audio se corta y el "
+            "llamante escucha su voz cortada a mitad de la frase. Esto daña la "
+            "experiencia del llamante y es el peor final posible a una llamada "
+            "exitosa.\n"
+            "\n"
+            "Modo de falla — INCORRECTO:\n"
+            "  Usted (hablando): 'Gracias por llamar a Voco — que tenga un buen' [end_call aquí]\n"
+            "  El llamante oye: 'Gracias por llamar a Voco — que tenga un' *click*\n"
+            "\n"
+            "Ruta correcta — CORRECTO:\n"
+            "  Usted (hablando): 'Gracias por llamar a Voco — que tenga un buen día. Adiós.'\n"
+            "  [SILENCIO — al menos un tiempo completo, no hable]\n"
+            "  Usted: [llame a la herramienta end_call sin ninguna palabra adicional]\n"
+            "\n"
+            "LÍMITES DE DURACIÓN DE LA LLAMADA:\n"
+            "- A los 9 minutos, comience a cerrar la conversación.\n"
+            "- Máximo estricto: 10 minutos."
+        )
     return (
         "ENDING THE CALL — CRITICAL RULE:\n"
         "Your farewell must be FULLY spoken and heard by the caller before the line "
@@ -620,7 +647,7 @@ def build_system_prompt(
         _build_voice_behavior_section(),
         _build_corrections_section(),
         _build_outcome_words_section(),
-        _build_call_duration_section(t),          # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P)
+        _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
         _build_tool_narration_section(),
         _build_working_hours_section(working_hours, tenant_timezone),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
