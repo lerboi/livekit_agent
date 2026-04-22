@@ -71,8 +71,16 @@ def test_both_locales_always_correct():
     en = _build_corrections_section("en").lower()
     es = _build_corrections_section("es").lower()
     assert "always correct" in en
-    # Accept either phrasing of the Spanish equivalent.
-    assert ("siempre correcto" in es) or ("siempre es correcto" in es)
+    # Accept either phrasing of the Spanish equivalent. Grammatical gender on
+    # "corrección" (feminine) requires "correcta" in prose — accept both
+    # masculine and feminine forms to keep the test tolerant of either ES
+    # rewording that future audits might prefer.
+    assert (
+        "siempre correcto" in es
+        or "siempre es correcto" in es
+        or "siempre correcta" in es
+        or "siempre es correcta" in es
+    )
 
 
 def test_en_es_distinct():

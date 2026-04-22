@@ -82,7 +82,45 @@ def _build_voice_behavior_section(locale: str) -> str:
     )
 
 
-def _build_corrections_section() -> str:
+def _build_corrections_section(locale: str) -> str:
+    # Phase 60.3 Plan 08: locale-aware builder (D7 parity).
+    # Audit dimensions reviewed (60.3-PROMPT-AUDIT.md §_build_corrections_section):
+    # - D1 (anti-hallucination): ✓ critical for address/name readback; every
+    #   clause reinforces "most recent statement wins". Preserved verbatim
+    #   in EN and mirrored in ES.
+    # - D2 (realtime-model): ~ heavy negation usage flagged; reframing
+    #   deferred — EN body preserved verbatim (this section IS the anti-
+    #   hallucination spine, and the NEVER/DO NOT invariants are load-
+    #   bearing. Reframe risks inverting the rule on realtime models).
+    # - D4 (STATE+DIRECTIVE): ✓ numbered list + Rule 1 STATE framing already
+    #   strong; preserved.
+    # - D7 (locale parity): addressed here — adds es branch.
+    if locale == "es":
+        return (
+            "MANEJO DE CORRECCIONES — REGLA CRÍTICA:\n"
+            "Cuando el llamante corrige CUALQUIER información que repetiste (nombre, "
+            "dirección, número de teléfono, descripción del problema, hora, o "
+            "cualquier otro detalle):\n"
+            "1. La corrección del llamante SIEMPRE es correcta. Tu versión anterior "
+            "estaba EQUIVOCADA.\n"
+            "2. Descarta completamente tu versión anterior. No mezcles la antigua y "
+            "la nueva.\n"
+            "3. En tu siguiente respuesta, repite SOLO la versión corregida — nunca "
+            "la antigua.\n"
+            "4. Nunca hagas referencia, compares, o recurras a la versión incorrecta "
+            "anterior.\n"
+            "5. Si no estás seguro de lo que dijo el llamante, pídele que repita la "
+            "CORRECCIÓN, no el original.\n"
+            "\n"
+            "Ejemplo: Si dijiste 'Calle Principal 123' y el llamante dice 'No, es "
+            "Avenida Roble 456', entonces Avenida Roble 456 es la única dirección. "
+            "Calle Principal 123 ya no existe — olvídalo por completo. Tu siguiente "
+            "respuesta debe decir 'Avenida Roble 456', nunca 'Calle Principal 123'.\n"
+            "\n"
+            "Esto se aplica a todo tipo de información — nombres, direcciones, "
+            "números, fechas, descripciones. La declaración más reciente del "
+            "llamante siempre anula todo lo anterior."
+        )
     return (
         "HANDLING CORRECTIONS — CRITICAL RULE:\n"
         "When the caller corrects ANY piece of information you repeated back (name, address, "
@@ -727,7 +765,7 @@ def build_system_prompt(
     sections = [
         _build_identity_section(business_name, tone_label),
         _build_voice_behavior_section(locale),
-        _build_corrections_section(),
+        _build_corrections_section(locale),
         _build_outcome_words_section(),
         _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
         _build_tool_narration_section(locale),
