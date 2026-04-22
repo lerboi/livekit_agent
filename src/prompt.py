@@ -29,7 +29,23 @@ TONE_LABELS = {
 # --- Section builders ---------------------------------------------------------
 
 
-def _build_identity_section(business_name: str, tone_label: str) -> str:
+def _build_identity_section(
+    business_name: str, tone_label: str, locale: str = "en"
+) -> str:
+    # Phase 60.3 Plan 12: locale-aware identity (D7 parity, tail batch).
+    # tone_label stays English in both locales — TONE_LABELS map is
+    # seeded with English phrases at module load; translating per-call
+    # would silently mask tenant-config mismatches. Future work could
+    # ship a locale-aware TONE_LABELS table; documented as cross-cutting
+    # concern in 60.3-PROMPT-AUDIT.md.
+    if locale == "es":
+        return (
+            f"Eres el recepcionista de teléfono con IA para {business_name}. "
+            f"Tu personalidad es {tone_label}. "
+            "Esta es una llamada telefónica en vivo — habla de manera natural y "
+            "conversacional. Sé conciso, pero nunca apresures detalles importantes "
+            "como confirmaciones de cita, direcciones o información de horario."
+        )
     return (
         f"You are the AI phone receptionist for {business_name}. "
         f"Your personality is {tone_label}. "
@@ -333,8 +349,14 @@ def _build_tool_narration_section(locale: str) -> str:
 
 
 def _build_working_hours_section(
-    working_hours: dict | None, tenant_timezone: str
+    working_hours: dict | None, tenant_timezone: str, locale: str = "en"
 ) -> str:
+    # Phase 60.3 Plan 12: locale-aware builder (D7 parity, tail batch).
+    # Day dict KEYS (monday/tuesday/...) remain English — they're tenant
+    # config lookup keys, NOT caller-facing prose. Translating them would
+    # break every tenant's working_hours JSON. The caller-facing prose
+    # (short day labels, "Closed"/"Cerrado", header, refer-to hint) IS
+    # translated.
     if not working_hours:
         return ""
 
@@ -342,11 +364,19 @@ def _build_working_hours_section(
         "monday", "tuesday", "wednesday", "thursday",
         "friday", "saturday", "sunday",
     ]
-    DAY_SHORT = {
+    DAY_SHORT_EN = {
         "monday": "Mon", "tuesday": "Tue", "wednesday": "Wed",
         "thursday": "Thu", "friday": "Fri", "saturday": "Sat",
         "sunday": "Sun",
     }
+    DAY_SHORT_ES = {
+        "monday": "lun", "tuesday": "mar", "wednesday": "mié",
+        "thursday": "jue", "friday": "vie", "saturday": "sáb",
+        "sunday": "dom",
+    }
+    day_short = DAY_SHORT_ES if locale == "es" else DAY_SHORT_EN
+    closed_label = "Cerrado" if locale == "es" else "Closed"
+    lunch_label = "almuerzo" if locale == "es" else "lunch"
 
     def _fmt(t: str) -> str:
         h, m = map(int, t.split(":"))
@@ -376,20 +406,28 @@ def _build_working_hours_section(
     lines: list[str] = []
     for start_idx, end_idx, sig in groups:
         if start_idx == end_idx:
-            label = DAY_SHORT[DAY_ORDER[start_idx]]
+            label = day_short[DAY_ORDER[start_idx]]
         else:
-            label = f"{DAY_SHORT[DAY_ORDER[start_idx]]}-{DAY_SHORT[DAY_ORDER[end_idx]]}"
+            label = f"{day_short[DAY_ORDER[start_idx]]}-{day_short[DAY_ORDER[end_idx]]}"
 
         if sig == "closed":
-            lines.append(f"{label}: Closed")
+            lines.append(f"{label}: {closed_label}")
         else:
             c = working_hours.get(DAY_ORDER[start_idx], {})
             line = f"{label}: {_fmt(c['open'])} - {_fmt(c['close'])}"
             if c.get("lunchStart") and c.get("lunchEnd"):
-                line += f" (lunch {_fmt(c['lunchStart'])} - {_fmt(c['lunchEnd'])})"
+                line += f" ({lunch_label} {_fmt(c['lunchStart'])} - {_fmt(c['lunchEnd'])})"
             lines.append(line)
 
     schedule = "\n".join(lines)
+    if locale == "es":
+        return (
+            f"HORARIO DE ATENCIÓN ({tenant_timezone}):\n"
+            f"{schedule}\n"
+            "Cuando los llamantes pregunten por su horario o disponibilidad, "
+            "remítase a estas horas. Nunca adivine ni invente el horario de "
+            "atención."
+        )
     return (
         f"BUSINESS HOURS ({tenant_timezone}):\n"
         f"{schedule}\n"
@@ -401,7 +439,37 @@ def _build_working_hours_section(
 def _build_greeting_section(
     locale: str, business_name: str, onboarding_complete: bool, t
 ) -> str:
+    # Phase 60.3 Plan 12: locale-aware opening guidance (D7 parity, tail batch).
+    # `t()` already supplies the locale-correct recording disclosure from
+    # messages/{en,es}.json. This plan adds locale-aware prose around the
+    # disclosure (opening guidance + ECHO AWARENESS block) so Spanish
+    # callers don't receive English meta-instructions wrapped around a
+    # Spanish disclosure string.
     disclosure = t("agent.recording_disclosure")
+
+    if locale == "es":
+        if onboarding_complete:
+            opening_guidance = (
+                f"Abra con el nombre del negocio, una breve aviso de grabación "
+                f'("{disclosure}"), y una invitación para que el llamante '
+                "comparta lo que necesita."
+            )
+        else:
+            opening_guidance = (
+                f'Abra con un aviso de grabación ("{disclosure}") '
+                f"y pregunte en qué puede ayudar."
+            )
+        return (
+            "APERTURA:\n"
+            f"- {opening_guidance}\n"
+            "- Manténgalo en una o dos oraciones.\n"
+            "- Complete su saludo por completo aunque el llamante hable por "
+            "encima o haya ruido de fondo.\n"
+            "\n"
+            "CONCIENCIA DE ECO:\n"
+            "- Si el llamante parece repetir sus palabras, trátelo como eco de "
+            "audio y continúe con naturalidad."
+        )
 
     if onboarding_complete:
         opening_guidance = (
@@ -427,7 +495,32 @@ def _build_greeting_section(
     )
 
 
-def _build_language_section(t) -> str:
+def _build_language_section(t, locale: str = "en") -> str:
+    # Phase 60.3 Plan 12: locale-aware LANGUAGE directive (D7 parity).
+    # Spanish branch pivots the default from English to Spanish — the
+    # ES locale is set at session-start based on caller/tenant config,
+    # so the directive should tell the model to DEFAULT to Spanish and
+    # switch only if the caller explicitly asks for another supported
+    # language.
+    if locale == "es":
+        return (
+            "IDIOMA:\n"
+            "Por defecto en español en cada llamada. Cambie de idioma solo si el "
+            "llamante lo pide explícitamente, y solo a uno que usted soporte: "
+            "inglés, español, chino (mandarín), malayo, tamil o vietnamita. "
+            "Cuando cambie, continúe la conversación exactamente desde donde la "
+            "dejó en el nuevo idioma — nunca reinicie, y nunca vuelva a preguntar "
+            "algo que el llamante ya respondió. Mantenga todo el resto de la "
+            "llamada en el nuevo idioma, incluyendo lecturas de dirección, "
+            "confirmaciones y despedidas.\n"
+            "\n"
+            "Trate el habla amortiguada o poco clara como un problema de "
+            "conexión, no una barrera de idioma — pida al llamante que repita "
+            "en español antes de asumir que quiere cambiar. Para idiomas que "
+            "no soporta, recoja el nombre, número de teléfono y una breve "
+            "descripción de su necesidad en el idioma que pueda manejar, y "
+            "luego hágale saber que alguien le hará seguimiento."
+        )
     return (
         "LANGUAGE:\n"
         "Default to English on every call. Switch languages only if the caller explicitly asks "
@@ -448,16 +541,26 @@ def _build_language_section(t) -> str:
 def _build_repeat_caller_section(onboarding_complete: bool) -> str:
     # All calls are treated as new calls — never reveal that you have prior information.
     # The check_caller_history tool handles its own privacy instructions.
+    # Phase 60.3 Plan 12: confirmed empty for both locales — no-op.
     return ""
 
 
-def _build_customer_account_section(customer_context: dict | None) -> str:
+def _build_customer_account_section(
+    customer_context: dict | None, locale: str = "en"
+) -> str:
     """Phase 56 D-08/D-09/D-10: inject MERGED Jobber+Xero caller-account context.
 
     Block is omitted entirely when customer_context is None (D-11 — both
     providers missed). When present, renders STATE with per-field (Jobber)/
     (Xero) source annotations per D-08 via the merged dict's `_sources` map.
     Absent fields are omitted from STATE, never rendered as null.
+
+    Phase 60.3 Plan 12: locale-aware CRITICAL RULE framing (D7 parity).
+    The inner STATE block from `format_customer_context_state` remains
+    English — it's structured data (field labels pair with Jobber/Xero API
+    fields), translating would complicate downstream lookups and cross-
+    runtime Python ↔ TS field-name consistency (per 55/56 skill rules).
+    Only the surrounding caller-facing PROSE is translated.
     """
     if not customer_context:
         return ""
@@ -466,6 +569,24 @@ def _build_customer_account_section(customer_context: dict | None) -> str:
     from .tools.check_customer_account import format_customer_context_state
 
     state_directive = format_customer_context_state(customer_context)
+
+    if locale == "es":
+        return (
+            "REGLA CRÍTICA — CONTEXTO DEL CLIENTE:\n"
+            "Los campos siguientes provienen de los sistemas CRM/contabilidad del "
+            "inquilino. No mencione cifras específicas, números de factura, números "
+            "de trabajo, fechas de visita ni montos a menos que el llamante pregunte "
+            "explícitamente sobre su cuenta, factura o trabajo reciente.\n"
+            "Nunca ofrezca esta información espontáneamente. Nunca diga \"confirmado,\" "
+            "\"en archivo,\" ni \"verificado\" en relación con estos campos. Si le "
+            "preguntan \"¿tienen mi información?\" reconozca su presencia sin dar "
+            "detalles.\n"
+            "\n"
+            f"{state_directive}\n"
+            "\n"
+            "Invoque la herramienta check_customer_account solo cuando el llamante "
+            "pida explícitamente detalles de cuenta (saldo, factura, trabajo reciente)."
+        )
 
     return (
         "CRITICAL RULE — CUSTOMER CONTEXT:\n"
@@ -651,9 +772,22 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
     )
 
 
-def _build_intake_questions_section(intake_questions: str | None) -> str:
+def _build_intake_questions_section(
+    intake_questions: str | None, locale: str = "en"
+) -> str:
+    # Phase 60.3 Plan 12: locale-aware preamble (D7 parity, tail batch).
+    # `intake_questions` itself is tenant-authored text passed verbatim —
+    # not translated.
     if not intake_questions:
         return ""
+    if locale == "es":
+        return (
+            "PREGUNTAS ADICIONALES:\n"
+            "Después de entender el problema principal, incorpore estas "
+            "preguntas adicionales de forma natural (omita las que ya se "
+            "hayan respondido):\n"
+            f"{intake_questions}"
+        )
     return (
         "ADDITIONAL QUESTIONS:\n"
         "After understanding the main issue, work these in naturally "
@@ -890,7 +1024,25 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
     )
 
 
-def _build_decline_handling_section(business_name: str) -> str:
+def _build_decline_handling_section(business_name: str, locale: str = "en") -> str:
+    # Phase 60.3 Plan 12: locale-aware decline-handling (D7 parity, tail batch).
+    # USTED register (consistent with Plans 05/06/07/10/11 ES branches).
+    if locale == "es":
+        return (
+            "MANEJO DE RECHAZOS:\n"
+            "No todos los llamantes están listos para reservar en la primera oferta. "
+            "Si dudan o se resisten, intente una vez más con un ángulo distinto — "
+            "quizá quieran una cotización en lugar de comprometerse a un trabajo, o "
+            "necesiten revisar su horario antes de fijar una hora. Pero respete un "
+            "rechazo claro y firme. Cuando esté seguro de que el llamante genuinamente "
+            "no quiere reservar ahora, guarde su información de contacto como un "
+            f"lead para que {business_name} dé seguimiento, hágale saber que eso "
+            "sucederá, y cierre la llamada.\n"
+            "\n"
+            "Trate como rechazo solo los rechazos verbales explícitos. El silencio, "
+            "los cambios de tema o una pausa para pensar no son rechazos — déle al "
+            "llamante espacio para tomar su decisión."
+        )
     return (
         "DECLINE HANDLING:\n"
         "Not every caller is ready to book on the first offer. If they hesitate or push back, "
@@ -905,7 +1057,25 @@ def _build_decline_handling_section(business_name: str) -> str:
     )
 
 
-def _build_transfer_section(business_name: str) -> str:
+def _build_transfer_section(business_name: str, locale: str = "en") -> str:
+    # Phase 60.3 Plan 12: locale-aware transfer directives (D7 parity, tail batch).
+    # USTED register throughout (consistent with booking/info_gathering/etc).
+    if locale == "es":
+        return (
+            "TRANSFERIR:\n"
+            "Solo transfiera la llamada en dos situaciones:\n"
+            "1. El llamante pide explícitamente hablar con una persona.\n"
+            "2. No ha logrado entender al llamante después de 3 intentos.\n"
+            "\n"
+            "Antes de transferir, capture el nombre del llamante, el problema y "
+            "los detalles relevantes.\n"
+            "\n"
+            "Si la transferencia falla, ofrezca reservar una cita de devolución "
+            "de llamada. Si se niegan, guarde su información para seguimiento.\n"
+            f"Si no hay un número de transferencia disponible, hágale saber al "
+            f"llamante que tomará su información y alguien de {business_name} se "
+            "comunicará con ellos."
+        )
     return (
         "TRANSFER:\n"
         "Only transfer the call in two situations:\n"
@@ -1023,28 +1193,28 @@ def build_system_prompt(
     postal_label = "postal code" if country == "SG" else "zip code"
 
     sections = [
-        _build_identity_section(business_name, tone_label),
+        _build_identity_section(business_name, tone_label, locale),
         _build_voice_behavior_section(locale),
         _build_corrections_section(locale),
         _build_outcome_words_section(locale),
         _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
         _build_tool_narration_section(locale),
-        _build_working_hours_section(working_hours, tenant_timezone),
+        _build_working_hours_section(working_hours, tenant_timezone, locale),
         _build_greeting_section(locale, business_name, onboarding_complete, t),
-        _build_language_section(t),
+        _build_language_section(t, locale),
         _build_repeat_caller_section(onboarding_complete),
-        _build_customer_account_section(customer_context),
+        _build_customer_account_section(customer_context, locale),
         _build_info_gathering_section(t, postal_label, locale),
-        _build_intake_questions_section(intake_questions),
+        _build_intake_questions_section(intake_questions, locale),
         _build_booking_section(business_name, onboarding_complete, postal_label, locale),
     ]
 
     if onboarding_complete:
-        sections.append(_build_decline_handling_section(business_name))
+        sections.append(_build_decline_handling_section(business_name, locale))
 
     sections.extend(
         [
-            _build_transfer_section(business_name),
+            _build_transfer_section(business_name, locale),
         ]
     )
 
