@@ -39,7 +39,36 @@ def _build_identity_section(business_name: str, tone_label: str) -> str:
     )
 
 
-def _build_voice_behavior_section() -> str:
+def _build_voice_behavior_section(locale: str) -> str:
+    # Phase 60.3 Plan 07: locale-aware builder (D7 parity).
+    # Audit dimensions reviewed:
+    # - D2 (realtime-model): EN body kept conversational — advisory prose
+    #   risk acknowledged; not worth structural rewrite.
+    # - D4 (STATE+DIRECTIVE): current framing already strong ("match the
+    #   caller's energy... Slow down when you read back..."); preserved.
+    # - D5 (VAD-redundant): audit flagged the acknowledgment-pacing copy
+    #   after Phase 60.2 Fix G (silence_duration_ms=1500); the
+    #   acknowledgment semantics remain load-bearing for realtime
+    #   coaching of back-and-forth — compression deferred, EN body
+    #   preserved verbatim. If a future UAT justifies, trim as an
+    #   isolated follow-up.
+    # - D7 (locale parity): addressed here — adds es branch.
+    # See 60.3-PROMPT-AUDIT.md §_build_voice_behavior_section.
+    if locale == "es":
+        return (
+            "ESTILO DE VOZ Y CONVERSACIÓN:\n"
+            "Está en una llamada telefónica en vivo, así que la conversación natural "
+            "importa más que la eficiencia. Coincide con la energía del llamante — "
+            "calmado y tranquilizador con llamantes estresados, relajado y cálido "
+            "con los casuales. Ve más despacio cuando lea direcciones, fechas u "
+            "horarios de cita para que el llamante tenga una oportunidad real de "
+            "detectar cualquier error auditivo.\n"
+            "\n"
+            "Mantenga la conversación centrada preguntando una cosa específica a la vez. "
+            "Después de que el llamante responda, reconozca brevemente lo que escuchó "
+            "antes de seguir adelante — eso indica que está escuchando en lugar de "
+            "seguir un guion."
+        )
     return (
         "VOICE & CONVERSATION STYLE:\n"
         "You're on a live phone call, so natural back-and-forth matters more than efficiency. "
@@ -697,7 +726,7 @@ def build_system_prompt(
 
     sections = [
         _build_identity_section(business_name, tone_label),
-        _build_voice_behavior_section(),
+        _build_voice_behavior_section(locale),
         _build_corrections_section(),
         _build_outcome_words_section(),
         _build_call_duration_section(t, locale),  # moved up — CRITICAL RULE attention zone (Phase 60.3 Stream A Branch P); locale-aware per Plan 05
