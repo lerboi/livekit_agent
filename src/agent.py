@@ -751,11 +751,12 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # ── Generate greeting immediately after session starts ──
-        session.generate_reply(
-            instructions="Greet the caller now.",
-        )
-        session_ready.set()  # signal DB task that session is ready for generate_reply()
+        # Phase 63.1: removed post-session greeting trigger (dead generate_reply
+        # + Event signaling). livekit-plugins-google 1.5.6 + gemini-3.1-flash-live-preview
+        # drops generate_reply() silently (realtime_api.py:707 capability guard).
+        # Greeting is now delivered via outcome-shaped directive in
+        # _build_greeting_section (prompt.py) + Gemini server VAD firing on
+        # first caller audio frame. See 63.1-RESEARCH.md Target 1 and Target 3.
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
