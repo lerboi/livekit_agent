@@ -8,7 +8,7 @@ from .outlook_calendar import push_booking_to_outlook
 logger = logging.getLogger("voco-agent")
 
 
-def push_booking_to_calendar(tenant_id, appointment_id):
+def push_booking_to_calendar(tenant_id, appointment_id, tenant_timezone):
     """
     Push a booking to the tenant's connected calendar (Google or Outlook).
     Looks up the primary calendar credential, falls back to any credential,
@@ -45,7 +45,7 @@ def push_booking_to_calendar(tenant_id, appointment_id):
             return  # No calendar connected at all
 
         if cred["provider"] == "google":
-            push_google(tenant_id, appointment_id)
+            push_google(tenant_id, appointment_id, tenant_timezone)
         elif cred["provider"] == "outlook":
             push_booking_to_outlook(tenant_id, appointment_id)
         else:

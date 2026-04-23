@@ -53,7 +53,14 @@ def create_check_caller_history_tool(deps: dict):
                 " failure to the caller; do not recite any history."
             )
 
-        tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
+        tenant_timezone = tenant.get("tenant_timezone") if tenant else None
+        if not tenant_timezone:
+            logger.warning(
+                "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
+                "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
+                tenant_id,
+            )
+            tenant_timezone = "UTC"
 
         now_iso = datetime.now(timezone.utc).isoformat()
 

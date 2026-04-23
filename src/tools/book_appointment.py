@@ -68,6 +68,13 @@ def _ensure_utc_iso(iso_str: str) -> str:
         iso_str = iso_str[:-1] + "+00:00"
     dt = datetime.fromisoformat(iso_str)
     if dt.tzinfo is None:
+        # Phase 60.4 D-A-04: coerce-and-log, never raise. A naive ISO at this
+        # boundary signals Gemini-drift; re-attach UTC and surface for ops.
+        logger.warning(
+            "[tz_coerce] naive ISO at boundary input=%r — re-attached +00:00 as UTC; "
+            "check Gemini output for stripped offsets",
+            iso_str,
+        )
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -263,7 +270,14 @@ def create_book_appointment_tool(deps: dict):
             .execute()
         )
         tenant = tenant_result.data if tenant_result.data else None
-        tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
+        tenant_timezone = tenant.get("tenant_timezone") if tenant else None
+        if not tenant_timezone:
+            logger.warning(
+                "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
+                "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
+                tenant_id,
+            )
+            tenant_timezone = "UTC"
 
         # Normalize urgency to a DB-constraint-valid value. Gemini has been observed
         # passing freeform strings like "high" which violate appointments_urgency_check
@@ -485,7 +499,7 @@ def create_book_appointment_tool(deps: dict):
             async def _push_calendar_bg():
                 try:
                     await asyncio.to_thread(
-                        lambda: push_booking_to_calendar(tenant_id, appointment_id)
+                        lambda: push_booking_to_calendar(tenant_id, appointment_id, tenant_timezone)
                     )
                 except Exception as cal_err:
                     logger.error("[agent] Calendar push failed: %s", str(cal_err))

@@ -4,11 +4,14 @@ Combines the logic from processCallEnded() and processCallAnalyzed() in call-pro
 Both stages run in-process immediately (no webhook delay).
 """
 
+import logging
 import os
 import re
 import asyncio
 import stripe
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 from .lib.triage.classifier import classify_call
 from .lib.write_outcome import record_outcome, RecordOutcomeError
@@ -609,7 +612,14 @@ def _calculate_suggested_slots(supabase, tenant):
     if not tenant or not tenant.get("working_hours"):
         return None
 
-    tenant_timezone = tenant.get("tenant_timezone", "America/Chicago")
+    tenant_timezone = tenant.get("tenant_timezone") if tenant else None
+    if not tenant_timezone:
+        logger.warning(
+            "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
+            "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
+            tenant.get("id") if tenant else None,
+        )
+        tenant_timezone = "UTC"
 
     appointments_resp = (
         supabase.table("appointments")

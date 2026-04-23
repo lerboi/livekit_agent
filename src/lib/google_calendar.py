@@ -6,7 +6,8 @@ Lightweight adapter -- pushes bookings to Google Calendar.
 
 import logging
 import os
-from datetime import timezone
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -16,7 +17,20 @@ from ..supabase_client import get_supabase_admin
 logger = logging.getLogger(__name__)
 
 
-def push_booking_to_calendar(tenant_id: str, appointment_id: str) -> None:
+def _to_naive_local_iso(utc_iso: str, tenant_timezone: str) -> str:
+    """Convert an offset-suffixed UTC ISO (e.g. '2026-04-30T07:00:00+00:00')
+    to a naive local ISO in tenant_timezone (e.g. '2026-04-30T15:00:00' for
+    Asia/Singapore). Required by Google Calendar events.insert() when the
+    event body also specifies 'timeZone' — mixing offset-suffixed dateTime
+    with timeZone produces double-offset errors (Phase 60.4 RESEARCH
+    Pitfall 1).
+    """
+    iso = utc_iso[:-1] + "+00:00" if utc_iso.endswith("Z") else utc_iso
+    dt = datetime.fromisoformat(iso).astimezone(ZoneInfo(tenant_timezone))
+    return dt.replace(tzinfo=None).isoformat()
+
+
+def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezone: str) -> None:
     """
     Push a booking to Google Calendar.
     Same logic as src/lib/google-calendar.js pushBookingToCalendar().
@@ -98,11 +112,20 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str) -> None:
 
         description = "\n".join(part for part in description_parts if part)
 
+        # Phase 60.4 D-A-01: timeZone is authoritative when dateTime is naive.
+        # Pass naive local ISO + timeZone — NOT offset-suffixed ISO + timeZone,
+        # which would double-offset per RESEARCH Pitfall 1.
         event_body = {
             "summary": summary,
             "description": description,
-            "start": {"dateTime": appointment["start_time"]},
-            "end": {"dateTime": appointment["end_time"]},
+            "start": {
+                "dateTime": _to_naive_local_iso(appointment["start_time"], tenant_timezone),
+                "timeZone": tenant_timezone,
+            },
+            "end": {
+                "dateTime": _to_naive_local_iso(appointment["end_time"], tenant_timezone),
+                "timeZone": tenant_timezone,
+            },
         }
 
         event = (

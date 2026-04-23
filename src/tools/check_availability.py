@@ -139,7 +139,14 @@ def create_check_availability_tool(deps: dict):
                     " the caller back; do not retry this lookup more than once in this call."
                 )
 
-        tenant_timezone = (tenant.get("tenant_timezone") if tenant else None) or "America/Chicago"
+        tenant_timezone = tenant.get("tenant_timezone") if tenant else None
+        if not tenant_timezone:
+            logger.warning(
+                "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
+                "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
+                tenant_id,
+            )
+            tenant_timezone = "UTC"
         slot_duration = (tenant.get("slot_duration_mins") if tenant else None) or 60
 
         now_iso = datetime.now(timezone.utc).isoformat()
