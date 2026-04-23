@@ -372,15 +372,27 @@ async def entrypoint(ctx: JobContext):
             locale,
         )
 
+        # Phase-fix (2026-04-24): Gemini 3 explicit guidance says temperature
+        # must be left at default (1.0); custom values "risk looping or
+        # degraded performance." We were overriding to 0.3 (carryover from
+        # Gemini 2.x tool-agent convention) and observing exactly the
+        # symptom Google warns about: filler loops + hallucinated outcomes.
+        # Deleted.
+        #
+        # thinking_level raised from "minimal" to "low": minimal mode
+        # short-circuits tool-vs-speak deliberation, so the model pattern-
+        # matches to the most fluent continuation (e.g. fabricating a
+        # booking confirmation) instead of invoking a tool. "low" keeps
+        # latency tight while restoring enough deliberation to pick tools
+        # over fluent fabrication on a receptionist call.
         model = google.realtime.RealtimeModel(
             model="gemini-3.1-flash-live-preview",
             voice=voice_name,
-            temperature=0.3,
             language=_locale_to_bcp47(locale),  # Phase 60.4 D-B-01: best-effort STT pin on native-audio
             instructions=system_prompt,
             realtime_input_config=realtime_input_config,
             thinking_config=genai_types.ThinkingConfig(
-                thinking_level="minimal",
+                thinking_level="low",
                 include_thoughts=False,
             ),
         )
