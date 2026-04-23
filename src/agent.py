@@ -18,7 +18,7 @@ import time
 import hashlib
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import sentry_sdk
@@ -582,12 +582,80 @@ async def entrypoint(ctx: JobContext):
                 .execute()
             )
 
+            # Phase-fix (2026-04-23): Prefetch scheduling data at session init.
+            # Gemini Live cancels in-flight function calls if the caller speaks
+            # while a tool is pending; shortening check_availability from ~500ms
+            # (5 live Supabase queries) to ~50ms (pure slot math over cached
+            # data) narrows that race. Cache is consumed by check_availability
+            # with a 30s TTL; stale reads fall through to the live-fetch path.
+            _now_iso = datetime.now(timezone.utc).isoformat()
+            slot_appts_task = asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .select("start_time, end_time, zone_id")
+                .eq("tenant_id", tenant_id)
+                .neq("status", "cancelled")
+                .neq("status", "completed")
+                .gte("end_time", _now_iso)
+                .execute()
+            )
+            slot_events_task = asyncio.to_thread(
+                lambda: supabase.table("calendar_events")
+                .select("start_time, end_time")
+                .eq("tenant_id", tenant_id)
+                .gte("end_time", _now_iso)
+                .execute()
+            )
+            slot_zones_task = asyncio.to_thread(
+                lambda: supabase.table("service_zones")
+                .select("id, name, postal_codes")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            )
+            slot_buffers_task = asyncio.to_thread(
+                lambda: supabase.table("zone_travel_buffers")
+                .select("zone_a_id, zone_b_id, buffer_mins")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            )
+            slot_blocks_task = asyncio.to_thread(
+                lambda: supabase.table("calendar_blocks")
+                .select("start_time, end_time")
+                .eq("tenant_id", tenant_id)
+                .gte("end_time", _now_iso)
+                .execute()
+            )
+
             # P55: xero caller-context is fetched BEFORE session.start (D-08
             # pre-session injection) and stored on deps["customer_context"]
             # already — no xero task needed inside _run_db_queries.
 
-            results = await asyncio.gather(sub_task, intake_task, call_task, return_exceptions=True)
+            results = await asyncio.gather(
+                sub_task, intake_task, call_task,
+                slot_appts_task, slot_events_task, slot_zones_task,
+                slot_buffers_task, slot_blocks_task,
+                return_exceptions=True,
+            )
             logger.info("[agent] _run_db_queries elapsed=%.3fs", time.perf_counter() - _db_t0)
+
+            # Stash prefetched scheduling data on deps for check_availability.
+            def _safe_data(r):
+                return (r.data if not isinstance(r, Exception) and r and r.data else []) or []
+            deps["_slot_cache"] = {
+                "fetched_at": time.time(),
+                "appointments": _safe_data(results[3]),
+                "calendar_events": _safe_data(results[4]),
+                "service_zones": _safe_data(results[5]),
+                "zone_travel_buffers": _safe_data(results[6]),
+                "calendar_blocks": _safe_data(results[7]),
+            }
+            logger.info(
+                "[agent] _slot_cache prefetched appts=%d events=%d zones=%d buffers=%d blocks=%d",
+                len(deps["_slot_cache"]["appointments"]),
+                len(deps["_slot_cache"]["calendar_events"]),
+                len(deps["_slot_cache"]["service_zones"]),
+                len(deps["_slot_cache"]["zone_travel_buffers"]),
+                len(deps["_slot_cache"]["calendar_blocks"]),
+            )
 
             # Subscription check — disconnect if blocked
             if not isinstance(results[0], Exception):

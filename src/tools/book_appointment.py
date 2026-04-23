@@ -444,6 +444,12 @@ def create_book_appointment_tool(deps: dict):
         deps["_last_booked_slot_key"] = _slot_key
         deps["_last_booked_slot_response"] = return_msg
 
+        # Phase-fix (2026-04-23): invalidate the slot_cache so a subsequent
+        # check_availability in this call sees the new appointment and will
+        # not re-offer the slot we just booked. Next check_availability will
+        # refetch from Supabase and repopulate the cache.
+        deps.pop("_slot_cache", None)
+
         # Authoritative booking flags for post-call reconciliation. These are set
         # synchronously (no await between) so post-call can correct the DB even if
         # the mid-call update below races the background db_task that creates the

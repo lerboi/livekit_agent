@@ -6,6 +6,7 @@ Now executes in-process with direct Supabase access (zero network hops).
 
 import asyncio
 import logging
+import time as _time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -151,53 +152,96 @@ def create_check_availability_tool(deps: dict):
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Fetch live scheduling data (parallel)
-        try:
-            appointments_result, events_result, zones_result, buffers_result, blocks_result = await asyncio.gather(
-                asyncio.to_thread(
-                    lambda: supabase.table("appointments")
-                    .select("start_time, end_time, zone_id")
-                    .eq("tenant_id", tenant_id)
-                    .neq("status", "cancelled")
-                    .neq("status", "completed")
-                    .gte("end_time", now_iso)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("calendar_events")
-                    .select("start_time, end_time")
-                    .eq("tenant_id", tenant_id)
-                    .gte("end_time", now_iso)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("service_zones")
-                    .select("id, name, postal_codes")
-                    .eq("tenant_id", tenant_id)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("zone_travel_buffers")
-                    .select("zone_a_id, zone_b_id, buffer_mins")
-                    .eq("tenant_id", tenant_id)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("calendar_blocks")
-                    .select("start_time, end_time")
-                    .eq("tenant_id", tenant_id)
-                    .gte("end_time", now_iso)
-                    .execute()
-                ),
+        # Phase-fix (2026-04-23 UAT): consume the slot_cache prefetched at
+        # session init if fresh (TTL 30s). Cuts this tool's latency from
+        # ~500ms to ~50ms so Gemini Live's server-side function call is far
+        # less likely to be cancelled by caller barge-in during the wait.
+        # On cache miss/stale/error: fall through to the live-fetch path.
+        _SLOT_CACHE_TTL_S = 30.0
+        _slot_cache = deps.get("_slot_cache")
+        appointments_data = None
+        events_data = None
+        zones_data = None
+        buffers_data = None
+        blocks_data = None
+
+        if _slot_cache and (_time.time() - _slot_cache.get("fetched_at", 0)) < _SLOT_CACHE_TTL_S:
+            appointments_data = _slot_cache.get("appointments") or []
+            events_data = _slot_cache.get("calendar_events") or []
+            zones_data = _slot_cache.get("service_zones") or []
+            buffers_data = _slot_cache.get("zone_travel_buffers") or []
+            blocks_data = _slot_cache.get("calendar_blocks") or []
+            logger.info(
+                "[agent] check_availability: slot_cache hit age=%.1fs "
+                "appts=%d events=%d zones=%d buffers=%d blocks=%d",
+                _time.time() - _slot_cache.get("fetched_at", 0),
+                len(appointments_data), len(events_data), len(zones_data),
+                len(buffers_data), len(blocks_data),
             )
-        except Exception as e:
-            logger.error("[agent] check_availability: scheduling data fetch failed: %s", e)
-            return (
-                "STATE:availability_lookup_failed reason=scheduling_data_error"
-                " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
-                " caller back; do not retry this lookup more than once in this call. Do not"
-                " repeat this message text on-air."
-            )
+        else:
+            # Fetch live scheduling data (parallel)
+            try:
+                appointments_result, events_result, zones_result, buffers_result, blocks_result = await asyncio.gather(
+                    asyncio.to_thread(
+                        lambda: supabase.table("appointments")
+                        .select("start_time, end_time, zone_id")
+                        .eq("tenant_id", tenant_id)
+                        .neq("status", "cancelled")
+                        .neq("status", "completed")
+                        .gte("end_time", now_iso)
+                        .execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("calendar_events")
+                        .select("start_time, end_time")
+                        .eq("tenant_id", tenant_id)
+                        .gte("end_time", now_iso)
+                        .execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("service_zones")
+                        .select("id, name, postal_codes")
+                        .eq("tenant_id", tenant_id)
+                        .execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("zone_travel_buffers")
+                        .select("zone_a_id, zone_b_id, buffer_mins")
+                        .eq("tenant_id", tenant_id)
+                        .execute()
+                    ),
+                    asyncio.to_thread(
+                        lambda: supabase.table("calendar_blocks")
+                        .select("start_time, end_time")
+                        .eq("tenant_id", tenant_id)
+                        .gte("end_time", now_iso)
+                        .execute()
+                    ),
+                )
+            except Exception as e:
+                logger.error("[agent] check_availability: scheduling data fetch failed: %s", e)
+                return (
+                    "STATE:availability_lookup_failed reason=scheduling_data_error"
+                    " | DIRECTIVE:apologize briefly; offer capture_lead so someone can call the"
+                    " caller back; do not retry this lookup more than once in this call. Do not"
+                    " repeat this message text on-air."
+                )
+
+            appointments_data = appointments_result.data or []
+            events_data = events_result.data or []
+            zones_data = zones_result.data or []
+            buffers_data = buffers_result.data or []
+            blocks_data = blocks_result.data or []
+            # Refresh the cache so subsequent tool calls within this session
+            # reuse this fetch (TTL still 30s from now).
+            deps["_slot_cache"] = {
+                "fetched_at": _time.time(),
+                "appointments": appointments_data,
+                "calendar_events": events_data,
+                "service_zones": zones_data,
+                "zone_travel_buffers": buffers_data,
+                "calendar_blocks": blocks_data,
+            }
 
         # Determine which dates to check
         tenant_today = to_local_date_string(datetime.now(timezone.utc), tenant_timezone)
@@ -221,10 +265,10 @@ def create_check_availability_tool(deps: dict):
             day_slots = calculate_available_slots(
                 working_hours=tenant.get("working_hours") or {} if tenant else {},
                 slot_duration_mins=slot_duration,
-                existing_bookings=appointments_result.data or [],
-                external_blocks=(events_result.data or []) + (blocks_result.data or []),
-                zones=zones_result.data or [],
-                zone_pair_buffers=format_zone_pair_buffers(buffers_result.data or []),
+                existing_bookings=appointments_data,
+                external_blocks=events_data + blocks_data,
+                zones=zones_data,
+                zone_pair_buffers=format_zone_pair_buffers(buffers_data),
                 target_date=date_str,
                 tenant_timezone=tenant_timezone,
                 max_slots=50,  # effectively unlimited for a normal workday
