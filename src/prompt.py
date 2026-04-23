@@ -519,7 +519,15 @@ def _build_language_section(t, locale: str = "en") -> str:
             "en español antes de asumir que quiere cambiar. Para idiomas que "
             "no soporta, recoja el nombre, número de teléfono y una breve "
             "descripción de su necesidad en el idioma que pueda manejar, y "
-            "luego hágale saber que alguien le hará seguimiento."
+            "luego hágale saber que alguien le hará seguimiento.\n"
+            "\n"
+            "ANTI-ALUCINACIÓN — REGLA CRÍTICA:\n"
+            "Si no puede entender al llamante — si el audio está distorsionado, "
+            "apagado, en silencio, o contiene ruido ambiental que no puede "
+            "interpretar como habla — trátelo como español poco claro. NO "
+            "transcriba ni responda en otro idioma. Pida al llamante que repita "
+            "en español. Nunca invente una frase en otro idioma para llenar un "
+            "silencio."
         )
     return (
         "LANGUAGE:\n"
@@ -534,7 +542,13 @@ def _build_language_section(t, locale: str = "en") -> str:
         "caller to repeat themselves in English before assuming they want to switch. For "
         "languages you don't support, gather their name, phone number, and a brief description "
         "of their need in whatever language you can manage, then let them know someone will "
-        "follow up."
+        "follow up.\n"
+        "\n"
+        "ANTI-HALLUCINATION — CRITICAL:\n"
+        "If you cannot understand the caller — if the audio is garbled, muffled, silent, or "
+        "contains ambient noise you cannot parse as speech — treat it as English that was "
+        "unclear. Do NOT transcribe or respond in another language. Ask the caller to repeat "
+        "themselves in English. Never invent a foreign-language phrase to fill a silence."
     )
 
 

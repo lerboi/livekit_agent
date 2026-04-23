@@ -55,6 +55,23 @@ VOICE_MAP = {
 # Subscription statuses that block inbound calls
 BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
 
+# Phase 60.4 Stream B (D-B-01): Gemini Live input-language hint.
+# Native-audio model (gemini-3.1-flash-live-preview) may auto-detect
+# regardless, but the kwarg is defense-in-depth; paired with an
+# anti-hallucination prompt directive per _build_language_section.
+# Map restricted to locales with prompt-side ES branches (60.3 Plan 12);
+# unknown locales fall back to en-US.
+_LOCALE_TO_BCP47 = {
+    "en": "en-US",
+    "es": "es-US",
+}
+
+
+def _locale_to_bcp47(locale: str | None) -> str:
+    if not locale:
+        return "en-US"
+    return _LOCALE_TO_BCP47.get(locale, "en-US")
+
 # Timeout for SIP participant to join the room (seconds)
 PARTICIPANT_TIMEOUT_S = 30
 
@@ -349,10 +366,17 @@ async def entrypoint(ctx: JobContext):
             ),
         )
 
+        logger.info(
+            "[60.4 Stream B] RealtimeModel language=%s (locale=%s)",
+            _locale_to_bcp47(locale),
+            locale,
+        )
+
         model = google.realtime.RealtimeModel(
             model="gemini-3.1-flash-live-preview",
             voice=voice_name,
             temperature=0.3,
+            language=_locale_to_bcp47(locale),  # Phase 60.4 D-B-01: best-effort STT pin on native-audio
             instructions=system_prompt,
             realtime_input_config=realtime_input_config,
             thinking_config=genai_types.ThinkingConfig(
