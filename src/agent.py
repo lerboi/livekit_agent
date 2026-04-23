@@ -266,12 +266,37 @@ async def entrypoint(ctx: JobContext):
                 _sources or "{}",
             )
 
+        # Phase 63.1: hoist intake_questions fetch BEFORE session.start().
+        # Replaces the broken post-session session.generate_reply(...) injection
+        # that silently fails on livekit-plugins-google 1.5.6 + gemini-3.1-flash-live-preview
+        # (capability guard mutable_chat_context=False blocks generate_reply entirely).
+        # Per D-02: extra ~100-200ms pre-start latency is acceptable — correctness wins.
+        intake_questions_text = ""
+        if tenant_id:
+            try:
+                _intake_res = await asyncio.to_thread(
+                    lambda: supabase.table("services")
+                        .select("intake_questions")
+                        .eq("tenant_id", tenant_id)
+                        .eq("is_active", True)
+                        .execute()
+                )
+                all_q: list[str] = []
+                for s in (_intake_res.data or []):
+                    for q in (s.get("intake_questions") or []):
+                        if q and q not in all_q:
+                            all_q.append(q)
+                intake_questions_text = "\n".join(all_q)
+                logger.info("[63.1] intake_questions injected count=%d", len(all_q))
+            except Exception as e:
+                logger.warning("[63.1] intake_questions fetch failed, continuing with empty: %s", e)
+
         system_prompt = build_system_prompt(
             locale,
             business_name=business_name,
             onboarding_complete=onboarding_complete,
             tone_preset=tone_preset,
-            intake_questions="",  # injected after DB query completes
+            intake_questions=intake_questions_text,
             country=country,
             working_hours=tenant.get("working_hours") if tenant else None,
             tenant_timezone=tenant_timezone,
@@ -555,11 +580,9 @@ async def entrypoint(ctx: JobContext):
         ctx.add_shutdown_callback(_on_close_async)
 
         # ── Launch DB queries as a background task (don't block session start) ──
-        # Event signals when session is ready to accept generate_reply() calls
-        session_ready = asyncio.Event()
 
         async def _run_db_queries():
-            """Run subscription check, intake questions, and call record insert in parallel."""
+            """Run subscription check and call record insert in parallel with slot cache prefetch."""
             if not tenant_id:
                 logger.warning(f"[agent] No tenant for {to_number} — skipping DB queries")
                 return
@@ -571,13 +594,6 @@ async def entrypoint(ctx: JobContext):
                 .eq("tenant_id", tenant_id)
                 .eq("is_current", True)
                 .limit(1)
-                .execute()
-            )
-            intake_task = asyncio.to_thread(
-                lambda: supabase.table("services")
-                .select("intake_questions")
-                .eq("tenant_id", tenant_id)
-                .eq("is_active", True)
                 .execute()
             )
             call_task = asyncio.to_thread(
@@ -645,10 +661,11 @@ async def entrypoint(ctx: JobContext):
             # pre-session injection) and stored on deps["customer_context"]
             # already — no xero task needed inside _run_db_queries.
 
-            results = await asyncio.gather(
-                sub_task, intake_task, call_task,
-                slot_appts_task, slot_events_task, slot_zones_task,
-                slot_buffers_task, slot_blocks_task,
+            # Phase 63.1: intake_questions hoisted pre-session (see above).
+            # Remaining parallel tasks unpacked by name per Pitfall 2.
+            sub_res, call_res, appts_res, events_res, zones_res, buffers_res, blocks_res = await asyncio.gather(
+                sub_task, call_task,
+                slot_appts_task, slot_events_task, slot_zones_task, slot_buffers_task, slot_blocks_task,
                 return_exceptions=True,
             )
             logger.info("[agent] _run_db_queries elapsed=%.3fs", time.perf_counter() - _db_t0)
@@ -658,11 +675,11 @@ async def entrypoint(ctx: JobContext):
                 return (r.data if not isinstance(r, Exception) and r and r.data else []) or []
             deps["_slot_cache"] = {
                 "fetched_at": time.time(),
-                "appointments": _safe_data(results[3]),
-                "calendar_events": _safe_data(results[4]),
-                "service_zones": _safe_data(results[5]),
-                "zone_travel_buffers": _safe_data(results[6]),
-                "calendar_blocks": _safe_data(results[7]),
+                "appointments": _safe_data(appts_res),
+                "calendar_events": _safe_data(events_res),
+                "service_zones": _safe_data(zones_res),
+                "zone_travel_buffers": _safe_data(buffers_res),
+                "calendar_blocks": _safe_data(blocks_res),
             }
             logger.info(
                 "[agent] _slot_cache prefetched appts=%d events=%d zones=%d buffers=%d blocks=%d",
@@ -674,8 +691,8 @@ async def entrypoint(ctx: JobContext):
             )
 
             # Subscription check — disconnect if blocked
-            if not isinstance(results[0], Exception):
-                sub_data = results[0].data
+            if not isinstance(sub_res, Exception):
+                sub_data = sub_res.data
                 sub = sub_data[0] if sub_data else None
                 if sub and sub.get("status") in BLOCKED_STATUSES:
                     logger.info(f"[agent] Subscription blocked: tenant={tenant_id} status={sub['status']} — disconnecting caller")
@@ -689,32 +706,15 @@ async def entrypoint(ctx: JobContext):
                         logger.error(f"[agent] Failed to disconnect blocked caller: {e}")
                     return
             else:
-                logger.warning(f"[agent] Subscription check failed (allowing call): {results[0]}")
+                logger.warning(f"[agent] Subscription check failed (allowing call): {sub_res}")
 
             # Call record — update deps so tools have the call_uuid (no session dependency)
-            if not isinstance(results[2], Exception):
-                call_data = results[2].data[0] if results[2].data else None
+            if not isinstance(call_res, Exception):
+                call_data = call_res.data[0] if call_res.data else None
                 if call_data:
                     deps["call_uuid"] = call_data.get("id")
             else:
-                logger.error(f"[agent] Call record insert failed: {results[2]}")
-
-            # Intake questions — wait for session to be ready before injecting
-            if not isinstance(results[1], Exception) and results[1].data:
-                all_questions = []
-                for s in results[1].data:
-                    for q in (s.get("intake_questions") or []):
-                        if q not in all_questions:
-                            all_questions.append(q)
-                if all_questions:
-                    await session_ready.wait()
-                    questions_text = "\n".join(all_questions)
-                    session.generate_reply(
-                        instructions=(
-                            f"Additional intake questions to ask naturally during the conversation "
-                            f"(skip any already answered):\n{questions_text}"
-                        ),
-                    )
+                logger.error(f"[agent] Call record insert failed: {call_res}")
 
         # Fire DB queries in background — they complete while session starts + greeting plays
         db_task = asyncio.create_task(_run_db_queries())
