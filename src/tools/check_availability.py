@@ -6,6 +6,7 @@ Now executes in-process with direct Supabase access (zero network hops).
 
 import asyncio
 import logging
+import secrets
 import time as _time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -20,6 +21,37 @@ from ..utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Phase-fix (2026-04-24): opaque slot-token handoff to book_appointment.
+#
+# Motivation: live UAT (call-_+6587528516_iv7QFp8tqKXC) showed Gemini 3.1
+# Flash Live IGNORING the "pass slot_start_utc VERBATIM" directive. For a
+# 2-PM-SGT booking it constructed `2026-04-27T14:00:00` — the caller's
+# wall-clock number stripped of tz — instead of the authoritative
+# `2026-04-27T06:00:00+00:00` this tool returned. _ensure_utc_iso coerced
+# the naive ISO to UTC, producing a booking at 10 PM SGT (8h offset).
+#
+# Structural fix: return an opaque `slot_token` in the STATE line and
+# stash (token -> UTC slot_start/end) on deps. book_appointment resolves
+# the token server-side and ignores any reconstructed ISO Gemini emits.
+# Tokens survive for the life of deps (one call); no global state.
+_SLOT_TOKEN_TTL_S = 600.0  # 10 min — a single call's budget + headroom
+
+
+def _register_slot_token(deps: dict, slot_start: str, slot_end: str) -> str:
+    """Generate and register a short opaque token for a (slot_start, slot_end)
+    UTC pair. Returned to Gemini via the STATE line; resolved by
+    book_appointment. 8 hex chars = 32 bits of entropy, collision-proof for
+    the ~10 tokens a call ever produces."""
+    token = "slot_" + secrets.token_hex(4)
+    tokens = deps.setdefault("_slot_tokens", {})
+    tokens[token] = {
+        "slot_start_utc": slot_start,
+        "slot_end_utc": slot_end,
+        "created_at": _time.time(),
+    }
+    return token
 
 
 def _ordinal(n: int) -> str:
@@ -310,23 +342,28 @@ def create_check_availability_tool(deps: dict):
 
                 if matched_slot:
                     speech_text = format_slot_for_speech(matched_slot["start"], tenant_timezone)
+                    _token = _register_slot_token(deps, matched_slot["start"], matched_slot["end"])
                     deps.setdefault("_tool_call_log", []).append({
                         "name": "check_availability",
                         "success": True,
                         "result": "available",
                         "date": date,
                         "time": time,
+                        "slot_token": _token,
                         "ts": datetime.now(timezone.utc).isoformat(),
                     })
                     return (
-                        f"STATE:slot_available slot_start_utc={matched_slot['start']}"
+                        f"STATE:slot_available slot_token={_token}"
+                        f" slot_start_utc={matched_slot['start']}"
                         f" slot_end_utc={matched_slot['end']} speech={speech_text}"
                         " | DIRECTIVE:tell the caller the requested time is available, then"
                         " ask if they want to book it. When you call book_appointment, pass"
-                        " slot_start_utc VERBATIM as the slot_start parameter and slot_end_utc"
-                        " VERBATIM as slot_end — do not reformat, convert, or rebuild from the"
-                        " speech string (the +00:00 offset MUST be preserved). Do not read the"
-                        " full slots list out loud; do not fabricate times outside this slot."
+                        f" slot_token={_token} — this token is the ONLY way to book this slot"
+                        " correctly. DO NOT construct a slot_start or slot_end ISO string"
+                        " yourself; the tool will resolve the token to the authoritative UTC"
+                        " times server-side. Ignoring this and passing hand-built ISO strings"
+                        " has caused confirmed off-by-8-hours bookings. Do not read the full"
+                        " slots list out loud; do not fabricate times outside this slot."
                     )
                 else:
                     # Not available — find the closest alternatives
@@ -346,10 +383,14 @@ def create_check_availability_tool(deps: dict):
 
                     if closest:
                         alt_lines = []
+                        alt_tokens = []
                         for i, slot in enumerate(closest):
                             speech = format_slot_for_speech(slot["start"], tenant_timezone)
+                            tok = _register_slot_token(deps, slot["start"], slot["end"])
+                            alt_tokens.append(tok)
                             alt_lines.append(
-                                f"{i + 1}. {speech} (slot_start_utc={slot['start']},"
+                                f"{i + 1}. {speech} (slot_token={tok},"
+                                f" slot_start_utc={slot['start']},"
                                 f" slot_end_utc={slot['end']})"
                             )
                         alts_text = "\n".join(alt_lines)
@@ -359,6 +400,7 @@ def create_check_availability_tool(deps: dict):
                             "result": "not_available_with_alternatives",
                             "date": date,
                             "time": time,
+                            "slot_tokens": alt_tokens,
                             "ts": datetime.now(timezone.utc).isoformat(),
                         })
                         return (
@@ -368,11 +410,12 @@ def create_check_availability_tool(deps: dict):
                             " | DIRECTIVE:tell the caller the requested time is not available,"
                             " then offer one or two of the alternatives above. If the caller"
                             " picks one, call book_appointment passing the alternative's"
-                            " slot_start_utc VERBATIM as slot_start and slot_end_utc VERBATIM"
-                            " as slot_end — do not reformat, convert, or rebuild from the"
-                            " speech string (the +00:00 offset MUST be preserved). Do not read"
-                            " the full alternatives list out loud; do not fabricate times"
-                            " outside these slots."
+                            " slot_token — this token is the ONLY way to book the chosen slot"
+                            " correctly. DO NOT construct slot_start or slot_end ISO strings"
+                            " yourself; the tool resolves the token to authoritative UTC times"
+                            " server-side. Hand-built ISO strings have caused confirmed"
+                            " off-by-8-hours bookings. Do not read the full alternatives list"
+                            " out loud; do not fabricate times outside these slots."
                         )
                     else:
                         biz_name = (tenant.get("business_name") if tenant else None) or "the team"

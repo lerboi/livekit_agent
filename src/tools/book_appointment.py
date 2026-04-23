@@ -6,6 +6,7 @@ All side effects (calendar sync, SMS, recovery SMS) run in-process.
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -184,6 +185,12 @@ def create_book_appointment_tool(deps: dict):
         name="book_appointment",
         description=(
             "Book an appointment into the caller's selected slot. "
+            "CRITICAL: pass slot_token — the opaque string returned by check_availability "
+            "in its STATE line (e.g. slot_token=slot_a1b2c3d4). This is the ONLY way to "
+            "book the correct slot; the server resolves the token to the authoritative UTC "
+            "times. DO NOT construct slot_start or slot_end ISO strings yourself — doing so "
+            "has caused confirmed off-by-8-hours bookings. Leave slot_start and slot_end "
+            "empty when passing a slot_token. "
             "CRITICAL PRECONDITION: before calling this tool, you must have read back the caller's "
             "name (if captured) and full service address in one utterance, and the caller must have "
             "acknowledged or silently accepted the readback (see the BEFORE BOOKING — READBACK rule "
@@ -201,11 +208,12 @@ def create_book_appointment_tool(deps: dict):
     )
     async def book_appointment(
         context: RunContext,
-        slot_start: str,
-        slot_end: str,
-        street_name: str,
-        postal_code: str,
-        caller_name: str,
+        slot_token: str = "",
+        slot_start: str = "",
+        slot_end: str = "",
+        street_name: str = "",
+        postal_code: str = "",
+        caller_name: str = "",
         unit_number: str = "",
         urgency: str = "routine",
     ) -> str:
@@ -216,28 +224,69 @@ def create_book_appointment_tool(deps: dict):
         parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
+        # Phase-fix (2026-04-24): slot_token is authoritative. Gemini 3.1 Flash
+        # Live has been observed ignoring the "pass slot_start_utc VERBATIM"
+        # directive and constructing naive ISO strings from the caller's
+        # wall-clock speech (e.g. '2026-04-27T14:00:00' for a 2-PM-SGT slot),
+        # which _ensure_utc_iso then coerces to UTC, producing an 8h-off
+        # booking. Structural fix: check_availability stashes (token -> UTC
+        # slot_start/end) on deps; we resolve here and ignore any
+        # Gemini-constructed slot_start/slot_end when the token is valid.
+        _token_resolved = False
+        if slot_token:
+            _tokens = deps.get("_slot_tokens") or {}
+            _entry = _tokens.get(slot_token)
+            if _entry and (time.time() - _entry.get("created_at", 0)) < 600.0:
+                _authoritative_start = _entry["slot_start_utc"]
+                _authoritative_end = _entry["slot_end_utc"]
+                if slot_start and slot_start != _authoritative_start:
+                    logger.info(
+                        "[book_appointment] slot_token=%s override: gemini-supplied "
+                        "slot_start=%r ignored; using authoritative %r",
+                        slot_token, slot_start, _authoritative_start,
+                    )
+                if slot_end and slot_end != _authoritative_end:
+                    logger.info(
+                        "[book_appointment] slot_token=%s override: gemini-supplied "
+                        "slot_end=%r ignored; using authoritative %r",
+                        slot_token, slot_end, _authoritative_end,
+                    )
+                slot_start = _authoritative_start
+                slot_end = _authoritative_end
+                _token_resolved = True
+            else:
+                logger.warning(
+                    "[book_appointment] slot_token=%r invalid or expired; falling "
+                    "back to gemini-supplied slot_start/slot_end (may be misaligned)",
+                    slot_token,
+                )
+
         if not slot_start or not slot_end:
             return (
                 "STATE:booking_invalid reason=missing_slot_fields"
-                " | DIRECTIVE:apologize briefly; ask the caller to confirm the time they would like;"
-                " call book_appointment again once complete."
+                " | DIRECTIVE:apologize briefly; call check_availability again for the"
+                " time the caller wants, then call book_appointment with the slot_token"
+                " returned in the STATE line."
             )
 
-        # Canonicalize slot_start / slot_end to UTC ISO up front. Gemini may
-        # drop the '+00:00' offset (especially after Phase 60 added a
-        # human-readable `speech=` field to check_availability's STATE line),
-        # which silently shifts the wall-clock seen by SMS / calendar / RPC
-        # consumers. Fix it once here so every downstream caller sees UTC.
-        try:
-            slot_start = _ensure_utc_iso(slot_start)
-            slot_end = _ensure_utc_iso(slot_end)
-        except ValueError:
-            return (
-                "STATE:booking_invalid reason=malformed_slot_iso"
-                " | DIRECTIVE:apologize briefly; call check_availability again for the"
-                " same date and time to get a fresh slot, then call book_appointment"
-                " with the exact start/end values from the fresh result."
-            )
+        # Canonicalize slot_start / slot_end to UTC ISO up front. Only applies
+        # on the legacy fallback path (no valid token); a resolved token is
+        # already UTC. Gemini may drop the '+00:00' offset (especially after
+        # Phase 60 added a human-readable `speech=` field to check_availability's
+        # STATE line), which silently shifts the wall-clock seen by SMS /
+        # calendar / RPC consumers. Fix it once here so every downstream
+        # caller sees UTC.
+        if not _token_resolved:
+            try:
+                slot_start = _ensure_utc_iso(slot_start)
+                slot_end = _ensure_utc_iso(slot_end)
+            except ValueError:
+                return (
+                    "STATE:booking_invalid reason=malformed_slot_iso"
+                    " | DIRECTIVE:apologize briefly; call check_availability again for the"
+                    " same date and time to get a fresh slot, then call book_appointment"
+                    " with the slot_token returned in the STATE line."
+                )
 
         if not tenant_id:
             return (
