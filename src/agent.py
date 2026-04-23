@@ -348,6 +348,10 @@ async def entrypoint(ctx: JobContext):
         # Use explicitly selected voice if set, else fall back to tone-based mapping (Phase 44: AI Voice Selection)
         ai_voice = tenant.get("ai_voice") if tenant else None
         voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "Kore")
+        logger.info(
+            "[agent] voice_resolved tenant_ai_voice=%r tone_preset=%r -> voice=%r",
+            ai_voice, tone_preset, voice_name,
+        )
 
         # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
         # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
