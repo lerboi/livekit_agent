@@ -4,23 +4,12 @@ version = "1.0.0"
 description = "Voco AI voice receptionist — Twilio SIP + LiveKit + Gemini 3.1 Flash Live"
 requires-python = ">=3.11"
 dependencies = [
-    # DO NOT bump these three livekit-* pins without coordinating with the
-    # livekit-plugins-google git pin below. The google plugin commit 43d3734
-    # is the ONLY version that supports session.generate_reply() with
-    # gemini-3.1-flash-live-preview (via its A2A_ONLY_MODELS branch). That
-    # commit constructs llm.RealtimeCapabilities with 6 fields. Starting with
-    # livekit-agents 1.5.2 (Apr 8 2026, PR #5211), RealtimeCapabilities added
-    # a required 7th field `per_response_tool_choice`, which causes a
-    # TypeError at RealtimeModel construction with the pinned plugin. The
-    # silero and turn-detector plugins ship from the same monorepo and their
-    # 1.5.2 wheels require livekit-agents>=1.5.2, so they must be pinned to
-    # 1.5.1 too. If LiveKit later ships a google plugin that supports both
-    # generate_reply() for gemini-3.1 AND the 7-field RealtimeCapabilities,
-    # update the git pin first, then relax these pins in lockstep.
-    "livekit-agents==1.5.1",
-    "livekit-plugins-google @ git+https://github.com/livekit/agents.git@43d373444d2cfbec5c0493d57ef61d35a8094ddb#subdirectory=livekit-plugins/livekit-plugins-google",
-    "livekit-plugins-silero==1.5.1",
-    "livekit-plugins-turn-detector==1.5.1",
+    # Pinned at 1.5.6 (2026-04-22) — mainline with capability-based Gemini 3.1 routing via PR #5413.
+    # See .planning/phases/63-livekit-sdk-upgrade-to-1-5-6-mainline/63-RESEARCH.md for the full upgrade surface audit.
+    "livekit-agents==1.5.6",
+    "livekit-plugins-google==1.5.6",
+    "livekit-plugins-silero==1.5.6",
+    "livekit-plugins-turn-detector==1.5.6",
     "livekit-plugins-noise-cancellation>=0.2,<1",
     "livekit-api>=1.0,<2",
     "supabase>=2.0,<3",
