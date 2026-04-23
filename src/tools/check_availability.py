@@ -343,6 +343,11 @@ def create_check_availability_tool(deps: dict):
                 if matched_slot:
                     speech_text = format_slot_for_speech(matched_slot["start"], tenant_timezone)
                     _token = _register_slot_token(deps, matched_slot["start"], matched_slot["end"])
+                    # Defense-in-depth: stash the single offered slot so
+                    # book_appointment can recover when Gemini garbles/forgets
+                    # the token. Only set on the single-slot branch — for
+                    # alternatives, the caller must pick one explicitly.
+                    deps["_last_offered_token"] = _token
                     deps.setdefault("_tool_call_log", []).append({
                         "name": "check_availability",
                         "success": True,
@@ -382,6 +387,10 @@ def create_check_availability_tool(deps: dict):
                     requested_speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
 
                     if closest:
+                        # Alternatives branch: there is no single "last offered"
+                        # slot — the caller must pick. Clear any stale value so
+                        # book_appointment does not silently book a prior slot.
+                        deps.pop("_last_offered_token", None)
                         alt_lines = []
                         alt_tokens = []
                         for i, slot in enumerate(closest):

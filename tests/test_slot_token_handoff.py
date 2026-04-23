@@ -201,3 +201,148 @@ def test_book_appointment_description_mentions_slot_token():
     assert "off-by-8-hours" in src, (
         "description should cite the concrete past failure to ground the rule"
     )
+
+
+# ── Hallucination-guard tests (2026-04-24 post-UAT fix) ─────────────────
+#
+# UAT call-_+6587528516_J8ht2s6vu3rE showed Gemini 3.1 Flash Live copy-
+# pasting the literal `slot_token=slot_a1b2c3d4` example from the tool
+# docstring instead of echoing the real dynamic token from the STATE
+# line. Every booking attempt missed the token registry → fell through
+# to the broken legacy path → caller heard "I'm still having trouble
+# booking that time" on loop.
+#
+# Fix: (A) strip the literal example from the docstring; (C) stash a
+# `_last_offered_token` on deps in check_availability's single-slot
+# branch and fall back to it in book_appointment when slot_token is
+# missing or unknown. Defense in depth.
+
+
+def test_docstring_has_no_literal_token_example():
+    """A + C regression guard: no literal `slot_<hex>` examples in the
+    tool description. Gemini treats them as defaults and hallucinates."""
+    src = open(
+        "C:/Users/leheh/.Projects/livekit-agent/src/tools/book_appointment.py",
+        encoding="utf-8",
+    ).read()
+    # Isolate the @function_tool description block
+    desc_start = src.index('name="book_appointment"')
+    desc_end = src.index("async def book_appointment", desc_start)
+    desc = src[desc_start:desc_end]
+    assert "slot_a1b2c3d4" not in desc, (
+        "Literal example token leaked into docstring — Gemini copy-pastes it"
+    )
+    # Guard broader pattern: any `slot_<8-hex>` literal
+    import re
+    leaks = re.findall(r"slot_[0-9a-f]{8}", desc)
+    assert not leaks, f"Literal hex-token examples in docstring: {leaks}"
+
+
+def _extract_resolution_logic_v2(deps: dict, slot_token: str,
+                                 gemini_start: str, gemini_end: str) -> tuple[str, str, bool, str]:
+    """Updated shadow of book_appointment.py resolution block (2026-04-24)
+    that includes the `_last_offered_token` fallback. Returns
+    (slot_start, slot_end, token_resolved, effective_token)."""
+    _tokens = deps.get("_slot_tokens") or {}
+    if slot_token and slot_token not in _tokens:
+        _last_offered = deps.get("_last_offered_token")
+        if _last_offered and _last_offered in _tokens:
+            slot_token = _last_offered
+    elif not slot_token:
+        _last_offered = deps.get("_last_offered_token")
+        if _last_offered and _last_offered in _tokens:
+            slot_token = _last_offered
+    _token_resolved = False
+    if slot_token:
+        _entry = _tokens.get(slot_token)
+        if _entry and (time.time() - _entry.get("created_at", 0)) < 600.0:
+            gemini_start = _entry["slot_start_utc"]
+            gemini_end = _entry["slot_end_utc"]
+            _token_resolved = True
+    return gemini_start, gemini_end, _token_resolved, slot_token
+
+
+def test_no_token_falls_back_to_last_offered():
+    """C: Gemini omits slot_token entirely; deps has _last_offered_token
+    from the prior check_availability call. Must recover."""
+    deps = {}
+    token = _register_slot_token(
+        deps, "2026-04-27T06:00:00+00:00", "2026-04-27T07:00:00+00:00",
+    )
+    deps["_last_offered_token"] = token
+    start, end, resolved, effective = _extract_resolution_logic_v2(
+        deps, slot_token="",
+        gemini_start="", gemini_end="",
+    )
+    assert resolved is True
+    assert effective == token
+    assert start == "2026-04-27T06:00:00+00:00"
+
+
+def test_hallucinated_token_falls_back_to_last_offered():
+    """C: Gemini passes the literal docstring example `slot_a1b2c3d4`
+    (not in registry). Must recover via _last_offered_token."""
+    deps = {}
+    real = _register_slot_token(
+        deps, "2026-04-27T06:00:00+00:00", "2026-04-27T07:00:00+00:00",
+    )
+    deps["_last_offered_token"] = real
+    start, end, resolved, effective = _extract_resolution_logic_v2(
+        deps, slot_token="slot_a1b2c3d4",  # hallucinated example
+        gemini_start="2026-04-27T14:00:00",   # naive SGT digits, wrong
+        gemini_end="2026-04-27T15:00:00",
+    )
+    assert resolved is True
+    assert effective == real, "must recover to real registered token"
+    assert start == "2026-04-27T06:00:00+00:00"
+
+
+def test_no_last_offered_and_no_token_does_not_recover():
+    """Guardrail: if the alternatives branch cleared _last_offered_token
+    and Gemini also sent no token, we do NOT silently invent one."""
+    deps = {"_slot_tokens": {}}  # empty registry, no _last_offered_token
+    start, end, resolved, effective = _extract_resolution_logic_v2(
+        deps, slot_token="",
+        gemini_start="2026-04-27T06:00:00+00:00",
+        gemini_end="2026-04-27T07:00:00+00:00",
+    )
+    assert resolved is False
+    assert effective == ""
+
+
+def test_alternatives_branch_clears_last_offered():
+    """Structural check: check_availability's alternatives branch must
+    pop _last_offered_token so a caller's ambiguous pick doesn't
+    silently bind to a stale single-slot token."""
+    src = open(
+        "C:/Users/leheh/.Projects/livekit-agent/src/tools/check_availability.py",
+        encoding="utf-8",
+    ).read()
+    assert 'deps.pop("_last_offered_token"' in src, (
+        "alternatives branch must clear _last_offered_token"
+    )
+
+
+def test_single_slot_branch_sets_last_offered():
+    """Structural check: check_availability's single-slot branch must
+    stash _last_offered_token for book_appointment's fallback."""
+    src = open(
+        "C:/Users/leheh/.Projects/livekit-agent/src/tools/check_availability.py",
+        encoding="utf-8",
+    ).read()
+    assert 'deps["_last_offered_token"] = _token' in src, (
+        "single-slot branch must set _last_offered_token"
+    )
+
+
+def test_successful_booking_clears_last_offered():
+    """Structural check: on successful booking, _last_offered_token is
+    cleared so a subsequent booking in the same call cannot silently
+    reuse the just-booked slot."""
+    src = open(
+        "C:/Users/leheh/.Projects/livekit-agent/src/tools/book_appointment.py",
+        encoding="utf-8",
+    ).read()
+    assert 'deps.pop("_last_offered_token"' in src, (
+        "successful booking path must clear _last_offered_token"
+    )

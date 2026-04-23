@@ -185,12 +185,14 @@ def create_book_appointment_tool(deps: dict):
         name="book_appointment",
         description=(
             "Book an appointment into the caller's selected slot. "
-            "CRITICAL: pass slot_token — the opaque string returned by check_availability "
-            "in its STATE line (e.g. slot_token=slot_a1b2c3d4). This is the ONLY way to "
-            "book the correct slot; the server resolves the token to the authoritative UTC "
-            "times. DO NOT construct slot_start or slot_end ISO strings yourself — doing so "
-            "has caused confirmed off-by-8-hours bookings. Leave slot_start and slot_end "
-            "empty when passing a slot_token. "
+            "CRITICAL: pass slot_token — copy the exact value that appeared after "
+            "'slot_token=' in the most recent check_availability STATE line. Do not invent "
+            "a value, do not abbreviate, do not reuse a prior call's token. If you cannot "
+            "recall the exact string, call check_availability again for the caller's chosen "
+            "time and copy the fresh token from its STATE line. The server resolves the "
+            "token to the authoritative UTC times. DO NOT construct slot_start or slot_end "
+            "ISO strings yourself — doing so has caused confirmed off-by-8-hours bookings. "
+            "Leave slot_start and slot_end empty when passing a slot_token. "
             "CRITICAL PRECONDITION: before calling this tool, you must have read back the caller's "
             "name (if captured) and full service address in one utterance, and the caller must have "
             "acknowledged or silently accepted the readback (see the BEFORE BOOKING — READBACK rule "
@@ -233,8 +235,29 @@ def create_book_appointment_tool(deps: dict):
         # slot_start/end) on deps; we resolve here and ignore any
         # Gemini-constructed slot_start/slot_end when the token is valid.
         _token_resolved = False
+        # Defense-in-depth (2026-04-24): if Gemini hallucinates or forgets the
+        # token on the single-slot path, fall back to the last-offered token
+        # stashed by check_availability. The alternatives branch clears this
+        # key, so this only fires when there was an unambiguous single slot.
+        _tokens = deps.get("_slot_tokens") or {}
+        if slot_token and slot_token not in _tokens:
+            _last_offered = deps.get("_last_offered_token")
+            if _last_offered and _last_offered in _tokens:
+                logger.warning(
+                    "[book_appointment] slot_token=%r not in registry; "
+                    "recovering with _last_offered_token=%r",
+                    slot_token, _last_offered,
+                )
+                slot_token = _last_offered
+        elif not slot_token:
+            _last_offered = deps.get("_last_offered_token")
+            if _last_offered and _last_offered in _tokens:
+                logger.info(
+                    "[book_appointment] no slot_token supplied; using "
+                    "_last_offered_token=%r", _last_offered,
+                )
+                slot_token = _last_offered
         if slot_token:
-            _tokens = deps.get("_slot_tokens") or {}
             _entry = _tokens.get(slot_token)
             if _entry and (time.time() - _entry.get("created_at", 0)) < 600.0:
                 _authoritative_start = _entry["slot_start_utc"]
@@ -498,6 +521,7 @@ def create_book_appointment_tool(deps: dict):
         # not re-offer the slot we just booked. Next check_availability will
         # refetch from Supabase and repopulate the cache.
         deps.pop("_slot_cache", None)
+        deps.pop("_last_offered_token", None)
 
         # Authoritative booking flags for post-call reconciliation. These are set
         # synchronously (no await between) so post-call can correct the DB even if
