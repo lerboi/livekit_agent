@@ -31,7 +31,7 @@ sentry_sdk.init(
 
 from google.genai import types as genai_types
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
-from livekit.plugins import google, noise_cancellation
+from livekit.plugins import google, noise_cancellation, silero
 from livekit.plugins.google.beta.gemini_tts import TTS as GeminiTTS
 from livekit import api, rtc
 
@@ -72,6 +72,50 @@ def _locale_to_bcp47(locale: str | None) -> str:
     if not locale:
         return "en-US"
     return _LOCALE_TO_BCP47.get(locale, "en-US")
+
+
+def _build_pipeline_plugins(locale: str, voice_name: str):
+    """Phase 64 pipeline session plugins.
+
+    Returns (stt, llm, tts, vad) constructed with locked Phase 64 kwargs.
+    Called from entrypoint() to replace the pre-Phase-64 google.realtime.RealtimeModel
+    + GeminiTTS-as-greeting-only assembly.
+
+    CRITICAL Pitfall 1: google.STT uses `languages=` (PLURAL). The singular `language=`
+    kwarg is silently discarded — a Spanish tenant gets English STT with no error.
+    CRITICAL Pitfall 2: `detect_language=False` pins the configured locale; True (default)
+    lets Google STT auto-override from audio content.
+    CRITICAL Pitfall 6: `"gemini-3.1-flash"` is not in the ChatModels Literal at 1.5.6,
+    but google.LLM.__init__ accepts `str` — and `_is_gemini_3_model()` pattern-matches
+    via `"gemini-3" in model.lower()` for proper thinking_config routing.
+
+    Per D-07 / D-04 / D-05 / D-06 / D-03b. Also see RESEARCH § Pattern 1.
+    """
+    stt_plugin = google.STT(
+        model="chirp_3",
+        languages=_locale_to_bcp47(locale),   # PLURAL kwarg — pitfall-1 silent-failure guard
+        detect_language=False,                 # pitfall-2 pin the locale, no auto-detect
+    )
+    llm_plugin = google.LLM(
+        model="gemini-3.1-flash",              # str accepted; _is_gemini_3_model routes thinking_config
+        thinking_config=genai_types.ThinkingConfig(
+            thinking_level="low",
+            include_thoughts=False,
+        ),
+    )
+    tts_plugin = GeminiTTS(
+        voice_name=voice_name,
+        model="gemini-2.5-flash-preview-tts",
+        # Same instructions string as pre-64 63.1-06 greeting_tts — keeps pacing identical
+        # across greeting and subsequent conversation turns.
+        instructions="Say this quickly, in a warm professional tone:",
+    )
+    vad_plugin = silero.VAD.load(
+        min_silence_duration=2.5,              # D-03b: port of 63.1-11's silence_duration_ms=2500
+        # activation_threshold=0.5 (default) — no change; force_cpu=True (default) for Railway
+    )
+    return stt_plugin, llm_plugin, tts_plugin, vad_plugin
+
 
 # Timeout for SIP participant to join the room (seconds)
 PARTICIPANT_TIMEOUT_S = 30
