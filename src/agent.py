@@ -32,6 +32,7 @@ sentry_sdk.init(
 from google.genai import types as genai_types
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
 from livekit.plugins import google, noise_cancellation
+from livekit.plugins.google.beta.gemini_tts import TTS as GeminiTTS
 from livekit import api, rtc
 
 from .prompt import build_system_prompt
@@ -427,7 +428,25 @@ async def entrypoint(ctx: JobContext):
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
-        session = AgentSession(llm=model)
+
+        # Phase 63.1-06 (gap-closure, v2): Gemini TTS plugin attached so
+        # session.say() can synthesize the opening greeting. The Gemini 3.1
+        # Live RealtimeModel does NOT support agent-first turns via any of
+        # session.generate_reply / session.say-via-realtime /
+        # update_chat_ctx (all capability-gated closed; see
+        # realtime_api.py:289 `mutable = "3.1" not in model`). The only
+        # confirmed path on the current SDK (livekit-agents==1.5.6 +
+        # livekit-plugins-google==1.5.6) is to attach a separate TTS
+        # pipeline and call session.say() — agent_activity.py:1041-1095
+        # routes say() through _tts_task whenever self.tts is set. The
+        # Gemini TTS `voice_name` set matches the Gemini Live voice set 1:1
+        # (Zephyr, Puck, Kore, etc.) so the greeting voice is IDENTICAL to
+        # the subsequent conversation voice — no audible switch.
+        greeting_tts = GeminiTTS(
+            voice_name=voice_name,
+            model="gemini-2.5-flash-preview-tts",
+        )
+        session = AgentSession(llm=model, tts=greeting_tts)
         deps["session"] = session
 
         # ── Collect transcript in real-time ──
@@ -751,40 +770,45 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # Phase 63.1-05 (gap-closure): trigger the first agent turn by pushing a
-        # synthetic user turn directly into the google realtime session's send channel.
-        # The prompt-directive-only approach (63.1-03) was insufficient on Gemini 3.1
-        # Flash Live — the realtime model does not emit output without input. The
-        # capability-guarded public paths are all blocked on 3.1:
-        #   - session.generate_reply(...) — dropped (realtime_api.py:707)
-        #   - session.say(...)            — RealtimeCapabilities.supports_say=False
-        #   - update_chat_ctx(...)        — mutable_chat_context=False
-        # Bypass: use the same LiveClientContent(turn_complete=True) pattern that
-        # realtime_api.py:_generate_reply() uses internally (line 733-739). Pushing
-        # a minimal user turn (".") causes Gemini to produce the first agent turn
-        # per the FIRST TURN / PRIMER TURNO directive baked into the system prompt
-        # by _build_greeting_section (Phase 63.1 Plan 03).
-        try:
-            rt_session = session._activity.realtime_llm_session  # type: ignore[attr-defined]
-            if rt_session is not None and hasattr(rt_session, "_send_client_event"):
-                rt_session._send_client_event(
-                    genai_types.LiveClientContent(
-                        turns=[
-                            genai_types.Content(
-                                parts=[genai_types.Part(text=".")],
-                                role="user",
-                            )
-                        ],
-                        turn_complete=True,
-                    )
+        # Phase 63.1-06 (gap-closure, v2): speak the opening greeting via the
+        # attached Gemini TTS pipeline. Fire-and-forget — the SpeechHandle
+        # returned by session.say() schedules the synthesis task; the caller
+        # hears the greeting within ~500ms of SIP audio coming up. The TTS
+        # voice matches Gemini Live's voice_name so the subsequent
+        # conversation is audibly identical. The greeting text is templated
+        # per-tenant (business_name + localized recording disclosure); this
+        # MUST match the prompt's OPENING guidance so Gemini's follow-up
+        # responses feel contextually consistent.
+        if locale == "es":
+            disclosure_text = "Esta llamada puede ser grabada por motivos de calidad."
+            if onboarding_complete:
+                greeting_text = (
+                    f"Hola, gracias por llamar a {business_name}. "
+                    f"{disclosure_text} ¿En qué puedo ayudarle?"
                 )
-                logger.info("[63.1-05] synthetic user-turn pushed to elicit first agent greeting")
             else:
-                logger.warning(
-                    "[63.1-05] realtime_llm_session unavailable — greeting trigger skipped"
+                greeting_text = (
+                    f"{disclosure_text} ¿En qué puedo ayudarle?"
                 )
+        else:
+            disclosure_text = "This call may be recorded for quality purposes."
+            if onboarding_complete:
+                greeting_text = (
+                    f"Hello, thank you for calling {business_name}. "
+                    f"{disclosure_text} How can I help you today?"
+                )
+            else:
+                greeting_text = (
+                    f"{disclosure_text} How can I help you today?"
+                )
+        try:
+            session.say(greeting_text)
+            logger.info(
+                "[63.1-06] greeting dispatched via TTS locale=%s chars=%d voice=%s",
+                locale, len(greeting_text), voice_name,
+            )
         except Exception as e:
-            logger.error(f"[63.1-05] synthetic user-turn push failed: {e}")
+            logger.error(f"[63.1-06] session.say() failed: {e}")
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
