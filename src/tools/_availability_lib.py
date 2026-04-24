@@ -27,6 +27,67 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Input-mute during tool execution.
+#
+# Gemini 3.1 Flash Live only supports BLOCKING function calling
+# (https://ai.google.dev/gemini-api/docs/live-tools: "Asynchronous function
+# calling is not yet supported in Gemini 3.1 Flash Live. The model will not
+# start responding until you've sent the tool response."). When the caller
+# speaks during the BLOCKING wait, the Live guide documents the failure mode
+# explicitly: "When VAD detects an interruption, the ongoing generation is
+# canceled and discarded... The Gemini server then discards any pending
+# function calls." Our tool response then lands on a cancelled call and
+# produces no audio output — the session stalls.
+#
+# Mitigation: mute the caller's input stream (LiveKit client-side) for the
+# duration of the tool call + post-tool response window. Same mechanism as
+# Phase 63.1-07 greeting-mute (session.input.set_audio_enabled). This is a
+# client-side detachment of the audio stream — no session config mutation,
+# so it works on 3.1 despite mutable_chat_context=False et al.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DEFAULT_TOOL_MUTE_S = 5.0
+
+
+def mute_input_during_tool(deps: dict, max_mute_s: float = _DEFAULT_TOOL_MUTE_S) -> None:
+    """Mute session input for at most max_mute_s seconds. Call at the top of
+    each availability tool to prevent caller-VAD from firing during Gemini's
+    BLOCKING tool wait (which cancels the pending function call — see module
+    header). Fire-and-forget; safe to call repeatedly. A counter prevents
+    stale unmute timers from racing a subsequent tool call.
+    """
+    session = deps.get("session")
+    if not session:
+        return
+
+    # Bump the mute-id so older pending unmutes become no-ops when a newer
+    # tool call has muted more recently.
+    mute_id = deps.get("_tool_mute_id", 0) + 1
+    deps["_tool_mute_id"] = mute_id
+
+    try:
+        session.input.set_audio_enabled(False)
+        logger.info("[tool_mute] muted input id=%d max=%.1fs", mute_id, max_mute_s)
+    except Exception as e:
+        logger.warning("[tool_mute] failed to mute: %s", e)
+        return
+
+    async def _unmute_later():
+        try:
+            await asyncio.sleep(max_mute_s)
+        finally:
+            # Only unmute if no newer tool call has claimed the mute.
+            if deps.get("_tool_mute_id") == mute_id:
+                try:
+                    session.input.set_audio_enabled(True)
+                    logger.info("[tool_mute] unmuted input id=%d", mute_id)
+                except Exception as e:
+                    logger.warning("[tool_mute] failed to unmute: %s", e)
+
+    asyncio.create_task(_unmute_later())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Slot-cache + slot-token constants (unchanged from pre-split).
 # deps["_slot_cache"] TTL narrows the check_slot / check_day live-fetch window
 # so Gemini Live's server-side VAD has less time to cancel the tool call.

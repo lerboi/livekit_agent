@@ -19,6 +19,7 @@ from ._availability_lib import (
     fetch_scheduling_data,
     format_date_label,
     log_tool_call,
+    mute_input_during_tool,
     tenant_today,
 )
 
@@ -54,6 +55,10 @@ def create_check_day_tool(deps: dict):
         t0 = _time.time()
         call_id = f"cd_{int(t0 * 1000) % 100000}"
         date = (raw_arguments.get("date") or "").strip()
+
+        # Prevent caller VAD from interrupting Gemini's BLOCKING tool wait
+        # (see _availability_lib.mute_input_during_tool module header).
+        mute_input_during_tool(deps)
 
         logger.info("[63.1-DIAG] check_day ENTRY id=%s date=%r", call_id, date)
         try:

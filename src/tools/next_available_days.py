@@ -16,6 +16,7 @@ from ._availability_lib import (
     ensure_tenant,
     fetch_scheduling_data,
     log_tool_call,
+    mute_input_during_tool,
     next_n_local_dates,
 )
 
@@ -43,6 +44,11 @@ def create_next_available_days_tool(deps: dict):
     async def next_available_days(raw_arguments: dict, context: RunContext) -> str:
         t0 = _time.time()
         call_id = f"nad_{int(t0 * 1000) % 100000}"
+
+        # Prevent caller VAD from interrupting Gemini's BLOCKING tool wait
+        # (see _availability_lib.mute_input_during_tool module header).
+        mute_input_during_tool(deps)
+
         logger.info("[63.1-DIAG] next_available_days ENTRY id=%s", call_id)
         try:
             result = await _impl(deps)

@@ -25,6 +25,7 @@ from ._availability_lib import (
     fetch_scheduling_data,
     format_date_label,
     log_tool_call,
+    mute_input_during_tool,
     parse_hhmm_to_utc,
     register_slot_token,
     tenant_today,
@@ -73,6 +74,10 @@ def create_check_slot_tool(deps: dict):
         date = (raw_arguments.get("date") or "").strip()
         time_str = (raw_arguments.get("time") or "").strip()
         urgency = raw_arguments.get("urgency") or "routine"
+
+        # Prevent caller VAD from interrupting Gemini's BLOCKING tool wait
+        # (see _availability_lib.mute_input_during_tool module header).
+        mute_input_during_tool(deps)
 
         logger.info(
             "[63.1-DIAG] check_slot ENTRY id=%s date=%r time=%r urgency=%r",
