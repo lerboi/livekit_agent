@@ -459,6 +459,17 @@ async def entrypoint(ctx: JobContext):
         greeting_tts = GeminiTTS(
             voice_name=voice_name,
             model="gemini-2.5-flash-preview-tts",
+            # Gemini TTS controls pace via natural-language instructions rather
+            # than a numeric speaking_rate. Ask for a noticeably brisk delivery
+            # so the ~114-char greeting finishes in ~4-5s instead of 7-8s —
+            # keeps the pre-greeting protected window short and gets the
+            # caller to the actionable question faster.
+            instructions=(
+                "Say the text at a brisk, efficient pace — like a professional "
+                "receptionist who is ready to help. Do not rush or clip words, "
+                "but keep the delivery quick and purposeful. Do not add, omit, "
+                "or change any words."
+            ),
         )
         session = AgentSession(llm=model, tts=greeting_tts)
         deps["session"] = session
