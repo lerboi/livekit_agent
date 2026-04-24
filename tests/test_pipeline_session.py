@@ -3,7 +3,7 @@ Phase 64 session-construction invariants (Wave 0 RED).
 
 Asserts that src.agent session assembly uses:
 - google.STT(model="chirp_3", languages=..., detect_language=False)   [Pitfall 1 guard]
-- google.LLM(model="gemini-3.1-flash", thinking_config=ThinkingConfig(thinking_level="low", ...))
+- google.LLM(model="gemini-3-flash-preview", thinking_config=ThinkingConfig(thinking_level="low", ...))
 - silero.VAD.load(min_silence_duration=2.5)
 - GeminiTTS at session-level
 - No turn_detector plugin; no google.realtime.RealtimeModel; no 63.1-07 mute scaffolding
@@ -16,7 +16,7 @@ Contract covered:
 - D-03a (remove 63.1-07 input mute scaffolding)
 - D-03b (Silero VAD 2.5s silence threshold port)
 - D-04 (Silero only, no turn_detector)
-- D-05 (google.LLM gemini-3.1-flash + thinking_config)
+- D-05 (google.LLM gemini-3-flash-preview + thinking_config; UAT correction from gemini-3.1-flash which 404s on v1beta)
 - D-06 (GeminiTTS session-level)
 - D-07 (google.STT chirp_3 with languages= plural + detect_language=False)
 - D-09 (preserve all 7 tools)
@@ -109,7 +109,7 @@ def _patched_plugins(locale: str, voice: str = "Zephyr"):
         cls_name = self.__class__.__name__
         if model == "chirp_3" or cls_name == "STT":
             recorded["STT"].append(dict(kwargs))
-        elif model == "gemini-3.1-flash" or cls_name == "LLM":
+        elif model == "gemini-3-flash-preview" or cls_name == "LLM":
             recorded["LLM"].append(dict(kwargs))
         elif model == "gemini-2.5-flash-preview-tts" or cls_name == "TTS":
             recorded["TTS"].append(dict(kwargs))
@@ -166,11 +166,15 @@ def test_stt_model_is_chirp_3():
     assert stt_kwargs["model"] == "chirp_3"
 
 
-def test_llm_model_is_gemini_3_1_flash():
+def test_llm_model_is_gemini_3_flash_preview():
+    """Phase 64 UAT correction: AI Studio v1beta returns 404 for 'gemini-3.1-flash'
+    (the D-05 originally-locked name). The actual Gemini 3 Flash identifier is
+    'gemini-3-flash-preview' per https://ai.google.dev/gemini-api/docs/gemini-3 .
+    The Pro variant uses '3.1' (gemini-3.1-pro-preview); the Flash variant does not."""
     rec = _patched_plugins(locale="en")
     assert len(rec["LLM"]) == 1, "expected exactly one google.LLM constructor call"
     llm_kwargs = rec["LLM"][0]
-    assert llm_kwargs["model"] == "gemini-3.1-flash"
+    assert llm_kwargs["model"] == "gemini-3-flash-preview"
 
 
 def test_llm_thinking_config_low():

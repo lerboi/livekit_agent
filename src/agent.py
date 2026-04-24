@@ -134,7 +134,11 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
             logger.error(f"[64-ADC] GOOGLE_APPLICATION_CREDENTIALS_JSON is not valid JSON: {_e}")
     stt_plugin = google.STT(**_stt_kwargs)
     llm_plugin = google.LLM(
-        model="gemini-3.1-flash",              # str accepted; _is_gemini_3_model routes thinking_config
+        # Gemini 3 Flash on AI Studio v1beta. Per
+        # https://ai.google.dev/gemini-api/docs/gemini-3 the exact identifier is
+        # `gemini-3-flash-preview` (no `.1` — only the Pro variant uses 3.1).
+        # Phase 64 D-05 originally locked `gemini-3.1-flash` which returns 404.
+        model="gemini-3-flash-preview",
         thinking_config=genai_types.ThinkingConfig(
             thinking_level="low",
             include_thoughts=False,
@@ -143,9 +147,11 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
     tts_plugin = GeminiTTS(
         voice_name=voice_name,
         model="gemini-2.5-flash-preview-tts",
-        # Same instructions string as pre-64 63.1-06 greeting_tts — keeps pacing identical
-        # across greeting and subsequent conversation turns.
-        instructions="Say this quickly, in a warm professional tone:",
+        # Natural conversational pacing. The earlier 63.1-09 "Say this quickly"
+        # instruction was a Realtime-path race mitigation that no longer applies
+        # on the pipeline; fast pacing caused a 114-char greeting to play in
+        # ~3.5s which felt rushed and was vulnerable to VAD false-interruption.
+        instructions="Speak naturally in a warm, professional, measured tone:",
     )
     vad_plugin = silero.VAD.load(
         min_silence_duration=2.5,              # D-03b: port of 63.1-11's silence_duration_ms=2500
@@ -909,7 +915,12 @@ async def entrypoint(ctx: JobContext):
         # natively by AgentActivity — no mute needed. session.say() works natively on
         # pipeline (no capability gate; tts= attached at session level).
         try:
-            greeting_handle = session.say(greeting_text)
+            # allow_interruptions=False prevents Silero VAD + BVCTelephony residual
+            # echo from aborting the greeting mid-playback. Observed in UAT: a
+            # brief false user_state transition during the first ~3s truncated
+            # the greeting and stamped `agent_false_interruption` in diagnostics.
+            # Barge-in returns to default (True) for all subsequent turns.
+            greeting_handle = session.say(greeting_text, allow_interruptions=False)
             logger.info(
                 "[64] greeting dispatched via pipeline TTS locale=%s chars=%d voice=%s",
                 locale, len(greeting_text), voice_name,
