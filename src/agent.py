@@ -379,14 +379,27 @@ async def entrypoint(ctx: JobContext):
             ai_voice, tone_preset, voice_name,
         )
 
-        # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
-        # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
-        # threshold (raised from 1000ms in Phase 60.2) tracks upstream guidance
-        # for livekit/agents#4441 ("Spurious Server VAD events cause unavoidable
-        # tool cancellation") and mitigates the user-visible symptom of
-        # livekit/agents#4486 ("Agent audio cuts off after one word"). Barge-in
-        # still works — the thresholds just require deliberate caller speech
-        # (>1.5s) instead of firing on breath/noise.
+        # Dampen Gemini's server-side VAD AND disable activity-start interrupts
+        # so in-flight tool calls are NEVER cancelled by caller speech.
+        #
+        # Phase 63.1-08: Prior config (LOW sensitivity + 1500ms silence) left
+        # `activity_handling` at the default (`START_OF_ACTIVITY_INTERRUPTS`),
+        # which caused booking failures: when the caller said ANYTHING during
+        # a `book_appointment` tool call, Gemini issued `server cancelled tool
+        # calls` events mid-flight. The tool often still succeeded server-side
+        # (Google Calendar event gets created) but Gemini received the cancel
+        # event, thought the call failed, and retried with hallucinated tokens
+        # like `[TOKEN_FROM_LAST_TOOL_RESULT]` and
+        # `REPLACE_WITH_ACTUAL_TOKEN_FROM_LAST_CHECK_AVAILABILITY`, triggering
+        # the slot_token recovery path repeatedly.
+        #
+        # Setting `activity_handling=NO_INTERRUPTION` makes `_GoogleRealtime
+        # Session.interrupt()` a no-op (realtime_api.py:768-777) — caller
+        # speech does NOT cancel current agent speech or in-flight tool calls.
+        # Caller is still HEARD (VAD still runs and produces input events for
+        # the model to consider on its next turn) but agent generations
+        # complete uninterrupted. This is the correct tradeoff for a
+        # receptionist: reliable bookings beat mid-speech barge-in.
         realtime_input_config = genai_types.RealtimeInputConfig(
             automatic_activity_detection=genai_types.AutomaticActivityDetection(
                 start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
@@ -394,6 +407,7 @@ async def entrypoint(ctx: JobContext):
                 prefix_padding_ms=400,
                 silence_duration_ms=1500,  # phase 60.2 (was 1000 in phase 55 999.2 fix)
             ),
+            activity_handling=genai_types.ActivityHandling.NO_INTERRUPTION,
         )
 
         logger.info(
@@ -823,11 +837,18 @@ async def entrypoint(ctx: JobContext):
 
             async def _unmute_after_greeting():
                 try:
-                    await asyncio.wait_for(greeting_handle.wait_for_playout(), timeout=6.0)
+                    # Raised from 6s → 10s after live UAT showed Gemini TTS
+                    # synthesis of the 114-char branded greeting exceeding 6s
+                    # end-to-end (including first-audio-frame latency), causing
+                    # the force-unmute to fire while the greeting was still
+                    # playing. 10s is comfortable headroom for any normal
+                    # greeting length; the safety cap still prevents permanent
+                    # mute on broken playout signaling.
+                    await asyncio.wait_for(greeting_handle.wait_for_playout(), timeout=10.0)
                     logger.info("[63.1-07] greeting playout complete; unmuting input")
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "[63.1-07] greeting playout wait timed out at 6s; force-unmuting input"
+                        "[63.1-07] greeting playout wait timed out at 10s; force-unmuting input"
                     )
                 except Exception as e:
                     logger.error(f"[63.1-07] greeting playout wait failed: {e}; force-unmuting")
