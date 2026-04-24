@@ -4,7 +4,7 @@ Phase 64 session-construction invariants (Wave 0 RED).
 Asserts that src.agent session assembly uses:
 - google.STT(model="chirp_3", languages=..., detect_language=False)   [Pitfall 1 guard]
 - google.LLM(model="gemini-3-flash-preview", thinking_config=ThinkingConfig(thinking_level="low", ...))
-- silero.VAD.load(min_silence_duration=2.5)
+- silero.VAD.load(min_silence_duration=0.55)  # LiveKit default; D-03b UAT-revised
 - GeminiTTS at session-level
 - No turn_detector plugin; no google.realtime.RealtimeModel; no 63.1-07 mute scaffolding
 
@@ -190,12 +190,17 @@ def test_llm_thinking_config_low():
     assert tc.include_thoughts is False
 
 
-def test_vad_min_silence_duration_2_5():
-    """D-03b: 63.1-11's 2500ms silence threshold ported to Silero as 2.5 seconds."""
+def test_vad_min_silence_duration_default():
+    """D-03b UAT revision: Phase 63.1-11's 2500ms was a Realtime server-VAD parameter,
+    NOT a Silero parameter. Porting it to Silero produced ~11s end-of-turn latency
+    that caused callers to hang up before responses finished buffering. Reverted to
+    LiveKit's documented Silero default per
+    https://docs.livekit.io/agents/build/turns/vad/ .
+    """
     rec = _patched_plugins(locale="en")
     assert len(rec["VAD.load"]) == 1, "expected exactly one silero.VAD.load call"
     vad_kwargs = rec["VAD.load"][0]
-    assert vad_kwargs["min_silence_duration"] == 2.5
+    assert vad_kwargs["min_silence_duration"] == 0.55
 
 
 def test_tts_is_gemini_tts_session_level():

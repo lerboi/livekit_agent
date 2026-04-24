@@ -154,7 +154,12 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
         instructions="Speak naturally in a warm, professional, measured tone:",
     )
     vad_plugin = silero.VAD.load(
-        min_silence_duration=2.5,              # D-03b: port of 63.1-11's silence_duration_ms=2500
+        # UAT revision of D-03b: Phase 63.1-11's 2500ms silence_duration_ms was a
+        # Realtime-server-VAD parameter, not Silero. Porting it literally to local
+        # Silero VAD produced a ~11s end-of-turn latency that made callers hang up
+        # before the first response finished buffering. Reverting to LiveKit's
+        # recommended default (550ms) per https://docs.livekit.io/agents/build/turns/vad/
+        min_silence_duration=0.55,
         # activation_threshold=0.5 (default) — no change; force_cpu=True (default) for Railway
     )
     return stt_plugin, llm_plugin, tts_plugin, vad_plugin
@@ -915,12 +920,14 @@ async def entrypoint(ctx: JobContext):
         # natively by AgentActivity — no mute needed. session.say() works natively on
         # pipeline (no capability gate; tts= attached at session level).
         try:
-            # allow_interruptions=False prevents Silero VAD + BVCTelephony residual
-            # echo from aborting the greeting mid-playback. Observed in UAT: a
-            # brief false user_state transition during the first ~3s truncated
-            # the greeting and stamped `agent_false_interruption` in diagnostics.
-            # Barge-in returns to default (True) for all subsequent turns.
-            greeting_handle = session.say(greeting_text, allow_interruptions=False)
+            # Previously set allow_interruptions=False to shield greeting from a
+            # VAD false-trigger bug. Root cause was the fast "Say this quickly"
+            # TTS instruction producing audio artifacts that echoed back into
+            # VAD; switching to natural pacing removed the false triggers. Keeping
+            # interruption enabled (default) so a caller saying "Hello" during
+            # the greeting isn't ignored — that UX was worse than the edge case
+            # it protected against.
+            greeting_handle = session.say(greeting_text)
             logger.info(
                 "[64] greeting dispatched via pipeline TTS locale=%s chars=%d voice=%s",
                 locale, len(greeting_text), voice_name,
