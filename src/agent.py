@@ -751,12 +751,40 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # Phase 63.1: removed post-session greeting trigger (dead generate_reply
-        # + Event signaling). livekit-plugins-google 1.5.6 + gemini-3.1-flash-live-preview
-        # drops generate_reply() silently (realtime_api.py:707 capability guard).
-        # Greeting is now delivered via outcome-shaped directive in
-        # _build_greeting_section (prompt.py) + Gemini server VAD firing on
-        # first caller audio frame. See 63.1-RESEARCH.md Target 1 and Target 3.
+        # Phase 63.1-05 (gap-closure): trigger the first agent turn by pushing a
+        # synthetic user turn directly into the google realtime session's send channel.
+        # The prompt-directive-only approach (63.1-03) was insufficient on Gemini 3.1
+        # Flash Live — the realtime model does not emit output without input. The
+        # capability-guarded public paths are all blocked on 3.1:
+        #   - session.generate_reply(...) — dropped (realtime_api.py:707)
+        #   - session.say(...)            — RealtimeCapabilities.supports_say=False
+        #   - update_chat_ctx(...)        — mutable_chat_context=False
+        # Bypass: use the same LiveClientContent(turn_complete=True) pattern that
+        # realtime_api.py:_generate_reply() uses internally (line 733-739). Pushing
+        # a minimal user turn (".") causes Gemini to produce the first agent turn
+        # per the FIRST TURN / PRIMER TURNO directive baked into the system prompt
+        # by _build_greeting_section (Phase 63.1 Plan 03).
+        try:
+            rt_session = session._activity.realtime_llm_session  # type: ignore[attr-defined]
+            if rt_session is not None and hasattr(rt_session, "_send_client_event"):
+                rt_session._send_client_event(
+                    genai_types.LiveClientContent(
+                        turns=[
+                            genai_types.Content(
+                                parts=[genai_types.Part(text=".")],
+                                role="user",
+                            )
+                        ],
+                        turn_complete=True,
+                    )
+                )
+                logger.info("[63.1-05] synthetic user-turn pushed to elicit first agent greeting")
+            else:
+                logger.warning(
+                    "[63.1-05] realtime_llm_session unavailable — greeting trigger skipped"
+                )
+        except Exception as e:
+            logger.error(f"[63.1-05] synthetic user-turn push failed: {e}")
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
