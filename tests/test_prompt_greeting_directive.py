@@ -198,3 +198,47 @@ def test_business_name_still_interpolated_both_locales_after_reframe():
         "Phase 64 D-03c: ES re-frame must still interpolate business_name "
         "(Phase 63.1-06 contract preserved)"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 64 WARNING 6 mitigation — end-to-end composition assertions.
+#
+# Section-level unit tests above verify _build_greeting_section's output,
+# but a composition-pipeline regression (wrong section ordering, conditional
+# inclusion bug dropping the block, etc.) could silently let the re-framed
+# directive miss the actual system prompt the LLM sees at runtime. These
+# tests call build_system_prompt(...) directly and assert the re-frame
+# headers land in the composed output.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_build_system_prompt_includes_d03c_en():
+    """Phase 64 WARNING 6 guard: re-framed D-03c directive MUST appear in the
+    full build_system_prompt() output for EN, not just in _build_greeting_section.
+    Guards against composition-pipeline regressions (wrong section ordering,
+    conditional inclusion bug dropping the greeting block)."""
+    from src.prompt import build_system_prompt
+    sys_prompt = build_system_prompt(
+        locale="en",
+        business_name="AcmeCorp",
+        onboarding_complete=True,
+    )
+    assert "GREETING ALREADY DELIVERED" in sys_prompt, (
+        "Phase 64 D-03c re-frame header must appear in the composed "
+        "system prompt for EN. Section unit test GREEN but composition "
+        "regression drops the block."
+    )
+
+
+def test_build_system_prompt_includes_d03c_es():
+    """Phase 64 WARNING 6 guard — ES locale parity."""
+    from src.prompt import build_system_prompt
+    sys_prompt = build_system_prompt(
+        locale="es",
+        business_name="AcmeCorp",
+        onboarding_complete=True,
+    )
+    assert "SALUDO YA ENTREGADO" in sys_prompt, (
+        "Phase 64 D-03c ES re-frame header must appear in the composed "
+        "system prompt for ES."
+    )
