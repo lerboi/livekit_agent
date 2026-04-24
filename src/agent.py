@@ -30,16 +30,25 @@ sentry_sdk.init(
 )
 
 # Phase 64: materialize GOOGLE_APPLICATION_CREDENTIALS_JSON (Railway secret) to a
-# temp file so google.cloud.speech_v2 ADC auto-discovery succeeds. Required because
-# the Cloud Speech v2 gRPC client only reads GOOGLE_APPLICATION_CREDENTIALS (a file
-# path), not a raw JSON string. Runs before any `from google.*` import below.
+# temp file so google.cloud.speech_v2 ADC auto-discovery succeeds. Belt-and-braces:
+# _build_pipeline_plugins also passes credentials_info= explicitly to google.STT
+# below, which is the authoritative path (ADC propagation across LiveKit's spawn-
+# based job workers has been unreliable on Railway — see Phase 64 UAT triage).
 import tempfile as _tempfile
 _gcp_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 if _gcp_json and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-    _gcp_path = os.path.join(_tempfile.gettempdir(), "gcp_adc.json")
-    with open(_gcp_path, "w", encoding="utf-8") as _f:
-        _f.write(_gcp_json)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _gcp_path
+    try:
+        _gcp_path = os.path.join(_tempfile.gettempdir(), "gcp_adc.json")
+        with open(_gcp_path, "w", encoding="utf-8") as _f:
+            _f.write(_gcp_json)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _gcp_path
+        print(f"[64-ADC] wrote ADC file to {_gcp_path} ({len(_gcp_json)} bytes)", flush=True)
+    except Exception as _e:
+        print(f"[64-ADC] FAILED to materialize ADC file: {_e}", flush=True)
+elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    print(f"[64-ADC] GOOGLE_APPLICATION_CREDENTIALS already points to {os.environ['GOOGLE_APPLICATION_CREDENTIALS']}", flush=True)
+else:
+    print("[64-ADC] no GOOGLE_APPLICATION_CREDENTIALS* env var set — google.STT will need credentials_info= at construction", flush=True)
 
 from google.genai import types as genai_types
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
@@ -103,11 +112,21 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
 
     Per D-07 / D-04 / D-05 / D-06 / D-03b. Also see RESEARCH § Pattern 1.
     """
-    stt_plugin = google.STT(
+    _stt_kwargs = dict(
         model="chirp_3",
         languages=_locale_to_bcp47(locale),   # PLURAL kwarg — pitfall-1 silent-failure guard
         detect_language=False,                 # pitfall-2 pin the locale, no auto-detect
     )
+    # Explicit credentials_info= bypasses ADC. On Railway the service-account JSON
+    # lives in GOOGLE_APPLICATION_CREDENTIALS_JSON. Passing it directly avoids
+    # env-var propagation quirks across LiveKit's spawned job workers.
+    _gcp_raw = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if _gcp_raw:
+        try:
+            _stt_kwargs["credentials_info"] = json.loads(_gcp_raw)
+        except json.JSONDecodeError as _e:
+            logger.error(f"[64-ADC] GOOGLE_APPLICATION_CREDENTIALS_JSON is not valid JSON: {_e}")
+    stt_plugin = google.STT(**_stt_kwargs)
     llm_plugin = google.LLM(
         model="gemini-3.1-flash",              # str accepted; _is_gemini_3_model routes thinking_config
         thinking_config=genai_types.ThinkingConfig(
