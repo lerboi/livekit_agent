@@ -482,7 +482,16 @@ def _build_greeting_section(
                 f'Abra con un aviso de grabación ("{disclosure}") '
                 f"y pregunte en qué puede ayudar."
             )
-        return (
+        first_turn_block = (
+            "PRIMER TURNO — CRÍTICO:\n"
+            f"Lo primero que escucha el llamante en esta llamada es un saludo "
+            f"cálido y con marca comercial — el mismo saludo que un recepcionista "
+            f"real daría al contestar en {business_name}. No espere a que el "
+            f"llamante hable primero; no pregunte aclaraciones antes del saludo; "
+            f"no emita frases de relleno.\n"
+            "\n"
+        )
+        return first_turn_block + (
             "APERTURA:\n"
             f"- {opening_guidance}\n"
             "- Manténgalo en una o dos oraciones.\n"
@@ -505,7 +514,16 @@ def _build_greeting_section(
             f"and ask how you can help."
         )
 
-    return (
+    first_turn_block = (
+        "FIRST TURN — CRITICAL:\n"
+        f"The first thing the caller hears on this call is a warm, "
+        f"business-branded greeting — the same greeting a real receptionist "
+        f"would give on pickup at {business_name}. Do not wait for the caller "
+        f"to speak first; do not ask a clarifying question before the greeting; "
+        f"do not emit filler phrases.\n"
+        "\n"
+    )
+    return first_turn_block + (
         "OPENING:\n"
         f"- {opening_guidance}\n"
         "- Keep it to one or two sentences.\n"
