@@ -180,45 +180,77 @@ async def _send_recovery_sms(deps: dict, tenant: dict | None, urgency: str, call
             pass  # last-resort swallow
 
 
+_BOOK_APPOINTMENT_SCHEMA = {
+    "name": "book_appointment",
+    "description": (
+        "Book an appointment after the caller has acknowledged the name+address "
+        "readback. Pass slot_token from the most recent check_slot result "
+        "verbatim — never invent or reconstruct it. Speak a short filler phrase "
+        "first ('Let me get that booked in for you'), then invoke in the same "
+        "turn. Do not speak 'booked'/'confirmed' or the appointment time as a "
+        "settled fact before this tool returns success. This tool's return is a "
+        "state+directive string — do not read it aloud."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "slot_token": {
+                "type": "string",
+                "description": (
+                    "The opaque slot_token string from the most recent check_slot "
+                    "STATE line. Only exact strings previously returned by check_slot "
+                    "in this call are valid."
+                ),
+            },
+            "street_name": {
+                "type": "string",
+                "description": "Street portion of the service address, as read back to the caller.",
+            },
+            "postal_code": {
+                "type": "string",
+                "description": "Postal / zip code of the service address, as read back to the caller.",
+            },
+            "caller_name": {
+                "type": "string",
+                "description": "Caller's name as captured and read back. Empty string only if not captured.",
+            },
+            "unit_number": {
+                "type": "string",
+                "description": (
+                    "Unit / apartment / suite number. Empty string only if the caller "
+                    "explicitly confirmed there is no unit."
+                ),
+            },
+            "urgency": {
+                "type": "string",
+                "enum": ["emergency", "urgent", "routine"],
+                "description": (
+                    "Urgency inferred from the conversation. Do NOT ask the caller. "
+                    "Default 'routine' if unsure."
+                ),
+            },
+        },
+        "required": ["slot_token", "street_name", "postal_code", "caller_name"],
+    },
+}
+
+
 def create_book_appointment_tool(deps: dict):
-    @function_tool(
-        name="book_appointment",
-        description=(
-            "Book an appointment into the caller's selected slot. "
-            "CRITICAL: pass slot_token — copy the exact value that appeared after "
-            "'slot_token=' in the most recent check_availability STATE line. Do not invent "
-            "a value, do not abbreviate, do not reuse a prior call's token. If you cannot "
-            "recall the exact string, call check_availability again for the caller's chosen "
-            "time and copy the fresh token from its STATE line. The server resolves the "
-            "token to the authoritative UTC times. DO NOT construct slot_start or slot_end "
-            "ISO strings yourself — doing so has caused confirmed off-by-8-hours bookings. "
-            "Leave slot_start and slot_end empty when passing a slot_token. "
-            "CRITICAL PRECONDITION: before calling this tool, you must have read back the caller's "
-            "name (if captured) and full service address in one utterance, and the caller must have "
-            "acknowledged or silently accepted the readback (see the BEFORE BOOKING — READBACK rule "
-            "in the system prompt). Do not call this tool until the readback is complete. "
-            "This tool's return is a state+directive string — do not read it aloud. "
-            "DO NOT speak the words 'confirmed', 'booked', 'all set', 'see you tomorrow/at...', "
-            "or any specific appointment time as a settled fact before invoking this tool. "
-            "Always speak a short filler phrase first ('Let me get that booked in for you'), "
-            "then immediately invoke this tool in the same turn. "
-            "Pass unit_number as empty string only if the caller explicitly confirmed there is no unit. "
-            "Do NOT ask the caller about urgency -- infer it from the conversation. "
-            "urgency MUST be exactly one of: 'emergency', 'urgent', 'routine'. "
-            "Never pass any other value (e.g. 'high', 'low', 'medium'); default to 'routine' if unsure."
-        ),
-    )
-    async def book_appointment(
-        context: RunContext,
-        slot_token: str = "",
-        slot_start: str = "",
-        slot_end: str = "",
-        street_name: str = "",
-        postal_code: str = "",
-        caller_name: str = "",
-        unit_number: str = "",
-        urgency: str = "routine",
-    ) -> str:
+    @function_tool(raw_schema=_BOOK_APPOINTMENT_SCHEMA)
+    async def book_appointment(raw_arguments: dict, context: RunContext) -> str:
+        # raw_schema drops slot_start/slot_end from the Gemini-facing surface
+        # entirely. Kept as empty locals for one release cycle so the
+        # _ensure_utc_iso fallback path below stays syntactically intact; the
+        # branch is now dead code and can be removed in the next cycle.
+        slot_token = (raw_arguments.get("slot_token") or "").strip()
+        slot_start = ""
+        slot_end = ""
+        street_name = (raw_arguments.get("street_name") or "").strip()
+        postal_code = (raw_arguments.get("postal_code") or "").strip()
+        caller_name = (raw_arguments.get("caller_name") or "").strip()
+        unit_number = (raw_arguments.get("unit_number") or "").strip()
+        urgency = raw_arguments.get("urgency") or "routine"
+
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
@@ -287,7 +319,7 @@ def create_book_appointment_tool(deps: dict):
         if not slot_start or not slot_end:
             return (
                 "STATE:booking_invalid reason=missing_slot_fields"
-                " | DIRECTIVE:apologize briefly; call check_availability again for the"
+                " | DIRECTIVE:apologize briefly; call check_slot again for the"
                 " time the caller wants, then call book_appointment with the slot_token"
                 " returned in the STATE line."
             )
@@ -306,7 +338,7 @@ def create_book_appointment_tool(deps: dict):
             except ValueError:
                 return (
                     "STATE:booking_invalid reason=malformed_slot_iso"
-                    " | DIRECTIVE:apologize briefly; call check_availability again for the"
+                    " | DIRECTIVE:apologize briefly; call check_slot again for the"
                     " same date and time to get a fresh slot, then call book_appointment"
                     " with the slot_token returned in the STATE line."
                 )
