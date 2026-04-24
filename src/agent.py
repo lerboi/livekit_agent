@@ -78,8 +78,8 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
     """Phase 64 pipeline session plugins.
 
     Returns (stt, llm, tts, vad) constructed with locked Phase 64 kwargs.
-    Called from entrypoint() to replace the pre-Phase-64 google.realtime.RealtimeModel
-    + GeminiTTS-as-greeting-only assembly.
+    Called from entrypoint() to replace the pre-Phase-64 Realtime audio-to-audio
+    model + GeminiTTS-as-greeting-only assembly.
 
     CRITICAL Pitfall 1: google.STT uses `languages=` (PLURAL). The singular `language=`
     kwarg is silently discarded — a Spanish tenant gets English STT with no error.
@@ -423,99 +423,34 @@ async def entrypoint(ctx: JobContext):
             ai_voice, tone_preset, voice_name,
         )
 
-        # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
-        # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
-        # threshold (raised from 1000ms in Phase 60.2) tracks upstream guidance
-        # for livekit/agents#4441. Barge-in still works — thresholds just
-        # require deliberate caller speech (>1.5s) instead of firing on
-        # breath/noise.
-        #
-        # Phase 63.1-10 revert: activity_handling=NO_INTERRUPTION was tried in
-        # 63.1-08 to stop tool-call cancellation, but it caused a worse
-        # failure mode — after check_availability returned, Gemini never
-        # verbalized the result and the call stalled indefinitely. Reverting
-        # to default (START_OF_ACTIVITY_INTERRUPTS) and addressing the
-        # tool-retry-loop at the prompt level (see _build_booking_section
-        # anti-retry guidance).
-        realtime_input_config = genai_types.RealtimeInputConfig(
-            automatic_activity_detection=genai_types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
-                end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
-                prefix_padding_ms=400,
-                # Phase 63.1-11: raised 1500 -> 2500ms. Live UAT shows the
-                # caller saying brief acknowledgments ("hello", "mhm")
-                # during agent speech fires VAD at 1500ms, triggering
-                # `server cancelled tool calls` + mid-word truncation
-                # (#4486 pipeline race). 2500ms requires a deliberate
-                # full-sentence utterance (>2.5s of continuous speech)
-                # before VAD fires — brief acknowledgments no longer
-                # count as interrupts. Barge-in still works for genuine
-                # caller interjections.
-                silence_duration_ms=2500,
-            ),
-        )
-
+        # Phase 64: Realtime audio-to-audio session replaced by STT+LLM+TTS+VAD pipeline.
+        # `realtime_input_config` deleted; Silero VAD's `min_silence_duration=2.5` (see
+        # _build_pipeline_plugins) ports the 63.1-11 / 60.2 2500ms silence threshold to
+        # the local VAD. See CONTEXT.md § D-03b.
         logger.info(
-            "[60.4 Stream B] RealtimeModel language=%s (locale=%s)",
+            "[64] Pipeline session languages=%s locale=%s voice=%s",
             _locale_to_bcp47(locale),
             locale,
+            voice_name,
         )
 
-        # Phase-fix (2026-04-24): Gemini 3 explicit guidance says temperature
-        # must be left at default (1.0); custom values "risk looping or
-        # degraded performance." We were overriding to 0.3 (carryover from
-        # Gemini 2.x tool-agent convention) and observing exactly the
-        # symptom Google warns about: filler loops + hallucinated outcomes.
-        # Deleted.
-        #
-        # thinking_level raised from "minimal" to "low": minimal mode
-        # short-circuits tool-vs-speak deliberation, so the model pattern-
-        # matches to the most fluent continuation (e.g. fabricating a
-        # booking confirmation) instead of invoking a tool. "low" keeps
-        # latency tight while restoring enough deliberation to pick tools
-        # over fluent fabrication on a receptionist call.
-        model = google.realtime.RealtimeModel(
-            model="gemini-3.1-flash-live-preview",
-            voice=voice_name,
-            language=_locale_to_bcp47(locale),  # Phase 60.4 D-B-01: best-effort STT pin on native-audio
-            instructions=system_prompt,
-            realtime_input_config=realtime_input_config,
-            thinking_config=genai_types.ThinkingConfig(
-                thinking_level="low",
-                include_thoughts=False,
-            ),
+        # Phase 64: Pipeline session assembly (replaces google.realtime.RealtimeModel).
+        # See _build_pipeline_plugins for kwarg-level contract and CONTEXT.md § D-01/D-05/D-06/D-07
+        # for locked-decision rationale. The pipeline path has NO capability gates on
+        # session.say() / session.generate_reply() / update_chat_ctx — eliminates the
+        # 5 upstream SDK bugs documented in CONTEXT.md § Motivation.
+        stt_plugin, llm_plugin, tts_plugin, vad_plugin = _build_pipeline_plugins(
+            locale=locale,
+            voice_name=voice_name,
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
-
-        # Phase 63.1-06 (gap-closure, v2): Gemini TTS plugin attached so
-        # session.say() can synthesize the opening greeting. The Gemini 3.1
-        # Live RealtimeModel does NOT support agent-first turns via any of
-        # session.generate_reply / session.say-via-realtime /
-        # update_chat_ctx (all capability-gated closed; see
-        # realtime_api.py:289 `mutable = "3.1" not in model`). The only
-        # confirmed path on the current SDK (livekit-agents==1.5.6 +
-        # livekit-plugins-google==1.5.6) is to attach a separate TTS
-        # pipeline and call session.say() — agent_activity.py:1041-1095
-        # routes say() through _tts_task whenever self.tts is set. The
-        # Gemini TTS `voice_name` set matches the Gemini Live voice set 1:1
-        # (Zephyr, Puck, Kore, etc.) so the greeting voice is IDENTICAL to
-        # the subsequent conversation voice — no audible switch.
-        greeting_tts = GeminiTTS(
-            voice_name=voice_name,
-            model="gemini-2.5-flash-preview-tts",
-            # Gemini TTS controls pace via natural-language instructions rather
-            # than a numeric speaking_rate. Ask for a noticeably brisk delivery
-            # so the ~114-char greeting finishes in ~4-5s instead of 7-8s —
-            # keeps the pre-greeting protected window short and gets the
-            # caller to the actionable question faster.
-            # Direct pace instruction — Gemini TTS prepends the full string
-            # to the text as context (gemini_tts.py:200-201), so keep it
-            # short and declarative. "Quickly" is more reliably honored than
-            # abstract adjectives like "brisk" or "efficient".
-            instructions="Say this quickly, in a warm professional tone:",
+        session = AgentSession(
+            stt=stt_plugin,
+            llm=llm_plugin,
+            tts=tts_plugin,
+            vad=vad_plugin,
         )
-        session = AgentSession(llm=model, tts=greeting_tts)
         deps["session"] = session
 
         # ── Collect transcript in real-time ──
@@ -931,58 +866,19 @@ async def entrypoint(ctx: JobContext):
                 greeting_text = (
                     f"{disclosure_text} How can I help you today?"
                 )
-        # Phase 63.1-07: mute Gemini's input audio for the duration of the
-        # TTS greeting. Without this, one of two things happens:
-        #   (a) SIP acoustic echo feeds TTS audio back as user audio →
-        #       Gemini's server VAD fires → Gemini interrupts its own
-        #       greeting or produces a confused response.
-        #   (b) The caller speaks over the greeting (intentional or
-        #       accidental) and barge-in fires prematurely before they
-        #       hear the question they're supposed to answer.
-        # Disabling input audio during greeting playback, then re-enabling
-        # once playout completes, gives a clean ~3-5s protected window.
-        # Hard 6s safety cap ensures we never leave input permanently
-        # muted if playout signaling hangs.
+        # Phase 64 D-03a: 63.1-07's input-mute-during-greeting workaround was a
+        # Realtime-specific mitigation for SIP echo re-entering Gemini's server VAD.
+        # On pipeline, Silero VAD runs locally on clean audio and barge-in is handled
+        # natively by AgentActivity — no mute needed. session.say() works natively on
+        # pipeline (no capability gate; tts= attached at session level).
         try:
-            session.input.set_audio_enabled(False)
             greeting_handle = session.say(greeting_text)
             logger.info(
-                "[63.1-06] greeting dispatched via TTS locale=%s chars=%d voice=%s (input muted)",
+                "[64] greeting dispatched via pipeline TTS locale=%s chars=%d voice=%s",
                 locale, len(greeting_text), voice_name,
             )
-
-            async def _unmute_after_greeting():
-                try:
-                    # Raised from 6s → 10s after live UAT showed Gemini TTS
-                    # synthesis of the 114-char branded greeting exceeding 6s
-                    # end-to-end (including first-audio-frame latency), causing
-                    # the force-unmute to fire while the greeting was still
-                    # playing. 10s is comfortable headroom for any normal
-                    # greeting length; the safety cap still prevents permanent
-                    # mute on broken playout signaling.
-                    await asyncio.wait_for(greeting_handle.wait_for_playout(), timeout=10.0)
-                    logger.info("[63.1-07] greeting playout complete; unmuting input")
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[63.1-07] greeting playout wait timed out at 10s; force-unmuting input"
-                    )
-                except Exception as e:
-                    logger.error(f"[63.1-07] greeting playout wait failed: {e}; force-unmuting")
-                finally:
-                    try:
-                        session.input.set_audio_enabled(True)
-                    except Exception as e2:
-                        logger.error(f"[63.1-07] failed to re-enable input audio: {e2}")
-
-            asyncio.create_task(_unmute_after_greeting())
         except Exception as e:
-            logger.error(f"[63.1-06] session.say() failed: {e}")
-            # Failed to dispatch greeting — make sure input is enabled so the
-            # caller can still talk to Gemini.
-            try:
-                session.input.set_audio_enabled(True)
-            except Exception:
-                pass
+            logger.error(f"[64] session.say() greeting dispatch failed: {e}")
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():

@@ -177,7 +177,12 @@ def test_llm_thinking_config_low():
     rec = _patched_plugins(locale="en")
     llm_kwargs = rec["LLM"][0]
     tc = llm_kwargs["thinking_config"]
-    assert tc.thinking_level == "low"
+    # genai_types.ThinkingConfig normalizes `thinking_level="low"` into the
+    # ThinkingLevel.LOW enum whose `.value` is the uppercase string "LOW".
+    # Accept either representation — the semantic contract is "low tier
+    # thinking", not the exact case of the stored enum value.
+    level_str = getattr(tc.thinking_level, "value", tc.thinking_level)
+    assert str(level_str).lower() == "low"
     assert tc.include_thoughts is False
 
 
