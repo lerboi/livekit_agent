@@ -515,6 +515,67 @@ async def entrypoint(ctx: JobContext):
             actual_error = getattr(event.error, "error", event.error)
             sentry_sdk.capture_exception(actual_error)
 
+        # [63.1-DIAG] Session state diagnostics — instrument every relevant
+        # event so a stall after a tool call can be traced through Gemini's
+        # state machine. Log lines prefix [63.1-DIAG] for easy grep.
+        @session.on("agent_state_changed")
+        def _diag_agent_state(event):
+            try:
+                logger.info(
+                    "[63.1-DIAG] agent_state %s -> %s at=%.3f",
+                    event.old_state, event.new_state, event.created_at,
+                )
+            except Exception:
+                pass
+
+        @session.on("user_state_changed")
+        def _diag_user_state(event):
+            try:
+                logger.info(
+                    "[63.1-DIAG] user_state %s -> %s at=%.3f",
+                    event.old_state, event.new_state, event.created_at,
+                )
+            except Exception:
+                pass
+
+        @session.on("function_tools_executed")
+        def _diag_tools_executed(event):
+            try:
+                summary = []
+                for fc, out in event.zipped():
+                    name = getattr(fc, "name", "?")
+                    args = getattr(fc, "arguments", None)
+                    args_preview = str(args)[:100] if args else ""
+                    out_text = getattr(out, "output", None) if out else None
+                    out_preview = (out_text or "")[:180].replace("\n", " \\n ")
+                    out_len = len(out_text or "") if out_text else 0
+                    summary.append(
+                        f"{name}(args={args_preview!r}) -> len={out_len} preview={out_preview!r}"
+                    )
+                logger.info(
+                    "[63.1-DIAG] function_tools_executed count=%d %s",
+                    len(summary), " | ".join(summary),
+                )
+            except Exception as e:
+                logger.warning(f"[63.1-DIAG] function_tools_executed log failed: {e}")
+
+        @session.on("speech_created")
+        def _diag_speech_created(event):
+            try:
+                logger.info(
+                    "[63.1-DIAG] speech_created user_initiated=%s source=%s",
+                    getattr(event, "user_initiated", None),
+                    getattr(event, "source", None),
+                )
+            except Exception:
+                pass
+
+        @session.on("agent_false_interruption")
+        def _diag_false_interruption(event):
+            logger.warning(
+                "[63.1-DIAG] agent_false_interruption — unexpected silence / dropped generation"
+            )
+
         # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
         recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"

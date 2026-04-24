@@ -133,6 +133,51 @@ def create_check_availability_tool(deps: dict):
         time: str = "",
         urgency: str = "routine",
     ) -> str:
+        # [63.1-DIAG] Deep instrumentation around entry/exit so we can see
+        # exactly where the flow stalls from Railway logs.
+        _diag_t0 = _time.time()
+        _diag_call_id = f"ca_{int(_diag_t0 * 1000) % 100000}"
+        logger.info(
+            "[63.1-DIAG] check_availability ENTRY id=%s date=%r time=%r urgency=%r",
+            _diag_call_id, date, time, urgency,
+        )
+        try:
+            result = await _check_availability_impl(
+                context, deps, date, time, urgency, _diag_call_id,
+            )
+            elapsed_ms = int((_time.time() - _diag_t0) * 1000)
+            # Log first 240 chars of the response so we can see the exact
+            # STATE|DIRECTIVE string Gemini received.
+            preview = (result or "").replace("\n", " \\n ")[:240]
+            logger.info(
+                "[63.1-DIAG] check_availability EXIT id=%s elapsed_ms=%d len=%d preview=%r",
+                _diag_call_id, elapsed_ms, len(result or ""), preview,
+            )
+            return result
+        except Exception as exc:
+            elapsed_ms = int((_time.time() - _diag_t0) * 1000)
+            logger.error(
+                "[63.1-DIAG] check_availability EXCEPTION id=%s elapsed_ms=%d err=%s",
+                _diag_call_id, elapsed_ms, repr(exc),
+            )
+            # Convert to a STATE/DIRECTIVE response so Gemini at least has
+            # SOMETHING to work with rather than a raw exception propagating
+            # up and potentially stalling the realtime session.
+            return (
+                "STATE:availability_lookup_failed reason=internal_error"
+                " | DIRECTIVE:apologize briefly; offer another time or"
+                " capture_lead; do not retry this lookup more than once in"
+                " this call."
+            )
+
+    async def _check_availability_impl(
+        context: RunContext,
+        deps,
+        date: str,
+        time: str,
+        urgency: str,
+        _diag_call_id: str,
+    ) -> str:
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
