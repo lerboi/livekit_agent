@@ -398,7 +398,16 @@ async def entrypoint(ctx: JobContext):
                 start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=400,
-                silence_duration_ms=1500,
+                # Phase 63.1-11: raised 1500 -> 2500ms. Live UAT shows the
+                # caller saying brief acknowledgments ("hello", "mhm")
+                # during agent speech fires VAD at 1500ms, triggering
+                # `server cancelled tool calls` + mid-word truncation
+                # (#4486 pipeline race). 2500ms requires a deliberate
+                # full-sentence utterance (>2.5s of continuous speech)
+                # before VAD fires — brief acknowledgments no longer
+                # count as interrupts. Barge-in still works for genuine
+                # caller interjections.
+                silence_duration_ms=2500,
             ),
         )
 
