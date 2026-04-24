@@ -968,7 +968,11 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
             "Confirme los detalles completos de la cita (día, hora, dirección) y "
             "pregunte si hay algo más en lo que pueda ayudar. Si un espacio fue tomado "
             "entre su verificación y la reserva, ofrezca la alternativa más cercana "
-            "de inmediato."
+            "de inmediato.\n"
+            "\n"
+            "NO DOBLE RESERVA:\n"
+            "Invoque book_appointment una sola vez por franja confirmada. Si "
+            "devuelve éxito, la reserva es definitiva — no la vuelva a llamar."
         )
 
     # EN branch — preserved verbatim from pre-Plan-11 state. postal_label
@@ -1057,16 +1061,9 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         "else you can help with. If a slot was taken between your check and the booking, offer "
         "the nearest alternative immediately.\n"
         "\n"
-        "NO DOUBLE-BOOKING — CRITICAL:\n"
-        "Once book_appointment has returned `success: true` in this call, the appointment is "
-        "committed. DO NOT call book_appointment again for the same slot under any "
-        "circumstance. DO NOT retry if the caller briefly says anything (\"hello\", \"what?\", "
-        "a filler) — caller noise does not mean the booking failed. DO NOT invent, guess, or "
-        "substitute placeholder values like `[TOKEN_FROM_LAST_TOOL_RESULT]`, "
-        "`REPLACE_WITH_ACTUAL_TOKEN`, or date/time strings as the slot_token argument — only "
-        "the exact slot_token string previously returned by check_availability is valid. If "
-        "you no longer have a valid slot_token in context, DO NOT retry: verbally confirm the "
-        "booking to the caller using the date/time you already read back, and move on."
+        "NO DOUBLE-BOOKING:\n"
+        "Only call book_appointment once per confirmed slot. If it returns "
+        "success, the booking is final — do not re-invoke."
     )
 
 
