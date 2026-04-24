@@ -462,39 +462,31 @@ def _build_working_hours_section(
 def _build_greeting_section(
     locale: str, business_name: str, onboarding_complete: bool, t
 ) -> str:
-    # Phase 63.1-06: the opening greeting is delivered by a separate TTS
-    # pipeline (src/agent.py `session.say(...)` after `session.start()`)
-    # because Gemini 3.1 Flash Live capability-gates all three public
-    # "speak first" APIs closed (generate_reply, say, update_chat_ctx).
-    # By the time the system prompt is consumed by Gemini's first
-    # generation, the caller has ALREADY heard the branded greeting.
-    # Gemini's job on its first emitted turn is to respond to the
-    # caller's actual input (their answer to "how can I help you today?")
-    # — NOT to greet them again. Because mutable_chat_context=False on
-    # 3.1 models, we cannot inform Gemini via chat history that the
-    # greeting was played; we have to say so in the system prompt.
+    # Phase 64 D-03c: On the pipeline session (STT+LLM+TTS+VAD), the opening
+    # greeting is delivered by session.say(greeting_text) after session.start().
+    # By the time the caller's first audio reaches the LLM, the caller has
+    # ALREADY heard the branded greeting. The re-frame below describes this
+    # as an architectural fact (matching the pipeline reality) rather than a
+    # 63.1-06 workaround. The no-re-greet behavioral contract is unchanged.
     disclosure = t("agent.recording_disclosure")
 
     if locale == "es":
         return (
-            "SALUDO YA REALIZADO — NO SE REPITA:\n"
-            f"Cuando el llamante habla por primera vez, YA ha escuchado un "
-            f"saludo con marca comercial: «Hola, gracias por llamar a "
-            f"{business_name}. {disclosure} ¿En qué puedo ayudarle?» (o "
-            "equivalente cuando la incorporación no está completa). Este "
-            "saludo fue pronunciado por una voz TTS separada ANTES de que "
-            "su sesión comenzara a procesar el audio del llamante.\n"
+            "SALUDO YA ENTREGADO:\n"
+            f"El sistema ya entregó el saludo con marca: «Hola, gracias por "
+            f"llamar a {business_name}. {disclosure} ¿En qué puedo ayudarle?» "
+            "(o equivalente cuando la incorporación no está completa). Cuando "
+            "usted recibe su primer turno, el llamante ya lo escuchó.\n"
             "\n"
+            "- Responda DIRECTAMENTE a lo que el llamante acaba de decir. "
+            "Si pidieron un servicio, avance con la recopilación de "
+            "información. Si preguntaron algo, respóndalo.\n"
             "- NO repita el saludo. NO diga hola, buenas tardes, ni el "
             "nombre del negocio al inicio. NO vuelva a anunciar que la "
             "llamada puede ser grabada.\n"
-            f"- Responda DIRECTAMENTE a lo que el llamante acaba de decir. "
-            "Si pidieron un servicio, avance con la recopilación de "
-            "información. Si preguntaron algo, respóndalo.\n"
             "- Si el llamante guarda silencio o sólo dice «hola» o su "
-            f"equivalente, entonces ofrezca ayuda brevemente SIN repetir "
-            f"el saludo: p. ej., «¿En qué puedo ayudarle hoy?» o «¿Qué "
-            "le trae por aquí?».\n"
+            "equivalente, ofrezca ayuda brevemente SIN repetir el saludo: "
+            "p. ej., «¿En qué puedo ayudarle hoy?».\n"
             "\n"
             "CONCIENCIA DE ECO:\n"
             "- Si el llamante parece repetir sus palabras, trátelo como eco de "
@@ -502,23 +494,21 @@ def _build_greeting_section(
         )
 
     return (
-        "GREETING ALREADY PLAYED — DO NOT REPEAT:\n"
-        f"By the time the caller first speaks, they have ALREADY heard a "
-        f"branded greeting: \"Hello, thank you for calling {business_name}. "
-        f"{disclosure} How can I help you today?\" (or equivalent when "
-        "onboarding is not complete). That greeting was spoken by a "
-        "separate TTS voice BEFORE your session began processing caller "
-        "audio.\n"
+        "GREETING ALREADY DELIVERED:\n"
+        f"The system has already delivered the branded greeting: \"Hello, "
+        f"thank you for calling {business_name}. {disclosure} How can I help "
+        "you today?\" (or equivalent when onboarding is not complete). By the "
+        "time you receive your first turn, the caller has already heard it.\n"
         "\n"
-        "- DO NOT repeat the greeting. DO NOT say hello, good afternoon, or "
-        "announce the business name at the start. DO NOT re-announce that "
-        "the call may be recorded.\n"
         "- Respond DIRECTLY to what the caller just said. If they asked "
         "for a service, move into info-gathering. If they asked a "
         "question, answer it.\n"
+        "- DO NOT repeat the greeting. Do not say hello, good afternoon, or "
+        "announce the business name at the start. Do not re-announce that "
+        "the call may be recorded.\n"
         "- If the caller stays silent or only says \"hello\" or equivalent, "
-        "then offer help briefly WITHOUT re-greeting: e.g., \"How can I "
-        "help you today?\" or \"What brings you in?\"\n"
+        "offer help briefly WITHOUT re-greeting: e.g., \"How can I help you "
+        "today?\"\n"
         "\n"
         "ECHO AWARENESS:\n"
         "- If the caller appears to repeat your words back, treat it as audio echo "
