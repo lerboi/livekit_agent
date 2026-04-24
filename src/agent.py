@@ -29,6 +29,18 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
+# Phase 64: materialize GOOGLE_APPLICATION_CREDENTIALS_JSON (Railway secret) to a
+# temp file so google.cloud.speech_v2 ADC auto-discovery succeeds. Required because
+# the Cloud Speech v2 gRPC client only reads GOOGLE_APPLICATION_CREDENTIALS (a file
+# path), not a raw JSON string. Runs before any `from google.*` import below.
+import tempfile as _tempfile
+_gcp_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if _gcp_json and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    _gcp_path = os.path.join(_tempfile.gettempdir(), "gcp_adc.json")
+    with open(_gcp_path, "w", encoding="utf-8") as _f:
+        _f.write(_gcp_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _gcp_path
+
 from google.genai import types as genai_types
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
 from livekit.plugins import google, noise_cancellation, silero
