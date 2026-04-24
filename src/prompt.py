@@ -1065,7 +1065,18 @@ def _build_booking_section(business_name: str, onboarding_complete: bool, postal
         "AFTER BOOKING:\n"
         "Confirm the full appointment details (day, time, address) and ask if there's anything "
         "else you can help with. If a slot was taken between your check and the booking, offer "
-        "the nearest alternative immediately."
+        "the nearest alternative immediately.\n"
+        "\n"
+        "NO DOUBLE-BOOKING — CRITICAL:\n"
+        "Once book_appointment has returned `success: true` in this call, the appointment is "
+        "committed. DO NOT call book_appointment again for the same slot under any "
+        "circumstance. DO NOT retry if the caller briefly says anything (\"hello\", \"what?\", "
+        "a filler) — caller noise does not mean the booking failed. DO NOT invent, guess, or "
+        "substitute placeholder values like `[TOKEN_FROM_LAST_TOOL_RESULT]`, "
+        "`REPLACE_WITH_ACTUAL_TOKEN`, or date/time strings as the slot_token argument — only "
+        "the exact slot_token string previously returned by check_availability is valid. If "
+        "you no longer have a valid slot_token in context, DO NOT retry: verbally confirm the "
+        "booking to the caller using the date/time you already read back, and move on."
     )
 
 

@@ -379,35 +379,27 @@ async def entrypoint(ctx: JobContext):
             ai_voice, tone_preset, voice_name,
         )
 
-        # Dampen Gemini's server-side VAD AND disable activity-start interrupts
-        # so in-flight tool calls are NEVER cancelled by caller speech.
+        # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
+        # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
+        # threshold (raised from 1000ms in Phase 60.2) tracks upstream guidance
+        # for livekit/agents#4441. Barge-in still works — thresholds just
+        # require deliberate caller speech (>1.5s) instead of firing on
+        # breath/noise.
         #
-        # Phase 63.1-08: Prior config (LOW sensitivity + 1500ms silence) left
-        # `activity_handling` at the default (`START_OF_ACTIVITY_INTERRUPTS`),
-        # which caused booking failures: when the caller said ANYTHING during
-        # a `book_appointment` tool call, Gemini issued `server cancelled tool
-        # calls` events mid-flight. The tool often still succeeded server-side
-        # (Google Calendar event gets created) but Gemini received the cancel
-        # event, thought the call failed, and retried with hallucinated tokens
-        # like `[TOKEN_FROM_LAST_TOOL_RESULT]` and
-        # `REPLACE_WITH_ACTUAL_TOKEN_FROM_LAST_CHECK_AVAILABILITY`, triggering
-        # the slot_token recovery path repeatedly.
-        #
-        # Setting `activity_handling=NO_INTERRUPTION` makes `_GoogleRealtime
-        # Session.interrupt()` a no-op (realtime_api.py:768-777) — caller
-        # speech does NOT cancel current agent speech or in-flight tool calls.
-        # Caller is still HEARD (VAD still runs and produces input events for
-        # the model to consider on its next turn) but agent generations
-        # complete uninterrupted. This is the correct tradeoff for a
-        # receptionist: reliable bookings beat mid-speech barge-in.
+        # Phase 63.1-10 revert: activity_handling=NO_INTERRUPTION was tried in
+        # 63.1-08 to stop tool-call cancellation, but it caused a worse
+        # failure mode — after check_availability returned, Gemini never
+        # verbalized the result and the call stalled indefinitely. Reverting
+        # to default (START_OF_ACTIVITY_INTERRUPTS) and addressing the
+        # tool-retry-loop at the prompt level (see _build_booking_section
+        # anti-retry guidance).
         realtime_input_config = genai_types.RealtimeInputConfig(
             automatic_activity_detection=genai_types.AutomaticActivityDetection(
                 start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=400,
-                silence_duration_ms=1500,  # phase 60.2 (was 1000 in phase 55 999.2 fix)
+                silence_duration_ms=1500,
             ),
-            activity_handling=genai_types.ActivityHandling.NO_INTERRUPTION,
         )
 
         logger.info(
@@ -464,12 +456,11 @@ async def entrypoint(ctx: JobContext):
             # so the ~114-char greeting finishes in ~4-5s instead of 7-8s —
             # keeps the pre-greeting protected window short and gets the
             # caller to the actionable question faster.
-            instructions=(
-                "Say the text at a brisk, efficient pace — like a professional "
-                "receptionist who is ready to help. Do not rush or clip words, "
-                "but keep the delivery quick and purposeful. Do not add, omit, "
-                "or change any words."
-            ),
+            # Direct pace instruction — Gemini TTS prepends the full string
+            # to the text as context (gemini_tts.py:200-201), so keep it
+            # short and declarative. "Quickly" is more reliably honored than
+            # abstract adjectives like "brisk" or "efficient".
+            instructions="Say this quickly, in a warm professional tone:",
         )
         session = AgentSession(llm=model, tts=greeting_tts)
         deps["session"] = session
