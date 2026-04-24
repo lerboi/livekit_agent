@@ -112,15 +112,16 @@ def _build_pipeline_plugins(locale: str, voice_name: str):
 
     Per D-07 / D-04 / D-05 / D-06 / D-03b. Also see RESEARCH § Pattern 1.
     """
-    # Chirp 3 is not served from the `global` endpoint — it only exists in specific
-    # regional endpoints (us-central1, europe-west4, asia-southeast1, etc.). Default
-    # to us-central1 for stability; override via GOOGLE_STT_LOCATION to pick a region
-    # closer to the Railway deploy (e.g. europe-west4 for EU, asia-southeast1 for APAC).
+    # Chirp 3 is ONLY served from two multi-region endpoints: `us` and `eu`. Not
+    # `global`, not single-region like `us-central1`. Source: Google Chirp 3 docs
+    # https://docs.cloud.google.com/speech-to-text/docs/models/chirp-3
+    # Default `eu` because the Railway deploy is in Germany 2 (~20-40ms RTT); flip
+    # to `us` via GOOGLE_STT_LOCATION if US caller latency dominates.
     _stt_kwargs = dict(
         model="chirp_3",
         languages=_locale_to_bcp47(locale),   # PLURAL kwarg — pitfall-1 silent-failure guard
         detect_language=False,                 # pitfall-2 pin the locale, no auto-detect
-        location=os.environ.get("GOOGLE_STT_LOCATION", "us-central1"),
+        location=os.environ.get("GOOGLE_STT_LOCATION", "eu"),
     )
     # Explicit credentials_info= bypasses ADC. On Railway the service-account JSON
     # lives in GOOGLE_APPLICATION_CREDENTIALS_JSON. Passing it directly avoids
