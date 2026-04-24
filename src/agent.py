@@ -801,14 +801,51 @@ async def entrypoint(ctx: JobContext):
                 greeting_text = (
                     f"{disclosure_text} How can I help you today?"
                 )
+        # Phase 63.1-07: mute Gemini's input audio for the duration of the
+        # TTS greeting. Without this, one of two things happens:
+        #   (a) SIP acoustic echo feeds TTS audio back as user audio →
+        #       Gemini's server VAD fires → Gemini interrupts its own
+        #       greeting or produces a confused response.
+        #   (b) The caller speaks over the greeting (intentional or
+        #       accidental) and barge-in fires prematurely before they
+        #       hear the question they're supposed to answer.
+        # Disabling input audio during greeting playback, then re-enabling
+        # once playout completes, gives a clean ~3-5s protected window.
+        # Hard 6s safety cap ensures we never leave input permanently
+        # muted if playout signaling hangs.
         try:
-            session.say(greeting_text)
+            session.input.set_audio_enabled(False)
+            greeting_handle = session.say(greeting_text)
             logger.info(
-                "[63.1-06] greeting dispatched via TTS locale=%s chars=%d voice=%s",
+                "[63.1-06] greeting dispatched via TTS locale=%s chars=%d voice=%s (input muted)",
                 locale, len(greeting_text), voice_name,
             )
+
+            async def _unmute_after_greeting():
+                try:
+                    await asyncio.wait_for(greeting_handle.wait_for_playout(), timeout=6.0)
+                    logger.info("[63.1-07] greeting playout complete; unmuting input")
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[63.1-07] greeting playout wait timed out at 6s; force-unmuting input"
+                    )
+                except Exception as e:
+                    logger.error(f"[63.1-07] greeting playout wait failed: {e}; force-unmuting")
+                finally:
+                    try:
+                        session.input.set_audio_enabled(True)
+                    except Exception as e2:
+                        logger.error(f"[63.1-07] failed to re-enable input audio: {e2}")
+
+            asyncio.create_task(_unmute_after_greeting())
         except Exception as e:
             logger.error(f"[63.1-06] session.say() failed: {e}")
+            # Failed to dispatch greeting — make sure input is enabled so the
+            # caller can still talk to Gemini.
+            try:
+                session.input.set_audio_enabled(True)
+            except Exception:
+                pass
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
