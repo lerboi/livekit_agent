@@ -46,45 +46,104 @@ logger = logging.getLogger(__name__)
 # so it works on 3.1 despite mutable_chat_context=False et al.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DEFAULT_TOOL_MUTE_S = 5.0
+_TOOL_MUTE_FALLBACK_S = 15.0
 
 
-def mute_input_during_tool(deps: dict, max_mute_s: float = _DEFAULT_TOOL_MUTE_S) -> None:
-    """Mute session input for at most max_mute_s seconds. Call at the top of
-    each availability tool to prevent caller-VAD from firing during Gemini's
-    BLOCKING tool wait (which cancels the pending function call — see module
-    header). Fire-and-forget; safe to call repeatedly. A counter prevents
-    stale unmute timers from racing a subsequent tool call.
+def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S) -> None:
+    """Mute caller input for the tool call AND the full post-tool response.
+
+    Unmutes when the agent transitions `speaking → listening` AFTER the
+    post-tool response has started (i.e. after we've seen a fresh
+    `*→speaking` transition following the mute), or after `fallback_s`
+    seconds — whichever first.
+
+    Why event-based instead of a fixed timer: the booking-section prompt
+    requires a name+address readback after a successful check_slot, so the
+    post-tool response regularly runs 10-14s. A short fixed timer (e.g. 5s)
+    expired mid-response, the caller's voice during the readback then
+    triggered Gemini's server VAD, which cancelled the in-flight generation
+    mid-utterance — the visible "agent keeps cutting herself off" symptom
+    plus `_SegmentSynchronizerImpl.playback_finished … text_done=false`
+    warnings in production logs.
+
+    The 15s fallback is a safety cap: if Gemini's response never starts
+    (e.g. function call orphaned by an earlier VAD cancel) we don't trap
+    the caller permanently.
+
+    Counter `_tool_mute_id` prevents a stale unmute (from an earlier tool
+    call) from racing a newer mute.
     """
     session = deps.get("session")
     if not session:
         return
 
-    # Bump the mute-id so older pending unmutes become no-ops when a newer
-    # tool call has muted more recently.
     mute_id = deps.get("_tool_mute_id", 0) + 1
     deps["_tool_mute_id"] = mute_id
 
     try:
         session.input.set_audio_enabled(False)
-        logger.info("[tool_mute] muted input id=%d max=%.1fs", mute_id, max_mute_s)
+        logger.info("[tool_mute] muted input id=%d fallback=%.1fs", mute_id, fallback_s)
     except Exception as e:
         logger.warning("[tool_mute] failed to mute: %s", e)
         return
 
-    async def _unmute_later():
-        try:
-            await asyncio.sleep(max_mute_s)
-        finally:
-            # Only unmute if no newer tool call has claimed the mute.
-            if deps.get("_tool_mute_id") == mute_id:
-                try:
-                    session.input.set_audio_enabled(True)
-                    logger.info("[tool_mute] unmuted input id=%d", mute_id)
-                except Exception as e:
-                    logger.warning("[tool_mute] failed to unmute: %s", e)
+    # State tracker for the listener closure. Lists are used so the closure
+    # can mutate without `nonlocal` (Python 3.x quirk: nonlocal in callbacks
+    # registered into a non-async event emitter).
+    saw_fresh_speaking = [False]
+    unmute_event = asyncio.Event()
 
-    asyncio.create_task(_unmute_later())
+    def _on_state_change(event):
+        try:
+            new_state = getattr(event, "new_state", None)
+            old_state = getattr(event, "old_state", None)
+            # A transition INTO speaking from listening = start of the
+            # post-tool response. Any speaking that was in flight when we
+            # registered (the filler) is already in `speaking` state, so
+            # its trailing `speaking → listening` doesn't satisfy this gate.
+            if old_state == "listening" and new_state == "speaking":
+                saw_fresh_speaking[0] = True
+            elif (
+                old_state == "speaking"
+                and new_state == "listening"
+                and saw_fresh_speaking[0]
+            ):
+                # Post-tool response audio is done — caller can talk again.
+                unmute_event.set()
+        except Exception:
+            pass
+
+    session.on("agent_state_changed", _on_state_change)
+
+    async def _unmute_logic():
+        try:
+            await asyncio.wait_for(unmute_event.wait(), timeout=fallback_s)
+            unmute_reason = "agent finished speaking"
+        except asyncio.TimeoutError:
+            unmute_reason = f"fallback timeout {fallback_s:.1f}s"
+
+        # Best-effort listener removal. AgentSession is a pyee EventEmitter
+        # subclass; both `off` and `remove_listener` are accepted depending
+        # on version.
+        try:
+            if hasattr(session, "off"):
+                session.off("agent_state_changed", _on_state_change)
+            elif hasattr(session, "remove_listener"):
+                session.remove_listener("agent_state_changed", _on_state_change)
+        except Exception:
+            pass
+
+        if deps.get("_tool_mute_id") == mute_id:
+            try:
+                session.input.set_audio_enabled(True)
+                logger.info("[tool_mute] unmuted input id=%d (%s)", mute_id, unmute_reason)
+            except Exception as e:
+                logger.warning("[tool_mute] failed to unmute: %s", e)
+        else:
+            logger.info("[tool_mute] skip unmute id=%d — superseded by id=%d (%s)",
+                        mute_id, deps.get("_tool_mute_id"), unmute_reason)
+
+    asyncio.create_task(_unmute_logic())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
