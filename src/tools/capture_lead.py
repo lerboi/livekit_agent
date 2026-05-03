@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 def create_capture_lead_tool(deps: dict):
     @function_tool(
         name="capture_lead",
+        # Phase 61 Plan 04 (D-E1): description encodes the address-validation
+        # precondition as outcome-framed prompt-surface language, symmetric
+        # with book_appointment. Verdict-driven readback rule (D-E3) lives in
+        # the prompt CRITICAL RULE block.
         description=(
             "Capture the caller's contact information and intent when they decline to book (the decline"
             " path). CRITICAL PRECONDITIONS: (1) gather the caller's name, the service issue, and the"
@@ -25,8 +29,11 @@ def create_capture_lead_tool(deps: dict):
             " natural question ('What\\'s the address where you need the service?'), loop one targeted"
             " follow-up at a time, capture enough to find the place; (2) read back the name (if captured)"
             " and full address once before calling this tool (same readback rule as book_appointment)."
-            " Do not call this tool until both preconditions are met. This tool's return is a"
-            " state+directive string — do not read it aloud."
+            " The address fields you provide will be validated against an external service before"
+            " recording — the tool return will indicate whether the address was confirmed, corrected,"
+            " or could not be verified, and will tell you what to speak back to the caller. Speak only"
+            " what the return tells you. Do not call this tool until both preconditions are met. This"
+            " tool's return is a state+directive string — do not read it aloud."
         ),
     )
     async def capture_lead(

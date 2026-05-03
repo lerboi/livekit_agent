@@ -183,14 +183,25 @@ async def _send_recovery_sms(deps: dict, tenant: dict | None, urgency: str, call
 
 _BOOK_APPOINTMENT_SCHEMA = {
     "name": "book_appointment",
+    # Phase 61 Plan 04 (D-E1): description encodes the address-validation
+    # precondition as outcome-framed prompt-surface language. Gemini reads
+    # tool descriptions during function-call decisions; the verdict-driven
+    # readback rule (D-E3) lives in the prompt CRITICAL RULE block.
     "description": (
-        "Book an appointment after the caller has acknowledged the name+address "
-        "readback. Pass slot_token from the most recent check_slot result "
-        "verbatim — never invent or reconstruct it. Speak a short filler phrase "
-        "first ('Let me get that booked in for you'), then invoke in the same "
-        "turn. Do not speak 'booked'/'confirmed' or the appointment time as a "
-        "settled fact before this tool returns success. This tool's return is a "
-        "state+directive string — do not read it aloud."
+        "Book a confirmed appointment for the caller. Call this after "
+        "check_slot has confirmed the slot is open and the caller has "
+        "acknowledged the name+address readback. Pass slot_token from the "
+        "most recent check_slot result verbatim — never invent or "
+        "reconstruct it. The address fields you provide will be validated "
+        "against an external service before booking — the tool return will "
+        "indicate whether the address was confirmed, corrected, or could "
+        "not be verified, and will tell you what to speak back to the "
+        "caller. Speak only what the return tells you. Speak a short filler "
+        "phrase first ('Let me get that booked in for you'), then invoke in "
+        "the same turn. Do not speak 'booked'/'confirmed' or the "
+        "appointment time as a settled fact before this tool returns "
+        "success. This tool's return is a state+directive string — do not "
+        "read it aloud."
     ),
     "parameters": {
         "type": "object",
