@@ -10,6 +10,7 @@ import time
 from livekit.agents import function_tool, RunContext
 
 from ..lib.write_outcome import record_outcome, RecordOutcomeError
+from ..integrations.google_maps import validate_address_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,34 @@ def create_capture_lead_tool(deps: dict):
         parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else None
 
+        # Phase 61 (D-B4): symmetric validation pre-check — same shape as book_appointment.
+        # NOTE: `tenant_id` is already in local scope (extracted above via
+        # `tenant_id = deps.get("tenant_id")`). Use the existing local `tenant_id`
+        # directly — do NOT refetch from `deps`.
+        region_code = (deps.get("country") or "US").upper()
+        address_lines_for_validation = (
+            [", ".join(p for p in [street_name, unit_number] if p)]
+            if (street_name or unit_number)
+            else []
+        )
+
+        validation_result = await validate_address_bounded(
+            tenant_id=tenant_id,
+            call_id=deps.get("call_id"),
+            region_code=region_code,
+            address_lines=address_lines_for_validation,
+            postal_code=postal_code or None,
+            locality=None,
+            supabase=supabase,
+            timeout_seconds=1.5,
+        )
+
+        validation_verdict = validation_result.get("verdict", "error")
+        formatted_address_value = validation_result.get("formatted_address")
+        # D-D3' inquiries.service_address overwrite (same column name as appointments)
+        if validation_verdict in ("confirmed", "confirmed_with_changes") and formatted_address_value:
+            service_address = formatted_address_value
+
         call_uuid = deps.get("call_uuid")
         if not call_uuid:
             # Background db_task hasn't written the calls row yet — rare; fail closed
@@ -80,6 +109,13 @@ def create_capture_lead_tool(deps: dict):
                 urgency="routine",
                 call_id=call_uuid,
                 job_type=job_type or None,
+                # Phase 61 NEW — pass validation result fields through:
+                formatted_address=validation_result.get("formatted_address"),
+                place_id=validation_result.get("place_id"),
+                latitude=validation_result.get("latitude"),
+                longitude=validation_result.get("longitude"),
+                address_components=validation_result.get("address_components"),
+                address_validation_verdict=validation_verdict,
             )
 
             # Write booking_outcome: 'declined' (conditional -- don't overwrite 'booked')
@@ -89,23 +125,30 @@ def create_capture_lead_tool(deps: dict):
                 ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
             )
 
-            # Look up business name for confirmation message
-            tenant_result = await asyncio.to_thread(
-                lambda: supabase.table("tenants")
-                .select("business_name")
-                .eq("id", tenant_id)
-                .single()
-                .execute()
-            )
-            tenant = tenant_result.data if tenant_result.data else None
-            biz_name = (tenant.get("business_name") if tenant else None) or "our team"
-
-            return (
-                "STATE:lead_captured"
-                f" business={biz_name}"
-                " | DIRECTIVE:confirm verbally that someone will get back to the caller; ask if"
-                " there is anything else before wrapping up."
-            )
+            # Phase 61 D-E2: verdict-driven STATE+DIRECTIVE return string. The agent
+            # reads these in the prompt (Plan 04) and decides how to speak the result;
+            # the strings themselves are NEVER spoken aloud verbatim.
+            formatted_address_for_return = validation_result.get("formatted_address")
+            if validation_verdict == "confirmed":
+                return (
+                    f"LEAD CAPTURED [verdict=validated]: relay normalized address "
+                    f"[{formatted_address_for_return}] as confirmed; "
+                    f"ask if anything else is needed"
+                )
+            elif validation_verdict == "confirmed_with_changes":
+                return (
+                    f"LEAD CAPTURED [verdict=validated_with_corrections]: relay normalized address "
+                    f"[{formatted_address_for_return}] as the final form, "
+                    f"explicitly invite caller confirmation; "
+                    f"if caller corrects, accept correction and re-read full address"
+                )
+            else:
+                # unconfirmed | error | skipped | unsupported_region
+                return (
+                    "LEAD CAPTURED [verdict=unvalidated]: relay address as caller spoke it; "
+                    "do NOT claim \"validated\", \"confirmed against records\", or "
+                    "\"looked up your address\""
+                )
 
         except Exception as err:
             logger.error("[agent] capture_lead error: %s", str(err))
