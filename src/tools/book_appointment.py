@@ -16,6 +16,7 @@ from ..lib.booking import atomic_book_slot
 from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
 from ..lib.calendar_push import push_booking_to_calendar
+from ..integrations.google_maps import validate_address_bounded
 from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
@@ -258,6 +259,39 @@ def create_book_appointment_tool(deps: dict):
         parts = [p for p in [street_name, unit_number, postal_code] if p]
         service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
+        # ============================================================================
+        # Phase 61 (D-B2): validate address BEFORE atomic_book_slot
+        #   - External HTTP must not be inside the slot-lock contention window
+        #   - Booking never blocks on Google: every verdict proceeds to atomic_book_slot
+        # NOTE: `tenant_id` is already in local scope (extracted above via
+        # `tenant_id = deps.get("tenant_id")`). Use the existing local `tenant_id`
+        # directly — do NOT refetch from `deps`.
+        # ============================================================================
+        region_code = (deps.get("country") or "US").upper()
+        address_lines_for_validation = (
+            [", ".join(p for p in [street_name, unit_number] if p)]
+            if (street_name or unit_number)
+            else []
+        )
+
+        validation_result = await validate_address_bounded(
+            tenant_id=tenant_id,
+            call_id=deps.get("call_id"),
+            region_code=region_code,
+            address_lines=address_lines_for_validation,
+            postal_code=postal_code or None,
+            locality=None,  # not captured by current single-question intake (Phase 60 D-08)
+            supabase=supabase,
+            timeout_seconds=1.5,
+        )
+
+        # D-D3' service_address overwrite: only on confirmed / confirmed_with_changes
+        validation_verdict = validation_result.get("verdict", "error")
+        formatted_address_value = validation_result.get("formatted_address")
+        if validation_verdict in ("confirmed", "confirmed_with_changes") and formatted_address_value:
+            service_address = formatted_address_value
+        # Else: keep agent-joined string from `parts` block above
+
         # Phase-fix (2026-04-24): slot_token is authoritative. Gemini 3.1 Flash
         # Live has been observed ignoring the "pass slot_start_utc VERBATIM"
         # directive and constructing naive ISO strings from the caller's
@@ -410,6 +444,13 @@ def create_book_appointment_tool(deps: dict):
                 zone_id=None,
                 postal_code=postal_code or None,
                 street_name=street_name or None,
+                # Phase 61 NEW — pass validation result fields through:
+                formatted_address=validation_result.get("formatted_address"),
+                place_id=validation_result.get("place_id"),
+                latitude=validation_result.get("latitude"),
+                longitude=validation_result.get("longitude"),
+                address_components=validation_result.get("address_components"),
+                address_validation_verdict=validation_verdict,
             )
         except Exception as booking_err:
             logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
@@ -535,15 +576,31 @@ def create_book_appointment_tool(deps: dict):
         # where a duplicate could fall through to the slot_taken branch.
         appointment_id = result.get("appointment_id")
 
-        formatted_time = format_slot_for_speech(slot_start, tenant_timezone)
-        return_msg = (
-            "STATE:booking_succeeded"
-            f" appointment_id={appointment_id}"
-            " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
-            " read back; do not restate the time (the caller already heard it during the slot"
-            " offer); ask if there is anything else before wrapping up. Do not repeat this"
-            " message text on-air."
-        )
+        # Phase 61 D-E2: verdict-driven STATE+DIRECTIVE return string. The agent
+        # reads these in the prompt (Plan 04) and decides how to speak the result;
+        # the strings themselves are NEVER spoken aloud verbatim.
+        slot_speech = format_slot_for_speech(slot_start, tenant_timezone)
+        formatted_address_for_return = validation_result.get("formatted_address")
+        if validation_verdict == "confirmed":
+            return_msg = (
+                f"BOOKED [verdict=validated]: relay normalized address "
+                f"[{formatted_address_for_return}] and time [{slot_speech}] "
+                f"as confirmed; ask if anything else is needed"
+            )
+        elif validation_verdict == "confirmed_with_changes":
+            return_msg = (
+                f"BOOKED [verdict=validated_with_corrections]: relay normalized address "
+                f"[{formatted_address_for_return}] as the final form, "
+                f"explicitly invite caller confirmation before closing; "
+                f"if caller corrects, accept correction and re-read full address"
+            )
+        else:
+            # unconfirmed | error | skipped | unsupported_region
+            return_msg = (
+                "BOOKED [verdict=unvalidated]: relay address as caller spoke it; "
+                "do NOT claim \"validated\", \"confirmed against records\", or "
+                "\"looked up your address\""
+            )
 
         deps["_last_booked_slot_key"] = _slot_key
         deps["_last_booked_slot_response"] = return_msg

@@ -41,6 +41,13 @@ async def record_outcome(
     urgency: str,
     call_id: str,
     job_type: Optional[str] = None,
+    # Phase 61 NEW (all kwarg-only, all NULLABLE for backward compat):
+    formatted_address: Optional[str] = None,
+    place_id: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    address_components: Optional[dict] = None,
+    address_validation_verdict: Optional[str] = None,
 ) -> dict[str, Any]:
     """Call the record_call_outcome RPC and return the result dict.
 
@@ -87,6 +94,13 @@ async def record_outcome(
         "p_urgency": urgency,
         "p_call_id": call_id,
         "p_job_type": job_type,
+        # Phase 61 NEW (RPC overload defaults all to NULL — see migration 062):
+        "p_formatted_address": formatted_address,
+        "p_place_id": place_id,
+        "p_latitude": latitude,
+        "p_longitude": longitude,
+        "p_address_components": address_components,
+        "p_address_validation_verdict": address_validation_verdict,
     }
     try:
         result = supabase.rpc("record_call_outcome", params).execute()

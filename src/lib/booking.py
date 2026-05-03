@@ -17,6 +17,13 @@ async def atomic_book_slot(
     zone_id: str | None = None,
     postal_code: str | None = None,
     street_name: str | None = None,
+    # Phase 61 NEW (all kwarg-only, all NULLABLE for backward compat):
+    formatted_address: str | None = None,
+    place_id: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    address_components: dict | None = None,
+    address_validation_verdict: str | None = None,
 ) -> dict:
     response = await asyncio.to_thread(
         lambda: supabase.rpc(
@@ -33,6 +40,13 @@ async def atomic_book_slot(
                 "p_zone_id": zone_id,
                 "p_postal_code": postal_code,
                 "p_street_name": street_name,
+                # Phase 61 NEW:
+                "p_formatted_address": formatted_address,
+                "p_place_id": place_id,
+                "p_latitude": latitude,
+                "p_longitude": longitude,
+                "p_address_components": address_components,
+                "p_address_validation_verdict": address_validation_verdict,
             },
         ).execute()
     )
