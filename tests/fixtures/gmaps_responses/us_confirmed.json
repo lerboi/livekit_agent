@@ -1,0 +1,69 @@
+{
+  "result": {
+    "verdict": {
+      "inputGranularity": "PREMISE",
+      "validationGranularity": "PREMISE",
+      "geocodeGranularity": "PREMISE",
+      "addressComplete": true,
+      "hasUnconfirmedComponents": false,
+      "hasInferredComponents": false,
+      "possibleNextAction": "ACCEPT"
+    },
+    "address": {
+      "formattedAddress": "1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA",
+      "postalAddress": {
+        "regionCode": "US",
+        "languageCode": "en",
+        "postalCode": "94043",
+        "administrativeArea": "CA",
+        "locality": "Mountain View",
+        "addressLines": ["1600 Amphitheatre Pkwy"]
+      },
+      "addressComponents": [
+        {
+          "componentName": {"text": "1600", "languageCode": "en"},
+          "componentType": "street_number",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Amphitheatre Parkway", "languageCode": "en"},
+          "componentType": "route",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Mountain View", "languageCode": "en"},
+          "componentType": "locality",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "CA", "languageCode": "en"},
+          "componentType": "administrative_area_level_1",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Santa Clara County", "languageCode": "en"},
+          "componentType": "administrative_area_level_2",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "United States", "languageCode": "en"},
+          "componentType": "country",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "94043", "languageCode": "en"},
+          "componentType": "postal_code",
+          "confirmationLevel": "CONFIRMED"
+        }
+      ]
+    },
+    "geocode": {
+      "placeId": "ChIJ2eUgeAK6j4ARbn5u_wAGqWA",
+      "location": {
+        "latitude": 37.422411,
+        "longitude": -122.0840897
+      }
+    }
+  },
+  "responseId": "test-response-us-confirmed"
+}

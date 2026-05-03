@@ -1,0 +1,38 @@
+{
+  "result": {
+    "verdict": {
+      "inputGranularity": "OTHER",
+      "validationGranularity": "OTHER",
+      "geocodeGranularity": "OTHER",
+      "addressComplete": false,
+      "hasUnconfirmedComponents": true,
+      "hasInferredComponents": false,
+      "possibleNextAction": "FIX"
+    },
+    "address": {
+      "formattedAddress": "asdfqwer zzz, USA",
+      "postalAddress": {
+        "regionCode": "US",
+        "languageCode": "en",
+        "addressLines": ["asdfqwer zzz"]
+      },
+      "addressComponents": [
+        {
+          "componentName": {"text": "asdfqwer zzz", "languageCode": "en"},
+          "componentType": "route",
+          "confirmationLevel": "UNCONFIRMED_BUT_PLAUSIBLE"
+        },
+        {
+          "componentName": {"text": "United States", "languageCode": "en"},
+          "componentType": "country",
+          "confirmationLevel": "CONFIRMED"
+        }
+      ]
+    },
+    "geocode": {
+      "placeId": "",
+      "location": {}
+    }
+  },
+  "responseId": "test-response-us-fix"
+}

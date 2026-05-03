@@ -1,0 +1,64 @@
+{
+  "result": {
+    "verdict": {
+      "inputGranularity": "PREMISE",
+      "validationGranularity": "PREMISE",
+      "geocodeGranularity": "PREMISE",
+      "addressComplete": true,
+      "hasUnconfirmedComponents": false,
+      "hasInferredComponents": false,
+      "possibleNextAction": "ACCEPT"
+    },
+    "address": {
+      "formattedAddress": "111 Wellington St, Ottawa, ON K1A 0A6, Canada",
+      "postalAddress": {
+        "regionCode": "CA",
+        "languageCode": "en",
+        "postalCode": "K1A 0A6",
+        "administrativeArea": "ON",
+        "locality": "Ottawa",
+        "addressLines": ["111 Wellington St"]
+      },
+      "addressComponents": [
+        {
+          "componentName": {"text": "111", "languageCode": "en"},
+          "componentType": "street_number",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Wellington Street", "languageCode": "en"},
+          "componentType": "route",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ottawa", "languageCode": "en"},
+          "componentType": "locality",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "ON", "languageCode": "en"},
+          "componentType": "administrative_area_level_1",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Canada", "languageCode": "en"},
+          "componentType": "country",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "K1A 0A6", "languageCode": "en"},
+          "componentType": "postal_code",
+          "confirmationLevel": "CONFIRMED"
+        }
+      ]
+    },
+    "geocode": {
+      "placeId": "ChIJrxNRX7IFzkwR7RXdMeFRaoo",
+      "location": {
+        "latitude": 45.4215296,
+        "longitude": -75.6971931
+      }
+    }
+  },
+  "responseId": "test-response-ca-confirmed"
+}

@@ -1,0 +1,67 @@
+{
+  "result": {
+    "verdict": {
+      "inputGranularity": "SUB_PREMISE",
+      "validationGranularity": "SUB_PREMISE",
+      "geocodeGranularity": "PREMISE",
+      "addressComplete": true,
+      "hasUnconfirmedComponents": false,
+      "hasInferredComponents": false,
+      "possibleNextAction": "ACCEPT"
+    },
+    "address": {
+      "formattedAddress": "Block 123 Ang Mo Kio Avenue 6, #08-456, Singapore 560123",
+      "postalAddress": {
+        "regionCode": "SG",
+        "languageCode": "en",
+        "postalCode": "560123",
+        "addressLines": ["Block 123 Ang Mo Kio Avenue 6", "#08-456"]
+      },
+      "addressComponents": [
+        {
+          "componentName": {"text": "123", "languageCode": "en"},
+          "componentType": "street_number",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ang Mo Kio Avenue 6", "languageCode": "en"},
+          "componentType": "route",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "08-456", "languageCode": "en"},
+          "componentType": "subpremise",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ang Mo Kio", "languageCode": "en"},
+          "componentType": "sublocality",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ang Mo Kio", "languageCode": "en"},
+          "componentType": "sublocality_level_1",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Singapore", "languageCode": "en"},
+          "componentType": "country",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "560123", "languageCode": "en"},
+          "componentType": "postal_code",
+          "confirmationLevel": "CONFIRMED"
+        }
+      ]
+    },
+    "geocode": {
+      "placeId": "ChIJSG_AMK_HDB_TEST_PLACE_ID_001",
+      "location": {
+        "latitude": 1.3691,
+        "longitude": 103.8454
+      }
+    }
+  },
+  "responseId": "test-response-sg-hdb-confirmed"
+}

@@ -24,6 +24,11 @@ dependencies = [
     "uvicorn[standard]>=0.30,<1",
     "python-multipart>=0.0.9,<1",
     "phonenumbers>=9.0,<10",
+    # Phase 61 Pitfall 8: promote httpx from transitive (via livekit-agents /
+    # supabase) to a direct, version-pinned dep. The Address Validation client
+    # in src/integrations/google_maps.py imports it explicitly; we don't want a
+    # silent ImportError if a future minor of livekit-agents drops it.
+    "httpx>=0.27,<1",
 ]
 
 [project.optional-dependencies]

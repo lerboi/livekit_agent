@@ -7,9 +7,14 @@ LiveKit AgentSession.
 Phase 60.3 Stream A: adds mock_diag_record, mock_agent_session, and
 mock_deps_with_diag for the goodbye-race instrumentation tests
 (tests/test_goodbye_diag.py).
+
+Phase 61 Plan 02: adds gmaps_fixture loader for recorded Google Maps
+Address Validation API response fixtures (tests/fixtures/gmaps_responses/).
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -87,3 +92,37 @@ def mock_deps_with_diag(mock_diag_record):
         "room_name": "test-room",
         "sip_participant_identity": "sip_+6587528516",
     }
+
+
+# ── Phase 61 Plan 02 fixtures ───────────────────────────────────────────────
+
+_GMAPS_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "gmaps_responses"
+
+
+@pytest.fixture
+def gmaps_fixture():
+    """Load a recorded Google Maps Address Validation API response by name.
+
+    Usage:
+        def test_something(gmaps_fixture):
+            response = gmaps_fixture("us_confirmed")
+            # response is the parsed JSON dict from
+            # tests/fixtures/gmaps_responses/us_confirmed.json
+
+    Available fixtures:
+        - us_confirmed (verdict.possibleNextAction = ACCEPT)
+        - us_confirm_with_corrections (CONFIRM with spellCorrected)
+        - us_fix_required (FIX, addressComplete=false)
+        - ca_confirmed (Canadian regionCode=CA)
+        - sg_hdb_confirmed (SG with subpremise present)
+        - sg_hdb_subpremise_missing (CONFIRM_ADD_SUBPREMISES)
+        - unsupported_region_de (HTTP 400 INVALID_ARGUMENT body)
+        - quota_exceeded_429 (HTTP 429 RESOURCE_EXHAUSTED body)
+    """
+
+    def _load(name: str) -> dict:
+        path = _GMAPS_FIXTURE_DIR / f"{name}.json"
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    return _load

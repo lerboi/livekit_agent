@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded for quota metric 'Validate address requests' and limit 'Validate address requests per minute' of service 'addressvalidation.googleapis.com' for consumer 'project_number:000000000000'.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "domain": "googleapis.com"
+      }
+    ]
+  }
+}

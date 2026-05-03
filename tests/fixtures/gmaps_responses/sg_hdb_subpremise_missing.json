@@ -1,0 +1,57 @@
+{
+  "result": {
+    "verdict": {
+      "inputGranularity": "PREMISE",
+      "validationGranularity": "PREMISE",
+      "geocodeGranularity": "PREMISE",
+      "addressComplete": false,
+      "hasUnconfirmedComponents": false,
+      "hasInferredComponents": false,
+      "possibleNextAction": "CONFIRM_ADD_SUBPREMISES"
+    },
+    "address": {
+      "formattedAddress": "Block 123 Ang Mo Kio Avenue 6, Singapore 560123",
+      "postalAddress": {
+        "regionCode": "SG",
+        "languageCode": "en",
+        "postalCode": "560123",
+        "addressLines": ["Block 123 Ang Mo Kio Avenue 6"]
+      },
+      "addressComponents": [
+        {
+          "componentName": {"text": "123", "languageCode": "en"},
+          "componentType": "street_number",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ang Mo Kio Avenue 6", "languageCode": "en"},
+          "componentType": "route",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Ang Mo Kio", "languageCode": "en"},
+          "componentType": "sublocality_level_1",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "Singapore", "languageCode": "en"},
+          "componentType": "country",
+          "confirmationLevel": "CONFIRMED"
+        },
+        {
+          "componentName": {"text": "560123", "languageCode": "en"},
+          "componentType": "postal_code",
+          "confirmationLevel": "CONFIRMED"
+        }
+      ]
+    },
+    "geocode": {
+      "placeId": "ChIJSG_AMK_HDB_TEST_PLACE_ID_002",
+      "location": {
+        "latitude": 1.3691,
+        "longitude": 103.8454
+      }
+    }
+  },
+  "responseId": "test-response-sg-hdb-no-subpremise"
+}
