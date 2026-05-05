@@ -4,12 +4,13 @@ version = "1.0.0"
 description = "Voco AI voice receptionist — Twilio SIP + LiveKit + Gemini 3.1 Flash Live"
 requires-python = ">=3.11"
 dependencies = [
-    # Pinned at 1.5.6 (2026-04-22) — mainline with capability-based Gemini 3.1 routing via PR #5413.
-    # See .planning/phases/63-livekit-sdk-upgrade-to-1-5-6-mainline/63-RESEARCH.md for the full upgrade surface audit.
-    "livekit-agents==1.5.6",
-    "livekit-plugins-google==1.5.6",
-    "livekit-plugins-silero==1.5.6",
-    "livekit-plugins-turn-detector==1.5.6",
+    # Pinned at 1.5.7 (2026-04-30) — patch bump on top of Phase 63's 1.5.6 mainline.
+    # 1.5.7 picks up: gemini-live raw-schema parameters fix + realtime reply-after-interruption fix.
+    # See .planning/phases/63.2-livekit-sdk-patch-1-5-7/63.2-CONTEXT.md (audit confirms neither fix forces src/ edits in this stack).
+    "livekit-agents==1.5.7",
+    "livekit-plugins-google==1.5.7",
+    "livekit-plugins-silero==1.5.7",
+    "livekit-plugins-turn-detector==1.5.7",
     "livekit-plugins-noise-cancellation>=0.2,<1",
     "livekit-api>=1.0,<2",
     "supabase>=2.0,<3",
