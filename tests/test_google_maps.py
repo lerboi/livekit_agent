@@ -499,3 +499,63 @@ def test_telemetry_skipped_when_tenant_id_empty_string(monkeypatch):
     )
     assert result["verdict"] == "skipped"
     mock_supabase.table.assert_not_called()
+
+
+# ── Phase 61.1 WR-02: empty address_lines must short-circuit before HTTP ────
+
+
+def test_empty_address_lines_short_circuits_to_error(monkeypatch):
+    """WR-02 (Phase 61.1): empty address_lines must short-circuit to verdict=error
+    BEFORE the HTTP call. Otherwise Google returns 400 INVALID_ARGUMENT and the
+    response is misclassified as verdict=unsupported_region (false billing
+    rollup + lost Sentry signal)."""
+    import asyncio
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key-must-not-be-used")
+
+    from src.integrations.google_maps import validate_address
+
+    # Empty list — must short-circuit before httpx.AsyncClient is constructed.
+    result = asyncio.run(
+        validate_address(region_code="US", address_lines=[])
+    )
+    assert result["verdict"] == "error"
+    assert result["raw_status"] is None  # short-circuit path: no HTTP issued
+
+
+def test_whitespace_only_address_lines_short_circuits_to_error(monkeypatch):
+    """WR-02 (Phase 61.1): whitespace-only address_lines (e.g. ['', '  '])
+    are equivalent to empty for upstream-capture purposes — must also short-circuit."""
+    import asyncio
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key-must-not-be-used")
+
+    from src.integrations.google_maps import validate_address
+
+    result = asyncio.run(
+        validate_address(region_code="US", address_lines=["", "   "])
+    )
+    assert result["verdict"] == "error"
+    assert result["raw_status"] is None
+
+
+def test_empty_address_lines_triggers_sentry_via_wrapper(monkeypatch):
+    """WR-02 (Phase 61.1): the bounded wrapper's Sentry gate (D-A3) must fire
+    for empty-address calls because they are now verdict=error. Restores the
+    'we never captured an address' alerting signal."""
+    import asyncio
+    from unittest.mock import patch
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key-must-not-be-used")
+
+    from src.integrations.google_maps import validate_address_bounded
+
+    with patch("src.integrations.google_maps.sentry_sdk") as mock_sentry:
+        result = asyncio.run(
+            validate_address_bounded(
+                tenant_id="tenant-x",
+                call_id="call-x",
+                region_code="US",
+                address_lines=[],
+            )
+        )
+        assert result["verdict"] == "error"
+        # Sentry MUST be called for verdict=error (D-A3 gate).
+        mock_sentry.capture_exception.assert_called_once()
