@@ -168,12 +168,13 @@ def _build_corrections_section(locale: str) -> str:
 
 
 def _build_address_validation_section(locale: str = "en") -> str:
-    # Phase 61 Plan 04 (D-E3): CRITICAL RULE for the "validated" truth-class.
-    # Co-located with the existing anti-hallucination spine (corrections /
-    # outcome_words) in the top-attention zone. EN+ES locale parity per the
-    # Phase 60.3 D-B-03 mandate. Prohibits 6 verbatim phrases unless the
-    # immediately preceding tool return contained `verdict=validated` or
-    # `verdict=validated_with_corrections`.
+    # Phase 61 Plan 04 (D-E3) + Phase 61.1 fix: CRITICAL RULE for the
+    # "validated" truth-class, scoped to POST-TOOL speech only. Pre-tool
+    # readback (the caller-acknowledgement loop before book_appointment /
+    # capture_lead is invoked) follows the ordinary readback rules and is
+    # NOT subject to this prohibition — Phase 61.1 fixes the deadlock that
+    # arose when the rule read as if it governed the entire address
+    # conversation. EN+ES locale parity per the Phase 60.3 D-B-03 mandate.
     #
     # Tool-return verdict tokens are CODE IDENTIFIERS — not prose. They
     # must NOT be translated. The prohibited-phrase list is locale-specific
@@ -181,23 +182,26 @@ def _build_address_validation_section(locale: str = "en") -> str:
     if locale == "es":
         return (
             "VALIDACIÓN DE DIRECCIÓN — REGLA CRÍTICA:\n"
-            "Las herramientas de reserva y captura de cliente validan la "
-            "dirección del llamante con un servicio externo antes de "
-            "confirmar. El retorno de la herramienta le dice qué pasó — "
-            "léalo con atención.\n"
+            "Después de que book_appointment o capture_lead retorne, esta "
+            "regla rige cómo repite lo que la herramienta encontró. Antes de "
+            "llamar a la herramienta, recopile la dirección normalmente y "
+            "repita lo que el llamante dijo para confirmar que la oyó "
+            "correctamente — esa es la repetición previa a la herramienta, y "
+            "no es un lenguaje de \"validado\".\n"
             "\n"
-            "Cuando el retorno contiene `verdict=validated` o "
+            "Después de un retorno que contenga `verdict=validated` o "
             "`verdict=validated_with_corrections`, la dirección fue "
-            "confirmada y puede repetir la forma normalizada al llamante "
-            "como la dirección final.\n"
+            "confirmada por el servicio externo y puede repetir la forma "
+            "normalizada al llamante como la dirección final.\n"
             "\n"
-            "Cuando el retorno contiene `verdict=unvalidated` (cualquier "
-            "otro caso — sin confirmar, error, omitida, o región no "
-            "soportada), la dirección NO fue confirmada. Solo puede "
-            "repetir lo que el llamante dijo.\n"
+            "Después de un retorno que contenga `verdict=unvalidated` "
+            "(cualquier otro caso — sin confirmar, error, omitida, o región "
+            "no soportada), la dirección NO fue confirmada por el servicio. "
+            "Solo puede repetir lo que el llamante mismo dijo, con sus "
+            "propias palabras.\n"
             "\n"
-            "NUNCA use ninguna de estas frases a menos que el retorno "
-            "inmediatamente anterior contenga `verdict=validated` o "
+            "Después de un retorno, NUNCA use ninguna de estas frases a "
+            "menos que ese retorno contenga `verdict=validated` o "
             "`verdict=validated_with_corrections`:\n"
             "  - \"validado\" / \"validada\"\n"
             "  - \"verificado\" / \"verificada\"\n"
@@ -206,30 +210,32 @@ def _build_address_validation_section(locale: str = "en") -> str:
             "  - \"consulté su dirección\"\n"
             "  - \"coincide con nuestros registros\"\n"
             "\n"
-            "Decir cualquiera de estas sin el verdict que las respalde es "
-            "el peor modo de falla de esta sección — el llamante cuelga "
+            "Decir cualquiera de estas después de un retorno sin el verdict "
+            "que las respalde es una falla seria — el llamante cuelga "
             "creyendo que su dirección fue verificada cuando no lo fue. "
-            "El silencio o una repetición neutral siempre es aceptable; "
-            "la confirmación falsa no lo es."
+            "Antes de que corra la herramienta, las reglas ordinarias de "
+            "repetición se aplican y esta prohibición no."
         )
     return (
         "ADDRESS VALIDATION — CRITICAL RULE:\n"
-        "The booking and lead tools validate the caller's address against "
-        "an external service before committing. The tool return tells you "
-        "what happened — read it carefully.\n"
+        "After book_appointment or capture_lead returns, this rule governs "
+        "how you speak back what the tool found. Before calling the tool, "
+        "gather the address normally and read back what the caller said to "
+        "confirm you heard it correctly — that is the pre-tool readback, "
+        "and it is not 'validated' phrasing.\n"
         "\n"
-        "When the tool return contains `verdict=validated` or "
-        "`verdict=validated_with_corrections`, the address has been "
-        "confirmed and you may speak the normalized form back to the "
-        "caller as the final address.\n"
+        "After a tool return that contains `verdict=validated` or "
+        "`verdict=validated_with_corrections`, the address has been confirmed "
+        "by the external service and you may speak the normalized form back "
+        "to the caller as the final address.\n"
         "\n"
-        "When the tool return contains `verdict=unvalidated` (any other "
+        "After a tool return that contains `verdict=unvalidated` (any other "
         "case — unconfirmed, error, skipped, or unsupported region), the "
-        "address has NOT been confirmed. You may only speak back what the "
-        "caller themselves said.\n"
+        "address has NOT been confirmed by the service. Speak back only what "
+        "the caller themselves said, in their own words.\n"
         "\n"
-        "NEVER use any of these phrases unless the immediately preceding "
-        "tool return contained `verdict=validated` or "
+        "After a tool return, NEVER use any of these phrases unless that "
+        "return contained `verdict=validated` or "
         "`verdict=validated_with_corrections`:\n"
         "  - \"validated\"\n"
         "  - \"verified\"\n"
@@ -238,10 +244,10 @@ def _build_address_validation_section(locale: str = "en") -> str:
         "  - \"looked up your address\"\n"
         "  - \"matches our records\"\n"
         "\n"
-        "Saying any of these without the verdict to back them up is the "
-        "worst failure mode in this section — the caller hangs up "
-        "believing their address was checked when it was not. Silence or "
-        "a neutral readback is always acceptable; false confirmation is not."
+        "Saying any of these after a tool return without the verdict to back "
+        "them up is a serious failure — the caller hangs up believing their "
+        "address was checked when it was not. Before the tool runs, the "
+        "ordinary readback rules apply and this prohibition does not."
     )
 
 
