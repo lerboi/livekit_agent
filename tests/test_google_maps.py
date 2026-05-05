@@ -449,3 +449,53 @@ async def test_validate_address_bounded_never_raises_on_unexpected_exception(
         )
     assert result["verdict"] == "error"
     assert "latency_ms" in result
+
+
+# ── Phase 61.1 WR-01: tenant_id falsy must skip telemetry insert ────────────
+
+
+def test_telemetry_skipped_when_tenant_id_none(monkeypatch):
+    """WR-01 (Phase 61.1): tenant_id=None must skip the insert with a warn log,
+    NOT swallow a NOT NULL constraint violation in a bare except."""
+    import asyncio
+    from unittest.mock import MagicMock
+    # Ensure the API-key skip-fast path so we don't actually call Google.
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+
+    mock_supabase = MagicMock()
+    from src.integrations.google_maps import validate_address_bounded
+
+    result = asyncio.run(
+        validate_address_bounded(
+            tenant_id=None,
+            call_id="call-x",
+            region_code="US",
+            address_lines=["1600 Amphitheatre Pkwy"],
+            supabase=mock_supabase,
+        )
+    )
+    assert result["verdict"] == "skipped"
+    # The insert path must NEVER be reached when tenant_id is falsy.
+    mock_supabase.table.assert_not_called()
+
+
+def test_telemetry_skipped_when_tenant_id_empty_string(monkeypatch):
+    """WR-01 (Phase 61.1): empty-string tenant_id treated identically to None."""
+    import asyncio
+    from unittest.mock import MagicMock
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+
+    mock_supabase = MagicMock()
+    from src.integrations.google_maps import validate_address_bounded
+
+    result = asyncio.run(
+        validate_address_bounded(
+            tenant_id="",
+            call_id="call-x",
+            region_code="US",
+            address_lines=["1600 Amphitheatre Pkwy"],
+            supabase=mock_supabase,
+        )
+    )
+    assert result["verdict"] == "skipped"
+    mock_supabase.table.assert_not_called()
