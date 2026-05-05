@@ -146,10 +146,24 @@ def test_en_es_distinct():
     assert "REGLA CRÍTICA" in es
 
 
-def test_both_locales_silence_acceptable():
-    en = _build_address_validation_section("en").lower()
-    es = _build_address_validation_section("es").lower()
-    # Caller-readback as last resort; silence is always acceptable; false
-    # confirmation is the worst failure mode. Both locales must surface this.
-    assert "silence" in en or "neutral" in en
-    assert "silencio" in es or "neutral" in es
+def test_both_locales_pre_tool_readback_explicit():
+    """Phase 61.1: post-tool gating + pre-tool readback license must be explicit.
+
+    The Phase 61 prompt deadlocked the pre-tool readback step because the rule
+    read as if it governed the entire address conversation AND silence was
+    explicitly licensed. The fix scopes the rule to post-tool speech and
+    explicitly licenses caller-readback before the tool runs.
+    """
+    en = _build_address_validation_section("en")
+    es = _build_address_validation_section("es")
+    # Post-tool gating must be EXPLICIT in both locales.
+    assert "After book_appointment or capture_lead returns" in en
+    assert "Después de que book_appointment o capture_lead retorne" in es
+    # Pre-tool readback must be EXPLICITLY licensed in both locales.
+    assert "read back what the caller said" in en
+    assert ("repita lo que el llamante dijo" in es) or ("repita lo que dijo el llamante" in es)
+    # The silence escape hatch and unqualified worst-failure framing must be GONE.
+    assert "Silence or a neutral readback is always acceptable" not in en
+    assert "El silencio o una repetición neutral siempre es aceptable" not in es
+    assert "worst failure mode in this section" not in en
+    assert "peor modo de falla de esta sección" not in es
