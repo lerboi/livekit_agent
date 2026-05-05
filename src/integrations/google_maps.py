@@ -282,6 +282,27 @@ async def validate_address(
             raw_status=None,
         )
 
+    # WR-02 (Phase 61.1): short-circuit empty / whitespace-only address_lines
+    # BEFORE the HTTP call. Without this guard, Google returns 400
+    # INVALID_ARGUMENT and `_is_unsupported_region_400` matches the
+    # `invalid_argument` substring → misclassified as `unsupported_region`
+    # (false billing rollup + lost Sentry signal). The `error` verdict is the
+    # correct posture for "we never captured an address" — the bounded
+    # wrapper's Sentry gate (D-A3) will then fire on this verdict.
+    if not address_lines or not any(
+        (line or "").strip() for line in address_lines
+    ):
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "[phase61] empty address_lines — short-circuit verdict=error region_code=%s",
+            region_code,
+        )
+        return _voco_result(
+            verdict="error",
+            latency_ms=latency_ms,
+            raw_status=None,
+        )
+
     # Build request body per RESEARCH §Code Examples 1.
     address_block: dict = {
         "regionCode": region_code,
