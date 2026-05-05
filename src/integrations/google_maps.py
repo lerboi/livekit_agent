@@ -509,36 +509,46 @@ async def validate_address_bounded(
     # cost_micro_cents is 0 for skipped/error (no Google billing); the
     # successful + unsupported_region paths get COST_MICRO_CENTS_PER_VALIDATE.
     if supabase is not None:
-        try:
-            verdict = result.get("verdict")
-            cost = (
-                COST_MICRO_CENTS_PER_VALIDATE
-                if verdict not in ("skipped", "error")
-                else 0
-            )
-            payload = {
-                "tenant_id": tenant_id,
-                "call_id": call_id,
-                "verdict": verdict,
-                "latency_ms": result.get("latency_ms"),
-                "cost_micro_cents": cost,
-                "region_code": region_code,
-            }
-
-            # supabase-py is sync — wrap the chain in to_thread so we don't
-            # block the event loop. Test harnesses pass a MagicMock that
-            # accepts the chain synchronously; to_thread handles both.
-            def _insert() -> None:
-                supabase.table("gmaps_validate_events").insert(payload).execute()
-
-            await asyncio.to_thread(_insert)
-        except Exception as exc:  # noqa: BLE001
-            # Telemetry failures must never block the call path. Log at
-            # warning level (not error — gmaps_validate_events is observability,
-            # not a user-facing failure).
+        if not tenant_id:
+            # WR-01 (Phase 61.1): gmaps_validate_events.tenant_id is NOT NULL.
+            # Skipping the insert with an explicit warn log preserves D-C2'
+            # observability semantics ("we know why this row is missing")
+            # instead of swallowing a constraint violation in a bare except.
             logger.warning(
-                "[phase61] gmaps_validate_events insert failed: %s",
-                exc,
+                "[phase61] gmaps_validate_events insert skipped: tenant_id is None (call_id=%s)",
+                call_id or "unknown",
             )
+        else:
+            try:
+                verdict = result.get("verdict")
+                cost = (
+                    COST_MICRO_CENTS_PER_VALIDATE
+                    if verdict not in ("skipped", "error")
+                    else 0
+                )
+                payload = {
+                    "tenant_id": tenant_id,
+                    "call_id": call_id,
+                    "verdict": verdict,
+                    "latency_ms": result.get("latency_ms"),
+                    "cost_micro_cents": cost,
+                    "region_code": region_code,
+                }
+
+                # supabase-py is sync — wrap the chain in to_thread so we don't
+                # block the event loop. Test harnesses pass a MagicMock that
+                # accepts the chain synchronously; to_thread handles both.
+                def _insert() -> None:
+                    supabase.table("gmaps_validate_events").insert(payload).execute()
+
+                await asyncio.to_thread(_insert)
+            except Exception as exc:  # noqa: BLE001
+                # Telemetry failures must never block the call path. Log at
+                # warning level (not error — gmaps_validate_events is observability,
+                # not a user-facing failure).
+                logger.warning(
+                    "[phase61] gmaps_validate_events insert failed: %s",
+                    exc,
+                )
 
     return result
