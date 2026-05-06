@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from livekit.agents import function_tool, RunContext
 
+from ._availability_lib import mute_input_during_tool
 from ..utils import format_slot_for_speech
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,11 @@ def create_check_caller_history_tool(deps: dict):
         ),
     )
     async def check_caller_history(context: RunContext) -> str:
+        # Phase 61.2 Fix A: detach caller input during the BLOCKING Supabase
+        # fetch so Gemini-server VAD can't fire mid-tool-wait and cancel the
+        # generation. See 61.2-RESEARCH.md § 4 fix A.
+        mute_input_during_tool(deps)
+
         tenant_id = deps.get("tenant_id")
         from_number = deps.get("from_number")
         supabase = deps["supabase"]

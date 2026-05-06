@@ -18,6 +18,8 @@ from typing import Optional
 
 from livekit.agents import function_tool, RunContext
 
+from ._availability_lib import mute_input_during_tool
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,6 +115,11 @@ def create_check_customer_account_tool(deps: dict):
         ),
     )
     async def check_customer_account(context: RunContext) -> str:
+        # Phase 61.2 Fix A: detach caller input during the BLOCKING tool wait
+        # so Gemini-server VAD can't fire mid-tool and cancel the generation.
+        # See 61.2-RESEARCH.md § 4 fix A.
+        mute_input_during_tool(deps)
+
         ctx = deps.get("customer_context") if isinstance(deps, dict) else getattr(deps, "customer_context", None)
         result = format_customer_context_state(ctx)
         logger.info(

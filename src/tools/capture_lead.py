@@ -9,6 +9,7 @@ import time
 
 from livekit.agents import function_tool, RunContext
 
+from ._availability_lib import mute_input_during_tool
 from ..lib.write_outcome import record_outcome, RecordOutcomeError
 from ..integrations.google_maps import validate_address_bounded
 
@@ -47,6 +48,12 @@ def create_capture_lead_tool(deps: dict):
         job_type: str = "",
         notes: str = "",
     ) -> str:
+        # Phase 61.2 Fix A: detach caller input during the BLOCKING I/O
+        # (address validation HTTP + Supabase writes) so Gemini-server VAD
+        # can't fire mid-tool and cancel the generation. See 61.2-RESEARCH.md
+        # § 4 fix A.
+        mute_input_during_tool(deps)
+
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
