@@ -45,8 +45,12 @@ logger = logging.getLogger(__name__)
 # client-side detachment of the audio stream — no session config mutation,
 # so it works on 3.1 despite mutable_chat_context=False et al.
 # ─────────────────────────────────────────────────────────────────────────────
-
-_TOOL_MUTE_FALLBACK_S = 15.0
+#
+# Phase 61.2 Fix B: fallback raised 15→25s. The booking-section name+address
+# readback can run 10-14s; on a server-cancelled tool call, the recovery
+# generation may extend beyond that. 15s left no margin and the safety
+# unmute fired mid-recovery (call AJ_vV4DM5AG9t7W). 25s is the new ceiling.
+_TOOL_MUTE_FALLBACK_S = 25.0
 
 
 def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S) -> None:
@@ -115,6 +119,18 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
 
     session.on("agent_state_changed", _on_state_change)
 
+    def _on_tools_executed(_event):
+        # Phase 61.2 Fix B: a fresh tool execution during the mute window
+        # means we are inside a recovery generation step (Gemini retried after
+        # a server cancel). Reset the listener so the unmute waits for the
+        # NEW generation's clean speak/listen cycle, not the cancelled one.
+        try:
+            saw_fresh_speaking[0] = False
+        except Exception:
+            pass
+
+    session.on("function_tools_executed", _on_tools_executed)
+
     async def _unmute_logic():
         try:
             await asyncio.wait_for(unmute_event.wait(), timeout=fallback_s)
@@ -128,8 +144,10 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
         try:
             if hasattr(session, "off"):
                 session.off("agent_state_changed", _on_state_change)
+                session.off("function_tools_executed", _on_tools_executed)
             elif hasattr(session, "remove_listener"):
                 session.remove_listener("agent_state_changed", _on_state_change)
+                session.remove_listener("function_tools_executed", _on_tools_executed)
         except Exception:
             pass
 
