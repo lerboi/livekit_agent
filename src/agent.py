@@ -111,12 +111,50 @@ class _GoodbyeDiagHandler(logging.Handler):
 _PHONE_REDACT_RE = re.compile(r"\+?\d{7,15}")
 
 
+# ── Phase 61.2 Fix C: server-cancellation cascade telemetry ───────────────
+
+class _ServerCancelHandler(logging.Handler):
+    """Phase 61.2 Fix C: capture Gemini-server cancellation cascade signals
+    from livekit.plugins.google.realtime warnings. Pure observability — no
+    behavior change. Counters flow into the [goodbye_race] log line via
+    _flush_goodbye_diag.
+
+    Watches for two warning substrings:
+      - 'server cancelled tool calls' — server-side VAD interrupt cancelled
+        an in-flight generation; pending tool calls discarded.
+      - 'received server content but no active generation' — tool result
+        landed on a cancelled call; the agent has no pending generation to
+        attach the result to.
+
+    Mirrors _GoodbyeDiagHandler shape. Removed in _flush_goodbye_diag's
+    finally block to prevent per-call handler accumulation.
+    """
+    def __init__(self, diag_record):
+        super().__init__()
+        self._diag_record = diag_record
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            if "server cancelled tool calls" in msg:
+                self._diag_record[0]["server_tool_cancellations"] = (
+                    self._diag_record[0].get("server_tool_cancellations", 0) + 1
+                )
+            elif "received server content but no active generation" in msg:
+                self._diag_record[0]["orphaned_server_content"] = (
+                    self._diag_record[0].get("orphaned_server_content", 0) + 1
+                )
+        except Exception:
+            pass  # diagnostic handler must never raise
+
+
 async def _flush_goodbye_diag(
     *,
     diag_record: list,
     transcript_turns: list,
     tool_call_log: list,
     goodbye_handler: logging.Handler,
+    server_cancel_handler: logging.Handler,
 ) -> None:
     """Phase 60.3 Stream A (R-A7): flush the goodbye-race diagnostic record
     as a [goodbye_race] logger.info line + Sentry breadcrumb, then remove
@@ -149,6 +187,11 @@ async def _flush_goodbye_diag(
     finally:
         try:
             logging.getLogger("livekit.agents").removeHandler(goodbye_handler)
+        except Exception:
+            pass
+        try:
+            logging.getLogger("livekit.plugins.google.realtime").removeHandler(server_cancel_handler)
+            logging.getLogger("livekit.plugins.google").removeHandler(server_cancel_handler)
         except Exception:
             pass
 
@@ -331,6 +374,14 @@ async def entrypoint(ctx: JobContext):
         # is removed in _flush_goodbye_diag() at call close.
         _goodbye_handler = _GoodbyeDiagHandler(diag_record)
         logging.getLogger("livekit.agents").addHandler(_goodbye_handler)
+
+        # Phase 61.2 Fix C: server-cancellation cascade telemetry. Install
+        # _ServerCancelHandler on BOTH livekit.plugins.google.realtime (where
+        # the cancellation warnings are emitted) and livekit.plugins.google
+        # (parent logger fallback). Removed in _flush_goodbye_diag().
+        _server_cancel_handler = _ServerCancelHandler(diag_record)
+        logging.getLogger("livekit.plugins.google.realtime").addHandler(_server_cancel_handler)
+        logging.getLogger("livekit.plugins.google").addHandler(_server_cancel_handler)
 
         # ── Create tools with mutable deps (call_uuid filled in after DB query) ──
         deps = {
@@ -600,6 +651,7 @@ async def entrypoint(ctx: JobContext):
                 transcript_turns=transcript_turns,
                 tool_call_log=deps.get("_tool_call_log", []) or [],
                 goodbye_handler=_goodbye_handler,
+                server_cancel_handler=_server_cancel_handler,
             )
 
             end_timestamp = int(time.time() * 1000)
