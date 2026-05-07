@@ -94,3 +94,36 @@ def test_stall_counters_conditional_emit():
     assert '.get("stalled_generation_replay_failed", 0)' in text, (
         "stalled_generation_replay_failed must use .get(key, 0) + 1 conditional-emit pattern — D-08"
     )
+
+
+def test_stall_predicate_uses_saw_fresh_speaking():
+    """D-04 (61.3-amend): the stall-detection predicate must use the
+    `saw_fresh_speaking` agent_state-change flag as the truth source.
+    The audio-frame-only predicate produced a 15-30ms false-negative
+    on call AJ_b8ACLgXZ4XZA — see 61.3-UAT.md.
+    """
+    text = _read(TOOLS / "_availability_lib.py")
+    assert "saw_fresh_speaking" in text, (
+        "_availability_lib.py must reference saw_fresh_speaking as the "
+        "stall-detection truth source — D-04 (61.3-amend, AJ_b8ACLgXZ4XZA)"
+    )
+    # The recovery helper must accept saw_fresh_speaking as a parameter.
+    assert "saw_fresh_speaking: bool" in text, (
+        "_attempt_tool_result_replay must take saw_fresh_speaking: bool — D-04 (61.3-amend)"
+    )
+
+
+def test_audio_quiescent_grace_present():
+    """D-04 (61.3-amend): the audio-frame check retains a small grace
+    window to absorb residual frames from the pre-mute filler. Without
+    the grace, a frame stamped 15ms after mute_set_at_ms would still
+    block recovery if `saw_fresh_speaking` somehow lagged.
+    """
+    text = _read(TOOLS / "_availability_lib.py")
+    assert "GRACE_MS" in text, (
+        "_availability_lib.py must define a GRACE_MS for the audio-frame "
+        "stall check — D-04 (61.3-amend)"
+    )
+    assert "mute_set_at_ms + GRACE_MS" in text, (
+        "audio_quiescent must compare last_frame_ms to mute_set_at_ms + GRACE_MS — D-04 (61.3-amend)"
+    )
