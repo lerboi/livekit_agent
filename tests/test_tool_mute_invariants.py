@@ -99,3 +99,55 @@ def test_server_cancel_handler_installed():
     assert "orphaned_server_content" in text, (
         "agent.py must write orphaned_server_content to _diag_record — D-C-01"
     )
+
+
+def test_state_change_listener_handles_thinking_state():
+    """Phase 62 hotfix: the speak-detection predicate must accept any
+    transition INTO speaking from a non-speaking state — not only the
+    `listening → speaking` 2-state path. Gemini's actual sequence during
+    a tool call is `listening → thinking → speaking → listening`, and
+    the prior strict `old_state == "listening"` check left
+    saw_fresh_speaking[0] False on every tool call. That broke the
+    early-unmute path and held the mute for the full 25s fallback every
+    time a tool fired (call AJ_bFP3MLdqnKqT, 2026-05-07).
+
+    This test locks the inclusive predicate so a future cleanup can't
+    regress to the 2-state shape.
+    """
+    text = _read(TOOLS / "_availability_lib.py")
+    # The predicate must NOT be the strict `old_state == "listening"`
+    # form anymore. Pre-fix the tool used:
+    #   if old_state == "listening" and new_state == "speaking":
+    # Post-fix uses an inclusive form. Guard either of the two known
+    # idiomatic shapes:
+    #   - `old_state != "speaking"` (allow-list inverted)
+    #   - `old_state in (...)` containing both "listening" and "thinking"
+    inclusive_inverted = 'old_state != "speaking"' in text
+    inclusive_allowlist = (
+        'old_state in (' in text
+        and '"listening"' in text
+        and '"thinking"' in text
+    )
+    assert inclusive_inverted or inclusive_allowlist, (
+        "_on_state_change predicate must accept transitions from "
+        "thinking → speaking (and any other non-speaking origin), not "
+        "only listening → speaking. See call AJ_bFP3MLdqnKqT regression."
+    )
+
+
+def test_state_change_listener_filters_pre_mute_filler():
+    """Negative side of the same fix: the listener must STILL filter
+    out a `speaking → listening` transition where the speaking was
+    in flight at registration time (pre-mute filler). The trailing
+    speaking → listening of that filler must NOT trigger the unmute,
+    or we'd unmute before the agent has actually spoken its post-tool
+    response.
+
+    The filter is the saw_fresh_speaking[0] gate on the speaking →
+    listening branch; locked here so a future edit can't drop it.
+    """
+    text = _read(TOOLS / "_availability_lib.py")
+    assert "saw_fresh_speaking[0]" in text, (
+        "_on_state_change must gate the unmute on saw_fresh_speaking[0] "
+        "— prevents pre-mute filler trailing-listen from triggering early unmute"
+    )

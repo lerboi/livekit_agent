@@ -105,11 +105,19 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
         try:
             new_state = getattr(event, "new_state", None)
             old_state = getattr(event, "old_state", None)
-            # A transition INTO speaking from listening = start of the
-            # post-tool response. Any speaking that was in flight when we
-            # registered (the filler) is already in `speaking` state, so
-            # its trailing `speaking → listening` doesn't satisfy this gate.
-            if old_state == "listening" and new_state == "speaking":
+            # A transition INTO speaking from any non-speaking state = start
+            # of the post-tool response. The agent's path during a tool call
+            # is `listening → thinking → speaking → listening` (the
+            # `thinking` state surfaces from Gemini's thinking_config or
+            # server-side state reporting during tool execution). Any pre-mute
+            # filler in flight at registration time has old_state == "speaking",
+            # so its trailing `speaking → listening` doesn't satisfy this gate.
+            #
+            # Pre-fix this matched only `listening → speaking`, missing the
+            # `thinking → speaking` path — call AJ_bFP3MLdqnKqT (2026-05-07)
+            # held the mute for the full 25s fallback on every tool call
+            # because saw_fresh_speaking[0] never flipped True.
+            if new_state == "speaking" and old_state != "speaking":
                 saw_fresh_speaking[0] = True
             elif (
                 old_state == "speaking"
