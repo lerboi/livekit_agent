@@ -73,7 +73,9 @@ def create_check_day_tool(deps: dict):
                 "[63.1-DIAG] check_day EXCEPTION id=%s err=%s",
                 call_id, repr(exc),
             )
-            return "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            state = "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            deps["_last_tool_state"] = state
+            return state
 
 
     return check_day
@@ -81,38 +83,52 @@ def create_check_day_tool(deps: dict):
 
 async def _impl(deps: dict, date: str) -> str:
     if not deps.get("tenant_id"):
-        return "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
     if not date:
-        return "STATE:missing_args | DIRECTIVE:ask the caller for a specific date."
+        state = "STATE:missing_args | DIRECTIVE:ask the caller for a specific date."
+        deps["_last_tool_state"] = state
+        return state
 
     tenant = await ensure_tenant(deps)
     if not tenant:
-        return "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
     tenant_timezone = tenant.get("tenant_timezone") or "UTC"
 
     if date < tenant_today(tenant_timezone):
-        return (
+        state = (
             f"STATE:past_date requested={date}"
             " | DIRECTIVE:ask for today or later; do not fabricate times."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     sched = await fetch_scheduling_data(deps)
     if sched is None:
-        return "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
 
     all_slots = calc_slots_for_dates(tenant, [date], sched, tenant_timezone)
     date_label = format_date_label(date, tenant_timezone)
 
     if all_slots:
         log_tool_call(deps, {"name": "check_day", "success": True, "result": "has_slots", "date": date})
-        return (
+        state = (
             f"STATE:day_has_slots date_label={date_label} count={len(all_slots)}"
             " | DIRECTIVE:confirm the day is open; ask for a concrete hour; do not mention times."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     biz = tenant.get("business_name") or "the team"
     log_tool_call(deps, {"name": "check_day", "success": True, "result": "empty", "date": date})
-    return (
+    state = (
         f"STATE:day_empty date_label={date_label} business_name={biz}"
         " | DIRECTIVE:tell the caller nothing is open that day; offer another day or capture_lead."
     )
+    deps["_last_tool_state"] = state
+    return state
