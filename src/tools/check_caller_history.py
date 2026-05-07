@@ -35,11 +35,13 @@ def create_check_caller_history_tool(deps: dict):
         supabase = deps["supabase"]
 
         if not tenant_id or not from_number:
-            return (
+            state = (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
                 " failure to the caller; do not recite any history."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Look up tenant timezone for formatting
         try:
@@ -53,11 +55,13 @@ def create_check_caller_history_tool(deps: dict):
             tenant = tenant_result.data if tenant_result.data else None
         except Exception as e:
             logger.error("[agent] check_caller_history: tenant fetch failed: %s", e)
-            return (
+            state = (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
                 " failure to the caller; do not recite any history."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         tenant_timezone = tenant.get("tenant_timezone") if tenant else None
         if not tenant_timezone:
@@ -101,11 +105,13 @@ def create_check_caller_history_tool(deps: dict):
             )
         except Exception as e:
             logger.error("[agent] check_caller_history: history lookup failed: %s", e)
-            return (
+            state = (
                 "STATE:history_lookup_failed"
                 " | DIRECTIVE:proceed with normal intake; do not apologize or mention the"
                 " failure to the caller; do not recite any history."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         customer = (customer_result.data or [None])[0]
         appointments = appointments_result.data or []
@@ -151,11 +157,13 @@ def create_check_caller_history_tool(deps: dict):
                 # Soft-fail — proceed with whatever we have (customer + appointments).
 
         if not customer and len(appointments) == 0:
-            return (
+            state = (
                 "STATE:first_time_caller"
                 " | DIRECTIVE:proceed with normal intake; do not mention that the caller is"
                 " new; do not recite any history."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Build natural-language summary for the AI
         summary = ""
@@ -179,7 +187,7 @@ def create_check_caller_history_tool(deps: dict):
                 interaction_lines.append(f"- {kind}: {job} (status: {status})")
             summary += f"Previous interactions ({name}):\n" + "\n".join(interaction_lines)
 
-        return (
+        state = (
             f"STATE:repeat_caller"
             f" prior_appointments={len(appointments)} prior_interactions={len(interactions)}"
             f"\nCONTEXT:\n{summary}\n"
@@ -191,5 +199,7 @@ def create_check_caller_history_tool(deps: dict):
             " the caller explicitly says they have called before and asks whether you have"
             " their information."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     return check_caller_history

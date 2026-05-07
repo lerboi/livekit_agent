@@ -58,11 +58,13 @@ def create_capture_lead_tool(deps: dict):
         supabase = deps["supabase"]
 
         if not tenant_id:
-            return (
+            state = (
                 "STATE:lead_capture_failed reason=no_tenant_id"
                 " | DIRECTIVE:apologize briefly; tell the caller someone will follow up; do not"
                 " attempt to capture again."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Compute mid-call duration from start_timestamp (milliseconds) (avoids 15s filter issue)
         start_timestamp = deps.get("start_timestamp") or int(time.time() * 1000)
@@ -104,11 +106,13 @@ def create_capture_lead_tool(deps: dict):
         if not call_uuid:
             # Background db_task hasn't written the calls row yet — rare; fail closed
             # for this tool since record_call_outcome RPC requires a valid call UUID.
-            return (
+            state = (
                 "STATE:lead_capture_failed reason=call_not_ready"
                 " | DIRECTIVE:apologize briefly; tell the caller someone will follow up;"
                 " do not attempt to capture again."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         try:
             # Phase 59 D-10 inquiry path: appointment_id=None → record_call_outcome
@@ -145,32 +149,40 @@ def create_capture_lead_tool(deps: dict):
             # the strings themselves are NEVER spoken aloud verbatim.
             formatted_address_for_return = validation_result.get("formatted_address")
             if validation_verdict == "confirmed":
-                return (
+                state = (
                     f"LEAD CAPTURED [verdict=validated]: relay normalized address "
                     f"[{formatted_address_for_return}] as confirmed; "
                     f"ask if anything else is needed"
                 )
+                deps["_last_tool_state"] = state
+                return state
             elif validation_verdict == "confirmed_with_changes":
-                return (
+                state = (
                     f"LEAD CAPTURED [verdict=validated_with_corrections]: relay normalized address "
                     f"[{formatted_address_for_return}] as the final form, "
                     f"explicitly invite caller confirmation; "
                     f"if caller corrects, accept correction and re-read full address"
                 )
+                deps["_last_tool_state"] = state
+                return state
             else:
                 # unconfirmed | error | skipped | unsupported_region
-                return (
+                state = (
                     "LEAD CAPTURED [verdict=unvalidated]: relay address as caller spoke it; "
                     "do NOT claim \"validated\", \"confirmed against records\", or "
                     "\"looked up your address\""
                 )
+                deps["_last_tool_state"] = state
+                return state
 
         except Exception as err:
             logger.error("[agent] capture_lead error: %s", str(err))
-            return (
+            state = (
                 "STATE:lead_capture_failed reason=db_error"
                 " | DIRECTIVE:apologize briefly; assure the caller that someone will follow up;"
                 " do not attempt to capture again in this call."
             )
+            deps["_last_tool_state"] = state
+            return state
 
     return capture_lead

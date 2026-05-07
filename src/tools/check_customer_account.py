@@ -127,6 +127,9 @@ def create_check_customer_account_tool(deps: dict):
             bool(ctx),
             list((ctx or {}).get("_sources", {}).values()) if ctx else [],
         )
+        # Phase 61.3 D-05: capture STATE+DIRECTIVE for cascade-recovery replay.
+        if isinstance(deps, dict):
+            deps["_last_tool_state"] = result
         return result
 
     return check_customer_account
