@@ -119,13 +119,26 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
 
     session.on("agent_state_changed", _on_state_change)
 
-    def _on_tools_executed(_event):
+    def _on_tools_executed(event):
         # Phase 61.2 Fix B: a fresh tool execution during the mute window
         # means we are inside a recovery generation step (Gemini retried after
         # a server cancel). Reset the listener so the unmute waits for the
         # NEW generation's clean speak/listen cycle, not the cancelled one.
         try:
             saw_fresh_speaking[0] = False
+        except Exception:
+            pass
+        # Phase 61.3 D-05: capture last function-call call_id + name for the
+        # cascade-recovery replay path (consumed by _attempt_tool_result_replay
+        # added in Plan 03). FunctionToolsExecutedEvent.function_calls is a
+        # list[FunctionCall]; use the most recent entry. Best-effort — null
+        # guards in the replay helper handle missing keys.
+        try:
+            fcs = getattr(event, "function_calls", None) or []
+            if fcs:
+                last_fc = fcs[-1]
+                deps["_last_tool_call_id"] = getattr(last_fc, "call_id", None)
+                deps["_last_tool_name"] = getattr(last_fc, "name", None)
         except Exception:
             pass
 
