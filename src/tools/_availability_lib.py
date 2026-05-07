@@ -157,7 +157,18 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
             # Phase 61.3 D-03/D-05/D-06: stall-detection + best-effort tool-result
             # replay BEFORE listener cleanup and BEFORE set_audio_enabled(True).
             # Closes the slot-hallucination cascade (call AJ_5NcSoiaZGZTJ).
-            await _attempt_tool_result_replay(deps, session, mute_set_at_ms)
+            #
+            # Phase 61.3-amend: pass `saw_fresh_speaking[0]` as the primary
+            # stall signal. The audio-frame check alone produced a false-negative
+            # in call AJ_b8ACLgXZ4XZA (2026-05-07): residual frames from the
+            # pre-mute filler stamped `last_audio_frame_at` ~15ms AFTER
+            # `mute_set_at_ms`, so `stall_confirmed` was False and recovery was
+            # silently skipped. The state-change flag is a clean monotonic
+            # signal — True iff Gemini has actually started a new speak turn
+            # AFTER mute.
+            await _attempt_tool_result_replay(
+                deps, session, mute_set_at_ms, saw_fresh_speaking[0]
+            )
 
         # Best-effort listener removal. AgentSession is a pyee EventEmitter
         # subclass; both `off` and `remove_listener` are accepted depending
@@ -189,33 +200,49 @@ async def _attempt_tool_result_replay(
     deps: dict,
     session,
     mute_set_at_ms: int,
+    saw_fresh_speaking: bool = False,
 ) -> None:
     """Phase 61.3 cascade-recovery: replay the last tool's STATE+DIRECTIVE
     string as a synthetic FunctionCallOutput via update_chat_ctx after a
     confirmed Gemini-server stall.
 
     Triggered from _unmute_logic()'s TimeoutError branch when the 25s
-    fallback fires. Stall is confirmed when no audio frames advanced
-    during the mute window (D-04). Recovery fires BEFORE the input
-    unmute (D-06). All actions are best-effort (D-07): any failure logs
-    and increments stalled_generation_replay_failed.
+    fallback fires. Stall is confirmed when the agent has NOT freshly
+    transitioned listening→speaking after mute (D-04). Recovery fires
+    BEFORE the input unmute (D-06). All actions are best-effort (D-07):
+    any failure logs and increments stalled_generation_replay_failed.
 
     The tool_results send at realtime_api.py:637-638 is unconditional —
     not gated on mutable_chat_context — so this works on
     gemini-3.1-flash-live-preview despite mutable_chat_context=False.
 
     See 61.3-RESEARCH.md § 1, § 2, § 5, § 6 for accessor + API shape.
+
+    Phase 61.3-amend (call AJ_b8ACLgXZ4XZA, 2026-05-07): the original
+    predicate `last_audio_frame_at <= mute_set_at_ms` produced a
+    false-negative when the agent finished a "let me check…" filler
+    in the 15-30ms after `mute_set_at_ms`. Residual frames from that
+    filler stamped `last_audio_frame_at` AFTER mute → stall_confirmed
+    became False → recovery silently skipped → caller heard the cascade.
+    Fix: `saw_fresh_speaking` (closure flag from `_on_state_change`)
+    is the truth source. The audio-frame check is retained with a 250ms
+    grace as belt-and-braces — both must indicate quiescence to confirm
+    a stall.
     """
     diag = deps.get("_diag_record")
 
-    # D-04: stall confirmation — no audio frames advanced since mute.
+    # D-04 (61.3-amend): stall confirmation — no fresh agent speak transition
+    # AND no audio frames during the mute window (with grace for filler residue).
+    GRACE_MS = 250
     last_frame_ms = diag[0].get("last_audio_frame_at") if diag else None
-    stall_confirmed = (
-        last_frame_ms is None or last_frame_ms <= mute_set_at_ms
+    audio_quiescent = (
+        last_frame_ms is None or last_frame_ms <= mute_set_at_ms + GRACE_MS
     )
+    stall_confirmed = (not saw_fresh_speaking) and audio_quiescent
     if not stall_confirmed:
-        # Audio progressed — Gemini did speak; this is not the cascade
-        # failure mode 61.3 targets. Skip replay.
+        # Either Gemini freshly entered a speak turn after mute (saw_fresh_speaking)
+        # or audio frames advanced past the residual-filler grace window —
+        # this is not the cascade failure mode 61.3 targets. Skip replay.
         return
 
     # Pull last tool's STATE string + call_id + name (populated by Plan 01).
