@@ -86,6 +86,10 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
 
     try:
         session.input.set_audio_enabled(False)
+        # Phase 61.3 D-04: capture mute timestamp so the fallback branch can
+        # detect stall (no audio frames advanced during speaking window).
+        # Closure-captured by _unmute_logic — read-only there, no nonlocal needed.
+        mute_set_at_ms = int(_time.time() * 1000)
         logger.info("[tool_mute] muted input id=%d fallback=%.1fs", mute_id, fallback_s)
     except Exception as e:
         logger.warning("[tool_mute] failed to mute: %s", e)
