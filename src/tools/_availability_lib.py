@@ -154,6 +154,10 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
             unmute_reason = "agent finished speaking"
         except asyncio.TimeoutError:
             unmute_reason = f"fallback timeout {fallback_s:.1f}s"
+            # Phase 61.3 D-03/D-05/D-06: stall-detection + best-effort tool-result
+            # replay BEFORE listener cleanup and BEFORE set_audio_enabled(True).
+            # Closes the slot-hallucination cascade (call AJ_5NcSoiaZGZTJ).
+            await _attempt_tool_result_replay(deps, session, mute_set_at_ms)
 
         # Best-effort listener removal. AgentSession is a pyee EventEmitter
         # subclass; both `off` and `remove_listener` are accepted depending
@@ -179,6 +183,93 @@ def mute_input_during_tool(deps: dict, fallback_s: float = _TOOL_MUTE_FALLBACK_S
                         mute_id, deps.get("_tool_mute_id"), unmute_reason)
 
     asyncio.create_task(_unmute_logic())
+
+
+async def _attempt_tool_result_replay(
+    deps: dict,
+    session,
+    mute_set_at_ms: int,
+) -> None:
+    """Phase 61.3 cascade-recovery: replay the last tool's STATE+DIRECTIVE
+    string as a synthetic FunctionCallOutput via update_chat_ctx after a
+    confirmed Gemini-server stall.
+
+    Triggered from _unmute_logic()'s TimeoutError branch when the 25s
+    fallback fires. Stall is confirmed when no audio frames advanced
+    during the mute window (D-04). Recovery fires BEFORE the input
+    unmute (D-06). All actions are best-effort (D-07): any failure logs
+    and increments stalled_generation_replay_failed.
+
+    The tool_results send at realtime_api.py:637-638 is unconditional —
+    not gated on mutable_chat_context — so this works on
+    gemini-3.1-flash-live-preview despite mutable_chat_context=False.
+
+    See 61.3-RESEARCH.md § 1, § 2, § 5, § 6 for accessor + API shape.
+    """
+    diag = deps.get("_diag_record")
+
+    # D-04: stall confirmation — no audio frames advanced since mute.
+    last_frame_ms = diag[0].get("last_audio_frame_at") if diag else None
+    stall_confirmed = (
+        last_frame_ms is None or last_frame_ms <= mute_set_at_ms
+    )
+    if not stall_confirmed:
+        # Audio progressed — Gemini did speak; this is not the cascade
+        # failure mode 61.3 targets. Skip replay.
+        return
+
+    # Pull last tool's STATE string + call_id + name (populated by Plan 01).
+    state_str = deps.get("_last_tool_state")
+    call_id = deps.get("_last_tool_call_id")
+    tool_name = deps.get("_last_tool_name")
+    if not (state_str and call_id and tool_name):
+        # No tool result available to replay — skip silently.
+        return
+
+    # D-08 conditional-emit: increment recovery-attempt counter.
+    if diag:
+        diag[0]["stalled_generation_recoveries"] = (
+            diag[0].get("stalled_generation_recoveries", 0) + 1
+        )
+
+    try:
+        # D-05: accessor chain to the underlying RealtimeSession.
+        # session._activity may be None if the session is closing.
+        rt_session = None
+        if session._activity is not None:
+            rt_session = session._activity.realtime_llm_session
+        if rt_session is None:
+            raise RuntimeError("no active rt_session for replay")
+
+        # D-05: construct the synthetic FunctionCallOutput.
+        # Local import keeps module load light and avoids circular import risk.
+        from livekit.agents import llm as _llm
+        synthetic_output = _llm.FunctionCallOutput(
+            call_id=call_id,
+            name=tool_name,
+            output=state_str,
+            is_error=False,
+        )
+
+        # D-05: send via update_chat_ctx — the tool_results path at
+        # realtime_api.py:637-638 sends unconditionally.
+        chat_ctx = rt_session.chat_ctx.copy()
+        chat_ctx.items.append(synthetic_output)
+        await rt_session.update_chat_ctx(chat_ctx)
+
+        logger.info(
+            "[tool_mute] stall-recovery replay sent id=%d tool=%s state=%.80s",
+            deps.get("_tool_mute_id", 0), tool_name, state_str,
+        )
+
+    except Exception as e:
+        # D-07 best-effort: log + increment failure counter, do not
+        # block the call on replay failure.
+        logger.warning("[tool_mute] stall-recovery replay failed: %s", e)
+        if diag:
+            diag[0]["stalled_generation_replay_failed"] = (
+                diag[0].get("stalled_generation_replay_failed", 0) + 1
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
