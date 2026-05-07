@@ -708,6 +708,55 @@ def _build_repeat_caller_section(onboarding_complete: bool) -> str:
     return ""
 
 
+def _build_caller_history_section(caller_history: dict | None) -> str:
+    """Phase 62: inject pre-fetched caller history into the system prompt
+    so the agent never needs to invoke check_caller_history at call start.
+
+    The original eager-invoke pattern ('Invoke after greeting, before
+    first question' in the tool description) caused a 3-5s silent gap on
+    every call's first turn — caller spoke, tool fired, input muted while
+    the Supabase round-trip ran. Call AJ_bFP3MLdqnKqT (2026-05-07)
+    surfaced this as the dominant first-turn UX issue.
+
+    Now the agent entrypoint runs `fetch_caller_history` in parallel with
+    `customer_context` BEFORE session.start(), and the result lands here
+    as a STATE+DIRECTIVE block. The check_caller_history tool stays
+    available for mid-call queries (e.g., 'do you have my info?') but is
+    no longer the agent's mandatory first action.
+
+    Block is omitted entirely when:
+        - caller_history is None (fetch failed — same fail-soft behavior
+          as the original tool's history_lookup_failed STATE).
+        - caller_history is {} (first-time caller — no useful info to
+          surface and the directive of "do not mention they're new"
+          already governs the natural flow).
+
+    For repeat callers with any data, the same STATE+DIRECTIVE string
+    that the tool would return is embedded directly in the system prompt.
+
+    Locale-neutral by design: matches the customer_account precedent
+    (P56) — the inner STATE block is structured data the model treats
+    as a directive, not caller-facing prose. Translating it would
+    complicate the tool's mid-call return semantics (the tool returns
+    the same English STATE string regardless of locale). The locale
+    parity tests on _build_language_section / _build_info_gathering_section
+    are unaffected because this section is conditionally injected and
+    not part of the default-locale shape comparison.
+    """
+    if not caller_history:
+        return ""
+
+    # Local import avoids circular import at module load.
+    from .tools.check_caller_history import format_caller_history_state
+
+    state_directive = format_caller_history_state(caller_history)
+
+    return (
+        "CALLER HISTORY (silent context):\n"
+        f"{state_directive}"
+    )
+
+
 def _build_customer_account_section(
     customer_context: dict | None, locale: str = "en"
 ) -> str:
@@ -1362,6 +1411,7 @@ def build_system_prompt(
     working_hours: dict | None = None,
     tenant_timezone: str = "America/Chicago",
     customer_context: dict | None = None,
+    caller_history: dict | None = None,
 ) -> str:
     """
     Build the full system prompt for the Gemini Live voice agent.
@@ -1406,6 +1456,7 @@ def build_system_prompt(
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t, locale),
         _build_repeat_caller_section(onboarding_complete),
+        _build_caller_history_section(caller_history),
         _build_customer_account_section(customer_context, locale),
         _build_info_gathering_section(t, postal_label, locale),
         _build_intake_questions_section(intake_questions, locale),

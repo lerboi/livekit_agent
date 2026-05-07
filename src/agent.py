@@ -289,25 +289,61 @@ async def entrypoint(ctx: JobContext):
         # 2.5s budget; on timeout/error for either, that half silent-skips
         # (Sentry-logged with hashed phone, not raw PII). On BOTH-miss the
         # block is omitted entirely (D-11).
+        #
+        # Phase 62: caller_history (Voco's own customers/jobs/inquiries/
+        # appointments tables) is fetched IN PARALLEL with customer_context.
+        # Pre-session injection eliminates the 3-5s first-turn silent gap
+        # caused by the prior eager-invoke check_caller_history pattern
+        # (call AJ_bFP3MLdqnKqT, 2026-05-07). Both fetches share the same
+        # 2.5s budget — completion happens during greeting playout (~5-7s)
+        # so caller-perceived latency is zero.
         customer_context = None
+        caller_history = None
         if tenant_id:
-            # P56 UAT Test 4 instrumentation: log elapsed + source-provider
-            # presence (no PII). Used to verify concurrent-fetch latency
-            # stays inside the 2.5s budget when both Jobber + Xero are
-            # connected and the system prompt receives both provider
-            # markers.
+            from .tools.check_caller_history import fetch_caller_history
+
+            async def _fetch_caller_history_bounded():
+                if not from_number:
+                    return None
+                try:
+                    return await asyncio.wait_for(
+                        fetch_caller_history(
+                            supabase, tenant_id, from_number, tenant_timezone
+                        ),
+                        timeout=2.5,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[agent] caller_history fetch timeout — proceeding without"
+                    )
+                    return None
+                except Exception as e:
+                    logger.warning(
+                        "[agent] caller_history fetch failed: %s — proceeding without", e
+                    )
+                    return None
+
             _ctx_t0 = time.perf_counter()
-            customer_context = await fetch_merged_customer_context_bounded(
-                tenant_id, from_number, timeout_seconds=2.5
+            customer_context, caller_history = await asyncio.gather(
+                fetch_merged_customer_context_bounded(
+                    tenant_id, from_number, timeout_seconds=2.5
+                ),
+                _fetch_caller_history_bounded(),
             )
             _ctx_elapsed = time.perf_counter() - _ctx_t0
             _sources = (customer_context or {}).get("_sources") or {}
             _unique_providers = sorted(set(_sources.values()))
+            _history_state = (
+                "repeat_caller" if caller_history else
+                ("first_time_caller" if caller_history == {} else "none")
+            )
             logger.info(
-                "[agent] customer_context fetch elapsed=%.3fs providers=%s field_sources=%s",
+                "[agent] customer_context+caller_history fetch elapsed=%.3fs "
+                "providers=%s field_sources=%s history=%s",
                 _ctx_elapsed,
                 _unique_providers or "none",
                 _sources or "{}",
+                _history_state,
             )
 
         # Phase 63.1: hoist intake_questions fetch BEFORE session.start().
@@ -345,6 +381,7 @@ async def entrypoint(ctx: JobContext):
             working_hours=tenant.get("working_hours") if tenant else None,
             tenant_timezone=tenant_timezone,
             customer_context=customer_context,
+            caller_history=caller_history,
         )
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
         system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
@@ -418,6 +455,13 @@ async def entrypoint(ctx: JobContext):
             # missed / timed out — check_customer_account tool returns the
             # locked no_customer_match_for_phone string in that case.
             "customer_context": customer_context,
+            # Phase 62: pre-fetched caller history from Voco's own
+            # customers/jobs/inquiries/appointments tables. Same 2.5s budget,
+            # parallel with customer_context. None means fetch failed/empty.
+            # Already injected into the system prompt via
+            # _build_caller_history_section — exposed here for any future
+            # tool/handler that needs the structured dict.
+            "caller_history": caller_history,
         }
         tools = create_tools(deps)
 
