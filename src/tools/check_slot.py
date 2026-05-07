@@ -96,7 +96,9 @@ def create_check_slot_tool(deps: dict):
                 "[63.1-DIAG] check_slot EXCEPTION id=%s elapsed_ms=%d err=%s",
                 call_id, int((_time.time() - t0) * 1000), repr(exc),
             )
-            return "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            state = "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            deps["_last_tool_state"] = state
+            return state
 
     return check_slot
 
@@ -104,40 +106,54 @@ def create_check_slot_tool(deps: dict):
 async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
     tenant_id = deps.get("tenant_id")
     if not tenant_id:
-        return "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
 
     if not date or not time_str:
         # Schema makes this unreachable from Gemini, but belt-and-braces.
-        return "STATE:missing_args | DIRECTIVE:ask the caller for a specific date and time."
+        state = "STATE:missing_args | DIRECTIVE:ask the caller for a specific date and time."
+        deps["_last_tool_state"] = state
+        return state
 
     tenant = await ensure_tenant(deps)
     if not tenant:
-        return "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
     tenant_timezone = tenant.get("tenant_timezone") or "UTC"
     slot_duration = tenant.get("slot_duration_mins") or 60
 
     today_local = tenant_today(tenant_timezone)
     if date < today_local:
-        return (
+        state = (
             f"STATE:past_date requested={date} today={today_local}"
             " | DIRECTIVE:ask for today or later; do not fabricate times."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     requested_utc = parse_hhmm_to_utc(time_str, date, tenant_timezone)
     if requested_utc is None:
-        return "STATE:bad_time_format | DIRECTIVE:ask the caller to restate the time (e.g. '2 PM' or '14:00')."
+        state = "STATE:bad_time_format | DIRECTIVE:ask the caller to restate the time (e.g. '2 PM' or '14:00')."
+        deps["_last_tool_state"] = state
+        return state
 
     now_utc = datetime.now(timezone.utc)
     if requested_utc < now_utc + timedelta(hours=1) and date == today_local:
         speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
-        return (
+        state = (
             f"STATE:too_soon requested={speech} min_notice=1h"
             " | DIRECTIVE:tell the caller that time is too soon (one hour minimum); ask for later today or another day."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     sched = await fetch_scheduling_data(deps)
     if sched is None:
-        return "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
 
     all_slots = calc_slots_for_dates(tenant, [date], sched, tenant_timezone)
     requested_end = requested_utc + timedelta(minutes=slot_duration)
@@ -166,10 +182,12 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
             "time": time_str,
             "slot_token": token,
         })
-        return (
+        state = (
             f"STATE:slot_ok token={token} speech={speech}"
             " | DIRECTIVE:offer the time, ask to book. Pass this token to book_appointment."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     # Not available — closest 3 alternatives same day.
     nearby = []
@@ -192,10 +210,12 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
             "date": date,
             "time": time_str,
         })
-        return (
+        state = (
             f"STATE:day_empty requested={requested_speech} date_label={date_label} business_name={biz}"
             " | DIRECTIVE:tell the caller nothing is open that day; offer another day or capture_lead."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     # Alternatives branch: no single "last offered" — caller must pick.
     deps.pop("_last_offered_token", None)
@@ -216,8 +236,10 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
         "time": time_str,
         "slot_tokens": alt_tokens,
     })
-    return (
+    state = (
         f"STATE:slot_taken requested={requested_speech} alts={len(closest)}"
         f" | ALTS: {'; '.join(alt_parts)}"
         " | DIRECTIVE:offer one or two alternatives; ask which they want; pass that alt's token to book_appointment."
     )
+    deps["_last_tool_state"] = state
+    return state

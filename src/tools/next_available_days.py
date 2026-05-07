@@ -59,37 +59,49 @@ def create_next_available_days_tool(deps: dict):
             return result
         except Exception as exc:
             logger.error("[63.1-DIAG] next_available_days EXCEPTION id=%s err=%s", call_id, repr(exc))
-            return "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            state = "STATE:lookup_failed | DIRECTIVE:apologize briefly; offer capture_lead; do not retry."
+            deps["_last_tool_state"] = state
+            return state
 
     return next_available_days
 
 
 async def _impl(deps: dict) -> str:
     if not deps.get("tenant_id"):
-        return "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=no_tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
 
     tenant = await ensure_tenant(deps)
     if not tenant:
-        return "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=tenant | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
     tenant_timezone = tenant.get("tenant_timezone") or "UTC"
 
     sched = await fetch_scheduling_data(deps)
     if sched is None:
-        return "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        state = "STATE:lookup_failed reason=scheduling_data | DIRECTIVE:apologize briefly; offer capture_lead."
+        deps["_last_tool_state"] = state
+        return state
 
     dates = next_n_local_dates(3, tenant_timezone)
     all_slots = calc_slots_for_dates(tenant, dates, sched, tenant_timezone)
 
     if all_slots:
         log_tool_call(deps, {"name": "next_available_days", "success": True, "result": "has_slots"})
-        return (
+        state = (
             "STATE:has_near_availability"
             " | DIRECTIVE:tell the caller we have openings soon; ask them to name a specific day; do not mention times."
         )
+        deps["_last_tool_state"] = state
+        return state
 
     biz = tenant.get("business_name") or "the team"
     log_tool_call(deps, {"name": "next_available_days", "success": True, "result": "empty"})
-    return (
+    state = (
         f"STATE:no_near_availability business_name={biz}"
         " | DIRECTIVE:tell the caller the next few days look full; offer capture_lead so they can call back."
     )
+    deps["_last_tool_state"] = state
+    return state
