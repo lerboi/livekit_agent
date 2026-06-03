@@ -282,6 +282,10 @@ async def validate_address(
             raw_status=None,
         )
 
+    if region_code.upper() not in SUPPORTED_REGION_CODES:
+        logger.info("[phase61] region_code=%s not supported — verdict=skipped", region_code)
+        return _voco_result(verdict="skipped", latency_ms=0, raw_status=None)
+
     # WR-02 (Phase 61.1): short-circuit empty / whitespace-only address_lines
     # BEFORE the HTTP call. Without this guard, Google returns 400
     # INVALID_ARGUMENT and `_is_unsupported_region_400` matches the

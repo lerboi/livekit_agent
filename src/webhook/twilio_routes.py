@@ -90,13 +90,13 @@ async def _insert_owner_pickup_call(
     from src.supabase_client import get_supabase_admin
 
     def _insert():
-        return get_supabase_admin().table("calls").insert({
+        return get_supabase_admin().table("calls").upsert({
             "tenant_id": tenant_id,
             "call_sid": call_sid,
             "from_number": from_number,
             "to_number": to_number,
             "routing_mode": "owner_pickup",
-        }).execute()
+        }, on_conflict="call_sid").execute()
 
     await asyncio.to_thread(_insert)
 

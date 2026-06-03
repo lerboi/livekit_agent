@@ -23,6 +23,8 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
 SUPPORTED_LANGUAGES = {"en", "es", "zh", "ms", "ta", "vi"}
 
+MIN_BILLABLE_DURATION_SEC = 15
+
 
 async def run_post_call_pipeline(params: dict):
     supabase = params["supabase"]
@@ -132,7 +134,7 @@ async def run_post_call_pipeline(params: dict):
             print(f"[post-call] Test call auto-cancel error: {e}")
 
     # ── 4. Usage tracking ──
-    if not is_test_call and tenant_id and duration_seconds >= 10:
+    if not is_test_call and tenant_id and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
         try:
             usage_resp = await asyncio.to_thread(
                 lambda: supabase.rpc("increment_calls_used", {
@@ -154,7 +156,7 @@ async def run_post_call_pipeline(params: dict):
                     try:
                         sub_resp = await asyncio.to_thread(
                             lambda: supabase.table("subscriptions")
-                            .select("overage_stripe_item_id")
+                            .select("stripe_customer_id, overage_stripe_item_id")
                             .eq("tenant_id", tenant_id)
                             .eq("is_current", True)
                             .limit(1)
@@ -162,16 +164,21 @@ async def run_post_call_pipeline(params: dict):
                         )
                         sub = sub_resp.data[0] if sub_resp.data else None
 
-                        if sub and sub.get("overage_stripe_item_id"):
-                            item_id = sub["overage_stripe_item_id"]
+                        if sub and sub.get("stripe_customer_id"):
+                            customer_id = sub["stripe_customer_id"]
                             client = stripe.StripeClient(os.environ.get("STRIPE_SECRET_KEY"))
+                            # DEPLOY-CHECK: requires a Stripe Billing Meter named "voco_calls"
+                            # with customer_mapping key "stripe_customer_id" and value key "value".
                             await asyncio.to_thread(
-                                lambda: client.subscription_items.create_usage_record(
-                                    item_id,
-                                    params={"quantity": 1, "action": "increment"},
+                                lambda: client.billing.meter_events.create(
+                                    params={
+                                        "event_name": "voco_calls",
+                                        "payload": {"value": "1", "stripe_customer_id": customer_id},
+                                        "identifier": f"overage_{call_id}",
+                                    }
                                 )
                             )
-                            print(f"[post-call] Overage reported to Stripe: tenant={tenant_id}")
+                            print(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
                     except Exception as overage_err:
                         print(f"[post-call] Stripe overage report failed (non-fatal): {overage_err}")
         except Exception as e:
@@ -220,7 +227,7 @@ async def run_post_call_pipeline(params: dict):
     caller_name = None
     job_type = None
     lead: dict | None = None  # shape-compat dict for Section 10 notification block
-    if call_uuid and duration_seconds >= 15:
+    if call_uuid and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
         try:
             # Prefer the caller_name captured at booking time (verified by the AI)
             # over the regex fallback, which has a high false-positive rate on

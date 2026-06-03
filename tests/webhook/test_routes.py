@@ -350,9 +350,14 @@ def test_owner_pickup_twiml_structure(client_no_auth, monkeypatch):
 
 
 def test_owner_pickup_inserts_calls_row(client_no_auth, monkeypatch):
-    """Verify owner_pickup routing inserts a calls row with call_sid and routing_mode."""
-    insert_mock = MagicMock()
-    insert_mock.execute.return_value = MagicMock(data=[{"id": "call-1"}])
+    """Verify owner_pickup routing upserts a calls row with call_sid and routing_mode.
+
+    The write is now an idempotent upsert (on_conflict='call_sid') so Twilio
+    webhook retries update-in-place instead of inserting duplicate rows
+    (relies on the UNIQUE(call_sid) migration).
+    """
+    upsert_mock = MagicMock()
+    upsert_mock.execute.return_value = MagicMock(data=[{"id": "call-1"}])
 
     tenant = {
         "id": "t-insert",
@@ -368,8 +373,8 @@ def test_owner_pickup_inserts_calls_row(client_no_auth, monkeypatch):
         schedule_decision=ScheduleDecision(mode="owner_pickup", reason="inside_window"),
         cap_ok=True,
     )
-    # Wire the insert mock
-    mock_sb.table.return_value.insert.return_value = insert_mock
+    # Wire the upsert mock
+    mock_sb.table.return_value.upsert.return_value = upsert_mock
 
     resp = client_no_auth.post(
         "/twilio/incoming-call",
@@ -378,13 +383,14 @@ def test_owner_pickup_inserts_calls_row(client_no_auth, monkeypatch):
     assert resp.status_code == 200
     assert "<Dial" in resp.text
 
-    # Verify insert was called with correct data
-    insert_call = mock_sb.table.return_value.insert
-    assert insert_call.called
-    insert_args = insert_call.call_args[0][0]
-    assert insert_args["tenant_id"] == "t-insert"
-    assert insert_args["call_sid"] == "CA0007"
-    assert insert_args["routing_mode"] == "owner_pickup"
+    # Verify upsert was called with correct data + on_conflict
+    upsert_call = mock_sb.table.return_value.upsert
+    assert upsert_call.called
+    upsert_args = upsert_call.call_args[0][0]
+    assert upsert_args["tenant_id"] == "t-insert"
+    assert upsert_args["call_sid"] == "CA0007"
+    assert upsert_args["routing_mode"] == "owner_pickup"
+    assert upsert_call.call_args.kwargs["on_conflict"] == "call_sid"
 
 
 # ---------- Phase 40-02 — dial-status and dial-fallback tests ----------
@@ -747,12 +753,13 @@ def _make_vip_supabase_mock(tenant_data, *, subscriptions=None, vip_lead_found=F
     leads_chain.eq.return_value = leads_chain
     leads_chain.select.return_value = leads_chain
 
-    # Insert chain for _insert_owner_pickup_call
+    # Insert chain for _insert_owner_pickup_call (now an idempotent upsert)
     insert_response = MagicMock()
     insert_response.data = [{"id": "call-1"}]
     insert_chain = MagicMock()
     insert_chain.execute.return_value = insert_response
     insert_chain.insert.return_value = insert_chain
+    insert_chain.upsert.return_value = insert_chain
 
     supabase = MagicMock()
 

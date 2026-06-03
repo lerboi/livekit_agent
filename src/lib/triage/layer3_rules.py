@@ -37,10 +37,11 @@ async def apply_owner_rules(
                 break
 
     if not matched_tag:
-        if len(services) == 1:
-            matched_tag = services[0]["urgency_tag"]
-        else:
-            matched_tag = base_urgency
+        # Only adopt a service's urgency_tag when the call content actually matched
+        # that service (detected_service). Previously a single-service tenant
+        # auto-adopted its one service's tag on EVERY call, over-escalating routine
+        # calls. layer1 keywords + layer2 LLM remain the emergency floor.
+        matched_tag = base_urgency
 
     base_severity = SEVERITY.get(base_urgency, 1)
     tag_severity = SEVERITY.get(matched_tag, 1)

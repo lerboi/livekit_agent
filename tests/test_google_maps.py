@@ -212,7 +212,12 @@ async def test_validate_address_bounded_returns_skipped_when_no_api_key(monkeypa
 async def test_validate_address_bounded_returns_unsupported_region_on_400(
     monkeypatch, gmaps_fixture
 ):
-    """HTTP 400 with INVALID_ARGUMENT/regionCode → verdict='unsupported_region' (D-A3)."""
+    """HTTP 400 with INVALID_ARGUMENT/regionCode → verdict='unsupported_region' (D-A3).
+
+    Uses region_code='US' (a SUPPORTED region) so the input-region short-circuit
+    does NOT fire; this exercises the `_is_unsupported_region_400` body-match path
+    (Google itself returns a region 400 even for a region we accept as input).
+    """
     gm = _import_module()
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
 
@@ -223,7 +228,7 @@ async def test_validate_address_bounded_returns_unsupported_region_on_400(
         result = await gm.validate_address_bounded(
             tenant_id="t1",
             call_id="c1",
-            region_code="DE",
+            region_code="US",
             address_lines=["Some street"],
             supabase=None,
         )
@@ -319,13 +324,38 @@ async def test_sentry_NOT_called_on_unsupported_region(monkeypatch, gmaps_fixtur
         result = await gm.validate_address_bounded(
             tenant_id="t1",
             call_id="c1",
-            region_code="DE",
+            region_code="US",
             address_lines=["Some street"],
             supabase=None,
         )
 
     assert result["verdict"] == "unsupported_region"
     assert mock_sentry.capture_exception.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_validate_address_skipped_for_unsupported_region(monkeypatch):
+    """An unsupported INPUT region (e.g. DE) → verdict='skipped' with NO HTTP call.
+
+    The input-region short-circuit fires before any network I/O, so httpx.AsyncClient.post
+    must never be invoked (no billing, no Sentry, no latency).
+    """
+    gm = _import_module()
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+
+    mock_post = AsyncMock()
+
+    with patch("httpx.AsyncClient.post", mock_post):
+        result = await gm.validate_address_bounded(
+            tenant_id="t1",
+            call_id="c1",
+            region_code="DE",
+            address_lines=["Some valid street 123"],
+            supabase=None,
+        )
+
+    assert result["verdict"] == "skipped"
+    assert mock_post.call_count == 0
 
 
 # ── Telemetry test (1) — D-C2' ──────────────────────────────────────────────
