@@ -17,6 +17,7 @@ from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
 from ..lib.calendar_push import push_booking_to_calendar
 from ..integrations.google_maps import validate_address_bounded
+from ._availability_lib import mute_input_during_tool
 from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
@@ -264,6 +265,14 @@ def create_book_appointment_tool(deps: dict):
         unit_number = (raw_arguments.get("unit_number") or "").strip()
         urgency = raw_arguments.get("urgency") or "routine"
 
+        # Prevent caller VAD from interrupting Gemini's BLOCKING tool wait
+        # (see _availability_lib.mute_input_during_tool module header).
+        # book_appointment is the longest-blocking tool (address-validation
+        # HTTP + atomic RPC + long readback) and the most exposed to the
+        # Gemini-server VAD cancellation cascade, so it needs the same
+        # structural input-mute that check_slot/check_day/capture_lead use.
+        mute_input_during_tool(deps)
+
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
 
@@ -363,12 +372,14 @@ def create_book_appointment_tool(deps: dict):
                 )
 
         if not slot_start or not slot_end:
-            return (
+            state = (
                 "STATE:booking_invalid reason=missing_slot_fields"
                 " | DIRECTIVE:apologize briefly; call check_slot again for the"
                 " time the caller wants, then call book_appointment with the slot_token"
                 " returned in the STATE line."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Canonicalize slot_start / slot_end to UTC ISO up front. Only applies
         # on the legacy fallback path (no valid token); a resolved token is
@@ -382,20 +393,24 @@ def create_book_appointment_tool(deps: dict):
                 slot_start = _ensure_utc_iso(slot_start)
                 slot_end = _ensure_utc_iso(slot_end)
             except ValueError:
-                return (
+                state = (
                     "STATE:booking_invalid reason=malformed_slot_iso"
                     " | DIRECTIVE:apologize briefly; call check_slot again for the"
                     " same date and time to get a fresh slot, then call book_appointment"
                     " with the slot_token returned in the STATE line."
                 )
+                deps["_last_tool_state"] = state
+                return state
 
         if not tenant_id:
-            return (
+            state = (
                 "STATE:booking_failed reason=no_tenant_id"
                 " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
                 " capture_lead; do not attempt to book again in this call. Do not repeat this"
                 " message text on-air."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Idempotency guard: if this exact slot was already successfully booked earlier
         # in this call, return the cached confirmation without re-running the booking.
@@ -409,6 +424,7 @@ def create_book_appointment_tool(deps: dict):
                 deps.get("call_id"),
                 _slot_key,
             )
+            deps["_last_tool_state"] = cached_response
             return cached_response
 
         # Fetch tenant timezone and config
@@ -466,12 +482,14 @@ def create_book_appointment_tool(deps: dict):
             )
         except Exception as booking_err:
             logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
-            return (
+            state = (
                 "STATE:booking_failed reason=rpc_error"
                 " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
                 " capture_lead; do not attempt to book again in this call. Do not repeat this"
                 " message text on-air."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         if not result.get("success"):
             # Late duplicate guard: if a prior successful booking of THIS EXACT slot
@@ -486,13 +504,15 @@ def create_book_appointment_tool(deps: dict):
                     "[agent] book_appointment: slot_taken after prior success for same slot; returning cached response for call=%s",
                     deps.get("call_id"),
                 )
-                return deps.get(
+                state = deps.get(
                     "_last_booked_slot_response",
                     "STATE:booking_succeeded reason=idempotent_duplicate"
                     " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
                     " read back; do not restate the time; ask if there is anything else before wrapping"
                     " up.",
                 )
+                deps["_last_tool_state"] = state
+                return state
 
             # Slot was taken -- recalculate next available
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -572,13 +592,15 @@ def create_book_appointment_tool(deps: dict):
                 "ts": datetime.now(timezone.utc).isoformat(),
             })
 
-            return (
+            state = (
                 "STATE:slot_taken"
                 f" next_available={next_slot_text}"
                 " | DIRECTIVE:tell the caller that slot was just booked by someone else; offer"
                 " the next available time listed above as an alternative and ask if they want"
                 " to book it."
             )
+            deps["_last_tool_state"] = state
+            return state
 
         # Success — compute and cache the confirmation response SYNCHRONOUSLY before
         # any await. A concurrent duplicate invocation (that lost the race to
@@ -616,6 +638,10 @@ def create_book_appointment_tool(deps: dict):
 
         deps["_last_booked_slot_key"] = _slot_key
         deps["_last_booked_slot_response"] = return_msg
+        # Cascade-recovery parity: _attempt_tool_result_replay re-emits
+        # deps["_last_tool_state"]; set it to this success message so a
+        # post-booking server-cancellation can replay the BOOKED verdict.
+        deps["_last_tool_state"] = return_msg
 
         # Phase-fix (2026-04-23): invalidate the slot_cache so a subsequent
         # check_availability in this call sees the new appointment and will

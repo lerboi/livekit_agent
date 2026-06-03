@@ -433,6 +433,11 @@ async def entrypoint(ctx: JobContext):
             "start_timestamp": start_timestamp,
             "onboarding_complete": onboarding_complete,
             "tenant_timezone": tenant_timezone,
+            # Tenant's ISO country code (e.g. "GB", "AU"). Read by
+            # book_appointment.py / capture_lead.py as the address-validation
+            # region_code; without it those tools always fell back to "US"
+            # for non-US tenants (region defaulted wrong on every non-US call).
+            "country": country,
             "room_name": call_id,
             "sip_participant_identity": sip_participant_identity,
             "call_end_reason": call_end_reason,
@@ -535,6 +540,17 @@ async def entrypoint(ctx: JobContext):
                 thinking_level="low",
                 include_thoughts=False,
             ),
+            # Cascade hardening: opt the Gemini Live session into server-side
+            # session resumption so the ~10-min server connection reset can
+            # reconnect against a resumption handle instead of cold-starting.
+            # The plugin (livekit-plugins-google 1.5.7) stores the new_handle
+            # from every session_resumption_update and re-sends it on each
+            # reconnect via _build_connect_config. NOTE: that build path only
+            # forwards .handle (not .transparent), so transparent=True would be
+            # silently dropped after the first connect — we pass handle=None
+            # (a fresh session whose handle the SDK then maintains), which is
+            # exactly what the plugin threads across reconnects.
+            session_resumption=genai_types.SessionResumptionConfig(handle=None),
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
