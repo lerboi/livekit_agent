@@ -28,7 +28,8 @@ async def classify_call(
 
     if layer1_result["confident"]:
         layer3_result = await apply_owner_rules(
-            supabase, layer1_result["result"], tenant_id, detected_service
+            supabase, layer1_result["result"], tenant_id, detected_service,
+            transcript=transcript,
         )
         final_layer = "layer3" if layer3_result["escalated"] else "layer1"
         return {
@@ -40,7 +41,8 @@ async def classify_call(
     layer2_result = await run_llm_scorer(transcript)
     layer2_urgency = _sanitize_urgency(layer2_result.get("urgency", "routine"))
     layer3_result = await apply_owner_rules(
-        supabase, layer2_urgency, tenant_id, detected_service
+        supabase, layer2_urgency, tenant_id, detected_service,
+        transcript=transcript,
     )
     final_layer = "layer3" if layer3_result["escalated"] else "layer2"
 

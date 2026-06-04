@@ -37,6 +37,11 @@ import httpx
 # admin client at call time AND tests can patch `xero_mod.get_supabase_admin`.
 from ..supabase_client import get_supabase_admin
 from ..lib.telemetry import emit_integration_fetch
+from ._refresh_lock import (
+    acquire_refresh_lock,
+    poll_for_fresh_credential,
+    release_refresh_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +105,17 @@ async def _persist_refreshed_tokens(
     cred_id: str,
     access_token: str,
     refresh_token: str,
-    expiry_date_iso: str,
+    expiry_date_ms: int,
 ) -> None:
     """Write refreshed token set back to accounting_credentials.
 
     Critical — without write-back, the Next.js side sees stale tokens and
     re-refreshes redundantly, racing with us on Xero's refresh-token rotation.
+
+    expiry_date is the BIGINT epoch-MILLISECONDS column (migration 030); the
+    Next.js writer stores ``Date.now() + expires_in*1000``. Writing an ISO
+    string here would be rejected by Postgres (text→bigint, 22P02) and the
+    bare except below would swallow it, so agent-side refreshes never persist.
     """
 
     def _update() -> None:
@@ -116,7 +126,7 @@ async def _persist_refreshed_tokens(
                 {
                     "access_token": access_token,
                     "refresh_token": refresh_token,
-                    "expiry_date": expiry_date_iso,
+                    "expiry_date": expiry_date_ms,
                     "error_state": None,  # heal on success
                 }
             )
@@ -166,12 +176,8 @@ async def _touch_last_context_fetch_at(cred_id: str) -> None:
         pass  # telemetry — silent on failure
 
 
-async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
-    """Returns updated cred dict with fresh access_token, or None on refresh failure."""
-    expiry_epoch = _expiry_to_epoch(cred.get("expiry_date"))
-    if expiry_epoch - _now_ts() > REFRESH_BUFFER_SECONDS:
-        return cred  # still valid
-
+async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+    """Perform the actual HTTP token refresh + persist. Caller holds the lock."""
     client_id = os.environ.get("XERO_CLIENT_ID")
     client_secret = os.environ.get("XERO_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -206,16 +212,59 @@ async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[
         await _persist_refresh_failure(cred["id"])
         return None
 
-    new_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-    await _persist_refreshed_tokens(cred["id"], new_access, new_refresh, new_expiry)
+    # expiry_date is BIGINT epoch-MILLISECONDS (migration 030) — store an int,
+    # NOT an ISO string (would 22P02 on the bigint column and never persist).
+    new_expiry_ms = int(
+        (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).timestamp() * 1000
+    )
+    await _persist_refreshed_tokens(cred["id"], new_access, new_refresh, new_expiry_ms)
 
     return {
         **cred,
         "access_token": new_access,
         "refresh_token": new_refresh,
-        "expiry_date": new_expiry,
+        "expiry_date": new_expiry_ms,
         "error_state": None,
     }
+
+
+async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+    """Returns updated cred dict with fresh access_token, or None on refresh failure.
+
+    Concurrency guard (mirrors adapter.js refreshTokenIfNeeded): acquire the
+    per-(tenant, provider) lease lock before the wire refresh. The winner
+    refreshes + persists + releases; a loser polls the DB for the winner's
+    freshly-persisted token and reuses it. On poll timeout the loser falls back
+    to refreshing itself (logged) — availability beats perfect dedup.
+    """
+    expiry_epoch = _expiry_to_epoch(cred.get("expiry_date"))
+    if expiry_epoch - _now_ts() > REFRESH_BUFFER_SECONDS:
+        return cred  # still valid
+
+    tenant_id = cred.get("tenant_id")
+    holder_id = None
+    if tenant_id:
+        holder_id = await acquire_refresh_lock(tenant_id, "xero")
+        if holder_id is None:
+            # Another refresher won (or lock unavailable). Poll for the winner's
+            # fresh token rather than firing a competing refresh.
+            fresh = await poll_for_fresh_credential(
+                cred["id"],
+                buffer_seconds=REFRESH_BUFFER_SECONDS,
+                expiry_to_epoch=_expiry_to_epoch,
+            )
+            if fresh:
+                return fresh
+            logger.warning(
+                "xero: refresh lock contested for tenant=%s; poll timed out, "
+                "refreshing anyway", tenant_id,
+            )
+
+    try:
+        return await _do_wire_refresh(client, cred)
+    finally:
+        if holder_id and tenant_id:
+            await release_refresh_lock(tenant_id, "xero", holder_id)
 
 
 def _xero_headers(access_token: str, xero_tenant_id: str) -> dict:

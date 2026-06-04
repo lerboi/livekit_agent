@@ -104,9 +104,13 @@ async def test_refresh_persists_new_tokens_on_expired():
     }
 
     persist_mock = AsyncMock()
+    # Win the refresh lock deterministically so we exercise the wire-refresh
+    # (winner) branch rather than the DB-poll (loser) branch.
     with patch.object(xero_mod, "_load_credentials", AsyncMock(return_value=expired_cred)), \
          patch.object(xero_mod, "_persist_refreshed_tokens", persist_mock), \
          patch.object(xero_mod, "_get_contacts_by_phone", AsyncMock(return_value=None)), \
+         patch.object(xero_mod, "acquire_refresh_lock", AsyncMock(return_value="holder-1")), \
+         patch.object(xero_mod, "release_refresh_lock", AsyncMock()), \
          patch.dict("os.environ", {"XERO_CLIENT_ID": "id", "XERO_CLIENT_SECRET": "secret"}), \
          patch("httpx.AsyncClient.post", AsyncMock(return_value=refresh_resp)):
         await xero_mod.fetch_xero_customer_by_phone("tenant-1", "+15551234567")
@@ -116,6 +120,10 @@ async def test_refresh_persists_new_tokens_on_expired():
     assert args[0] == "cred-1"
     assert args[1] == "new"
     assert args[2] == "new-rt"
+    # expiry_date is BIGINT epoch-MILLISECONDS — must be an int, not an ISO str.
+    assert isinstance(args[3], int)
+    # ~now + 1800s in ms; sanity-bound it well past the year-2000 mark.
+    assert args[3] > 1_000_000_000_000
 
 
 @pytest.mark.asyncio
@@ -135,6 +143,8 @@ async def test_refresh_failure_persists_error_state_and_returns_none():
     persist_failure_mock = AsyncMock()
     with patch.object(xero_mod, "_load_credentials", AsyncMock(return_value=expired_cred)), \
          patch.object(xero_mod, "_persist_refresh_failure", persist_failure_mock), \
+         patch.object(xero_mod, "acquire_refresh_lock", AsyncMock(return_value="holder-1")), \
+         patch.object(xero_mod, "release_refresh_lock", AsyncMock()), \
          patch.dict("os.environ", {"XERO_CLIENT_ID": "id", "XERO_CLIENT_SECRET": "secret"}), \
          patch("httpx.AsyncClient.post", AsyncMock(return_value=bad_resp)):
         result = await xero_mod.fetch_xero_customer_by_phone("tenant-1", "+15551234567")

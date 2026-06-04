@@ -36,6 +36,11 @@ import httpx
 # admin client at call time AND tests can patch `jobber_mod.get_supabase_admin`.
 from ..supabase_client import get_supabase_admin
 from ..lib.telemetry import emit_integration_fetch
+from ._refresh_lock import (
+    acquire_refresh_lock,
+    poll_for_fresh_credential,
+    release_refresh_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +167,17 @@ async def _persist_refreshed_tokens(
     cred_id: str,
     access_token: str,
     refresh_token: str,
-    expiry_date_iso: Optional[str],
+    expiry_date_ms: Optional[int],
 ) -> None:
     """Atomic UPDATE: write BOTH access_token AND refresh_token AND expiry_date.
 
     Critical — Jobber rotates refresh_token on every refresh (Pitfall 3).
     Losing the new one = auth break on the next refresh cycle.
+
+    expiry_date is the BIGINT epoch-MILLISECONDS column (migration 030); the
+    Next.js writer stores epoch-ms. Writing an ISO string here would be
+    rejected by Postgres (text→bigint, 22P02) and the bare except below would
+    swallow it, so agent-side refreshes never persist.
     """
     def _update() -> None:
         admin = get_supabase_admin()
@@ -177,7 +187,7 @@ async def _persist_refreshed_tokens(
                 {
                     "access_token": access_token,
                     "refresh_token": refresh_token,
-                    "expiry_date": expiry_date_iso,
+                    "expiry_date": expiry_date_ms,
                     "error_state": None,  # heal on success
                 }
             )
@@ -226,8 +236,8 @@ async def _touch_last_context_fetch_at(cred_id: str) -> None:
         pass
 
 
-async def _refresh_token(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
-    """POST refresh_token grant; persist the NEW token set back.
+async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+    """POST refresh_token grant; persist the NEW token set back. Caller holds lock.
 
     Returns an updated cred dict with fresh access_token + rotated refresh_token
     on success. Returns None on failure (401, 5xx, timeout, missing rotation).
@@ -278,22 +288,55 @@ async def _refresh_token(client: httpx.AsyncClient, cred: dict) -> Optional[dict
         await _persist_refresh_failure(cred["id"])
         return None
 
+    # expiry_date is BIGINT epoch-MILLISECONDS (migration 030). _decode_jwt_exp_ms
+    # already yields epoch-ms — persist it directly; do NOT convert to ISO (would
+    # 22P02 on the bigint column and never persist, breaking the next cycle).
     expiry_ms = _decode_jwt_exp_ms(new_access)
-    expiry_iso = (
-        datetime.fromtimestamp(expiry_ms / 1000, tz=timezone.utc).isoformat()
-        if expiry_ms
-        else None
-    )
 
-    await _persist_refreshed_tokens(cred["id"], new_access, new_refresh, expiry_iso)
+    await _persist_refreshed_tokens(cred["id"], new_access, new_refresh, expiry_ms)
 
     return {
         **cred,
         "access_token": new_access,
         "refresh_token": new_refresh,
-        "expiry_date": expiry_iso,
+        "expiry_date": expiry_ms,
         "error_state": None,
     }
+
+
+async def _refresh_token(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+    """Refresh with the per-(tenant, provider) lease lock (mirrors adapter.js).
+
+    Acquire the lock before the wire refresh. The winner refreshes + persists +
+    releases; a loser polls the DB for the winner's freshly-persisted token and
+    reuses it. On poll timeout the loser refreshes itself (logged). Critical for
+    Jobber's single-use refresh-token rotation: two concurrent refreshers would
+    otherwise orphan one caller's rotated token.
+    """
+    tenant_id = cred.get("tenant_id")
+    holder_id = None
+    if tenant_id:
+        holder_id = await acquire_refresh_lock(tenant_id, "jobber")
+        if holder_id is None:
+            fresh = await poll_for_fresh_credential(
+                cred["id"],
+                # Jobber refreshes on hard expiry (no buffer); accept any
+                # not-yet-expired persisted token from the winner.
+                buffer_seconds=0.0,
+                expiry_to_epoch=_expiry_to_epoch,
+            )
+            if fresh:
+                return fresh
+            logger.warning(
+                "jobber: refresh lock contested for tenant=%s; poll timed out, "
+                "refreshing anyway", tenant_id,
+            )
+
+    try:
+        return await _do_wire_refresh(client, cred)
+    finally:
+        if holder_id and tenant_id:
+            await release_refresh_lock(tenant_id, "jobber", holder_id)
 
 
 # ---- GraphQL request ------------------------------------------------------

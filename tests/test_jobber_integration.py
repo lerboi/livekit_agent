@@ -147,8 +147,11 @@ async def test_refresh_rotation_persists_new_refresh_token():
         return call_seq.pop(0)
 
     persist_mock = AsyncMock()
+    # Win the refresh lock deterministically (winner / wire-refresh branch).
     with patch.object(jobber_mod, "_load_credentials", AsyncMock(return_value=cred)), \
          patch.object(jobber_mod, "_persist_refreshed_tokens", persist_mock), \
+         patch.object(jobber_mod, "acquire_refresh_lock", AsyncMock(return_value="holder-1")), \
+         patch.object(jobber_mod, "release_refresh_lock", AsyncMock()), \
          patch.dict("os.environ", {"JOBBER_CLIENT_ID": "id", "JOBBER_CLIENT_SECRET": "secret"}), \
          patch("httpx.AsyncClient.post", _post):
         await jobber_mod.fetch_jobber_customer_by_phone("tenant-1", "+15551234567")
@@ -156,10 +159,14 @@ async def test_refresh_rotation_persists_new_refresh_token():
     # Assert the write-back received the NEW refresh_token (rotation)
     persist_mock.assert_awaited()
     args = persist_mock.call_args.args
-    # signature: (cred_id, access_token, refresh_token, expiry_iso)
+    # signature: (cred_id, access_token, refresh_token, expiry_date_ms)
     assert args[0] == "cred-1"
     assert args[1] == jwt
     assert args[2] == "rt-NEW-rotated"
+    # expiry_date is BIGINT epoch-MILLISECONDS — must be an int, not an ISO str.
+    # JWT exp=9999999999 (s) → 9999999999000 ms.
+    assert isinstance(args[3], int)
+    assert args[3] == 9999999999000
 
 
 @pytest.mark.asyncio
