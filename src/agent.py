@@ -64,6 +64,31 @@ VOICE_MAP = {
     "local_expert": "alloy",
 }
 
+# Full OpenAI gpt-realtime voice allowlist — kept in sync with the main repo's
+# src/lib/ai-voice-validation.js VALID_VOICES and migration 067's CHECK. An
+# unsupported value (e.g. a stale Gemini-era voice like "Zephyr") passed to
+# RealtimeModel(voice=...) errors the ENTIRE session at the OpenAI handshake,
+# so the stored voice is validated against this set before use.
+OPENAI_VOICES = frozenset({
+    "alloy", "ash", "ballad", "coral", "echo",
+    "sage", "shimmer", "verse", "marin", "cedar",
+})
+
+
+def _resolve_voice(ai_voice, tone_preset):
+    """Resolve the OpenAI realtime voice for a call.
+
+    Use the tenant's explicitly selected voice ONLY when it is a supported
+    OpenAI realtime voice; otherwise fall back to the tone-based default
+    (professional -> marin). This guards against stale Gemini-era voices and
+    any ai_voice drift — the agent must not depend on migration 067 having
+    cleared ai_voice, because an unsupported value breaks the whole session.
+    """
+    if ai_voice in OPENAI_VOICES:
+        return ai_voice
+    return VOICE_MAP.get(tone_preset, "marin")
+
+
 # Subscription statuses that block inbound calls
 BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
 
@@ -413,12 +438,18 @@ async def entrypoint(ctx: JobContext):
         tools = create_tools(deps)
 
         # ── Create OpenAI Realtime model + agent + session ──
-        # Use explicitly selected voice if set, else fall back to tone-based
-        # mapping (Phase 44: AI Voice Selection). Phase 65: migration 067 clears
-        # ai_voice to NULL for all tenants, so the effective default is the
-        # tone-based OpenAI voice (professional -> marin).
+        # Use the tenant's explicitly selected voice (Phase 44) only when it is
+        # a supported OpenAI realtime voice; otherwise fall back to the tone
+        # default. Migration 067 was meant to NULL every tenant's ai_voice, but
+        # the agent must not depend on that having run — a stale Gemini voice
+        # (e.g. "Zephyr") errors the whole session at the OpenAI handshake.
         ai_voice = tenant.get("ai_voice") if tenant else None
-        voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "marin")
+        voice_name = _resolve_voice(ai_voice, tone_preset)
+        if ai_voice and voice_name != ai_voice:
+            logger.warning(
+                "[agent] unsupported ai_voice=%r (not an OpenAI realtime voice) "
+                "— using tone default %r", ai_voice, voice_name,
+            )
         logger.info(
             "[agent] voice_resolved tenant_ai_voice=%r tone_preset=%r -> voice=%r",
             ai_voice, tone_preset, voice_name,
