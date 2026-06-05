@@ -17,7 +17,6 @@ from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
 from ..lib.calendar_push import push_booking_to_calendar
 from ..integrations.google_maps import validate_address_bounded
-from ._availability_lib import mute_input_during_tool
 from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
@@ -264,14 +263,6 @@ def create_book_appointment_tool(deps: dict):
         caller_name = (raw_arguments.get("caller_name") or "").strip()
         unit_number = (raw_arguments.get("unit_number") or "").strip()
         urgency = raw_arguments.get("urgency") or "routine"
-
-        # Prevent caller VAD from interrupting Gemini's BLOCKING tool wait
-        # (see _availability_lib.mute_input_during_tool module header).
-        # book_appointment is the longest-blocking tool (address-validation
-        # HTTP + atomic RPC + long readback) and the most exposed to the
-        # Gemini-server VAD cancellation cascade, so it needs the same
-        # structural input-mute that check_slot/check_day/capture_lead use.
-        mute_input_during_tool(deps)
 
         tenant_id = deps.get("tenant_id")
         supabase = deps["supabase"]
@@ -638,9 +629,9 @@ def create_book_appointment_tool(deps: dict):
 
         deps["_last_booked_slot_key"] = _slot_key
         deps["_last_booked_slot_response"] = return_msg
-        # Cascade-recovery parity: _attempt_tool_result_replay re-emits
-        # deps["_last_tool_state"]; set it to this success message so a
-        # post-booking server-cancellation can replay the BOOKED verdict.
+        # Mirror the BOOKED verdict onto _last_tool_state (harmless bookkeeping;
+        # the Gemini-era cascade-recovery replay that consumed it was removed in
+        # the Phase 65 OpenAI migration).
         deps["_last_tool_state"] = return_msg
 
         # Phase-fix (2026-04-23): invalidate the slot_cache so a subsequent

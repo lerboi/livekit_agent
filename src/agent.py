@@ -2,11 +2,11 @@
 Voco LiveKit Voice Agent
 
 Main entry point for the AI receptionist agent.
-  Twilio SIP -> LiveKit -> Gemini 3.1 Flash Live (native audio-to-audio)
+  Twilio SIP -> LiveKit -> OpenAI gpt-realtime-2 (native speech-to-speech)
 
 Architecture:
 - Each inbound call creates a LiveKit room via SIP dispatch rule
-- This agent joins the room, looks up the tenant, and opens a Gemini Live session
+- This agent joins the room, looks up the tenant, and opens an OpenAI Realtime session
 - All 6 tools execute in-process (no webhook round-trips)
 - Post-call pipeline runs immediately when the session closes
 """
@@ -29,10 +29,10 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
-from google.genai import types as genai_types
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
-from livekit.plugins import google, noise_cancellation
-from livekit.plugins.google.beta.gemini_tts import TTS as GeminiTTS
+from livekit.plugins import openai, noise_cancellation
+from openai.types.realtime import AudioTranscription
+from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad
 from livekit import api, rtc
 
 from .prompt import build_system_prompt
@@ -46,32 +46,26 @@ from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
 
-# Voice mapping: tone_preset -> Gemini voice name
+# Phase 65: OpenAI gpt-realtime-2 model id. The plugin accepts any string, so a
+# wrong/renamed id fails at the live OpenAI handshake (the first call), NOT at
+# import or construction — this is the single highest-risk value to confirm at
+# the UAT gate. Change it here only. (The installed plugin's known model literal
+# lists gpt-realtime / gpt-realtime-1.5 / gpt-realtime-2025-08-28; "gpt-realtime-2"
+# is the GA id per docs/OPENAI-REALTIME-2-MIGRATION.md decision #1.)
+OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+
+# Voice mapping: tone_preset -> OpenAI gpt-realtime voice name.
+# professional is the standard/default; its voice (marin) is also the fallback
+# when tone_preset is unknown. Kept in sync with the dashboard voice picker and
+# the tenants.ai_voice CHECK constraint (main repo migration 067).
 VOICE_MAP = {
-    "professional": "Zephyr",
-    "friendly": "Aoede",
-    "local_expert": "Achird",
+    "professional": "marin",
+    "friendly": "cedar",
+    "local_expert": "alloy",
 }
 
 # Subscription statuses that block inbound calls
 BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
-
-# Phase 60.4 Stream B (D-B-01): Gemini Live input-language hint.
-# Native-audio model (gemini-3.1-flash-live-preview) may auto-detect
-# regardless, but the kwarg is defense-in-depth; paired with an
-# anti-hallucination prompt directive per _build_language_section.
-# Map restricted to locales with prompt-side ES branches (60.3 Plan 12);
-# unknown locales fall back to en-US.
-_LOCALE_TO_BCP47 = {
-    "en": "en-US",
-    "es": "es-US",
-}
-
-
-def _locale_to_bcp47(locale: str | None) -> str:
-    if not locale:
-        return "en-US"
-    return _LOCALE_TO_BCP47.get(locale, "en-US")
 
 # Timeout for SIP participant to join the room (seconds)
 PARTICIPANT_TIMEOUT_S = 30
@@ -111,50 +105,12 @@ class _GoodbyeDiagHandler(logging.Handler):
 _PHONE_REDACT_RE = re.compile(r"\+?\d{7,15}")
 
 
-# ── Phase 61.2 Fix C: server-cancellation cascade telemetry ───────────────
-
-class _ServerCancelHandler(logging.Handler):
-    """Phase 61.2 Fix C: capture Gemini-server cancellation cascade signals
-    from livekit.plugins.google.realtime warnings. Pure observability — no
-    behavior change. Counters flow into the [goodbye_race] log line via
-    _flush_goodbye_diag.
-
-    Watches for two warning substrings:
-      - 'server cancelled tool calls' — server-side VAD interrupt cancelled
-        an in-flight generation; pending tool calls discarded.
-      - 'received server content but no active generation' — tool result
-        landed on a cancelled call; the agent has no pending generation to
-        attach the result to.
-
-    Mirrors _GoodbyeDiagHandler shape. Removed in _flush_goodbye_diag's
-    finally block to prevent per-call handler accumulation.
-    """
-    def __init__(self, diag_record):
-        super().__init__()
-        self._diag_record = diag_record
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = record.getMessage()
-            if "server cancelled tool calls" in msg:
-                self._diag_record[0]["server_tool_cancellations"] = (
-                    self._diag_record[0].get("server_tool_cancellations", 0) + 1
-                )
-            elif "received server content but no active generation" in msg:
-                self._diag_record[0]["orphaned_server_content"] = (
-                    self._diag_record[0].get("orphaned_server_content", 0) + 1
-                )
-        except Exception:
-            pass  # diagnostic handler must never raise
-
-
 async def _flush_goodbye_diag(
     *,
     diag_record: list,
     transcript_turns: list,
     tool_call_log: list,
     goodbye_handler: logging.Handler,
-    server_cancel_handler: logging.Handler,
 ) -> None:
     """Phase 60.3 Stream A (R-A7): flush the goodbye-race diagnostic record
     as a [goodbye_race] logger.info line + Sentry breadcrumb, then remove
@@ -187,11 +143,6 @@ async def _flush_goodbye_diag(
     finally:
         try:
             logging.getLogger("livekit.agents").removeHandler(goodbye_handler)
-        except Exception:
-            pass
-        try:
-            logging.getLogger("livekit.plugins.google.realtime").removeHandler(server_cancel_handler)
-            logging.getLogger("livekit.plugins.google").removeHandler(server_cancel_handler)
         except Exception:
             pass
 
@@ -346,11 +297,10 @@ async def entrypoint(ctx: JobContext):
                 _history_state,
             )
 
-        # Phase 63.1: hoist intake_questions fetch BEFORE session.start().
-        # Replaces the broken post-session session.generate_reply(...) injection
-        # that silently fails on livekit-plugins-google 1.5.6 + gemini-3.1-flash-live-preview
-        # (capability guard mutable_chat_context=False blocks generate_reply entirely).
-        # Per D-02: extra ~100-200ms pre-start latency is acceptable — correctness wins.
+        # Hoist the intake_questions fetch BEFORE session.start() so the questions
+        # are part of the initial system prompt (built below) rather than injected
+        # mid-session. Extra ~100-200ms pre-start latency is acceptable —
+        # correctness wins.
         intake_questions_text = ""
         if tenant_id:
             try:
@@ -412,14 +362,6 @@ async def entrypoint(ctx: JobContext):
         _goodbye_handler = _GoodbyeDiagHandler(diag_record)
         logging.getLogger("livekit.agents").addHandler(_goodbye_handler)
 
-        # Phase 61.2 Fix C: server-cancellation cascade telemetry. Install
-        # _ServerCancelHandler on BOTH livekit.plugins.google.realtime (where
-        # the cancellation warnings are emitted) and livekit.plugins.google
-        # (parent logger fallback). Removed in _flush_goodbye_diag().
-        _server_cancel_handler = _ServerCancelHandler(diag_record)
-        logging.getLogger("livekit.plugins.google.realtime").addHandler(_server_cancel_handler)
-        logging.getLogger("livekit.plugins.google").addHandler(_server_cancel_handler)
-
         # ── Create tools with mutable deps (call_uuid filled in after DB query) ──
         deps = {
             "supabase": supabase,
@@ -470,119 +412,62 @@ async def entrypoint(ctx: JobContext):
         }
         tools = create_tools(deps)
 
-        # ── Create Gemini model + agent + session ──
-        # Use explicitly selected voice if set, else fall back to tone-based mapping (Phase 44: AI Voice Selection)
+        # ── Create OpenAI Realtime model + agent + session ──
+        # Use explicitly selected voice if set, else fall back to tone-based
+        # mapping (Phase 44: AI Voice Selection). Phase 65: migration 067 clears
+        # ai_voice to NULL for all tenants, so the effective default is the
+        # tone-based OpenAI voice (professional -> marin).
         ai_voice = tenant.get("ai_voice") if tenant else None
-        voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "Kore")
+        voice_name = ai_voice if ai_voice else VOICE_MAP.get(tone_preset, "marin")
         logger.info(
             "[agent] voice_resolved tenant_ai_voice=%r tone_preset=%r -> voice=%r",
             ai_voice, tone_preset, voice_name,
         )
 
-        # Dampen Gemini's server-side VAD so it stops cancelling in-flight tool
-        # calls on breaths or minor overlap. LOW sensitivity + 1500ms silence
-        # threshold (raised from 1000ms in Phase 60.2) tracks upstream guidance
-        # for livekit/agents#4441. Barge-in still works — thresholds just
-        # require deliberate caller speech (>1.5s) instead of firing on
-        # breath/noise.
+        # Phase 65: OpenAI gpt-realtime-2 (speech-to-speech, native async /
+        # NON_BLOCKING function calling). Unlike Gemini 3.1 Flash Live, an
+        # in-flight tool call is NOT cancelled when the caller speaks — so the
+        # entire server-cancellation cascade class of hallucination is gone at
+        # the source, and the Gemini-era input-mute / cascade-recovery
+        # workarounds were removed alongside this swap.
         #
-        # Phase 63.1-10 revert: activity_handling=NO_INTERRUPTION was tried in
-        # 63.1-08 to stop tool-call cancellation, but it caused a worse
-        # failure mode — after check_availability returned, Gemini never
-        # verbalized the result and the call stalled indefinitely. Reverting
-        # to default (START_OF_ACTIVITY_INTERRUPTS) and addressing the
-        # tool-retry-loop at the prompt level (see _build_booking_section
-        # anti-retry guidance).
-        realtime_input_config = genai_types.RealtimeInputConfig(
-            automatic_activity_detection=genai_types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
-                end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
-                prefix_padding_ms=400,
-                # Phase 63.1-11: raised 1500 -> 2500ms. Live UAT shows the
-                # caller saying brief acknowledgments ("hello", "mhm")
-                # during agent speech fires VAD at 1500ms, triggering
-                # `server cancelled tool calls` + mid-word truncation
-                # (#4486 pipeline race). 2500ms requires a deliberate
-                # full-sentence utterance (>2.5s of continuous speech)
-                # before VAD fires — brief acknowledgments no longer
-                # count as interrupts. Barge-in still works for genuine
-                # caller interjections.
-                silence_duration_ms=2500,
-            ),
-        )
-
-        logger.info(
-            "[60.4 Stream B] RealtimeModel language=%s (locale=%s)",
-            _locale_to_bcp47(locale),
-            locale,
-        )
-
-        # Phase-fix (2026-04-24): Gemini 3 explicit guidance says temperature
-        # must be left at default (1.0); custom values "risk looping or
-        # degraded performance." We were overriding to 0.3 (carryover from
-        # Gemini 2.x tool-agent convention) and observing exactly the
-        # symptom Google warns about: filler loops + hallucinated outcomes.
-        # Deleted.
+        # Instructions come from Agent(instructions=...) below — the
+        # RealtimeModel has no instructions kwarg.
         #
-        # thinking_level raised from "minimal" to "low": minimal mode
-        # short-circuits tool-vs-speak deliberation, so the model pattern-
-        # matches to the most fluent continuation (e.g. fabricating a
-        # booking confirmation) instead of invoking a tool. "low" keeps
-        # latency tight while restoring enough deliberation to pick tools
-        # over fluent fabrication on a receptionist call.
-        model = google.realtime.RealtimeModel(
-            model="gemini-3.1-flash-live-preview",
+        # turn_detection: semantic_vad/medium is both the plugin default and the
+        # recommended starting point for this SIP topology. If live UAT shows
+        # over- or under-eager turn-taking, switch to ServerVad(threshold=...,
+        # silence_duration_ms=...) — see docs/OPENAI-REALTIME-2-MIGRATION.md §7.5.
+        #
+        # input_audio_transcription MUST be an explicit typed AudioTranscription
+        # (a plain dict is NOT converted by the plugin's to_audio_transcription).
+        # Without caller-side transcription the post-call triage + lead
+        # extraction degrade silently even though the call still "works".
+        # gpt-4o-mini-transcribe is the low-latency default.
+        #
+        # reasoning effort is NOT a constructor param in livekit-plugins-openai
+        # 1.5.7 (it would be silently swallowed by **kwargs); gpt-realtime-2
+        # defaults to "low" effort, which is what we want for phone latency.
+        model = openai.realtime.RealtimeModel(
+            model=OPENAI_REALTIME_MODEL,
             voice=voice_name,
-            language=_locale_to_bcp47(locale),  # Phase 60.4 D-B-01: best-effort STT pin on native-audio
-            instructions=system_prompt,
-            realtime_input_config=realtime_input_config,
-            thinking_config=genai_types.ThinkingConfig(
-                thinking_level="low",
-                include_thoughts=False,
+            turn_detection=SemanticVad(
+                type="semantic_vad",
+                eagerness="medium",
+                create_response=True,
+                interrupt_response=True,
             ),
-            # Cascade hardening: opt the Gemini Live session into server-side
-            # session resumption so the ~10-min server connection reset can
-            # reconnect against a resumption handle instead of cold-starting.
-            # The plugin (livekit-plugins-google 1.5.7) stores the new_handle
-            # from every session_resumption_update and re-sends it on each
-            # reconnect via _build_connect_config. NOTE: that build path only
-            # forwards .handle (not .transparent), so transparent=True would be
-            # silently dropped after the first connect — we pass handle=None
-            # (a fresh session whose handle the SDK then maintains), which is
-            # exactly what the plugin threads across reconnects.
-            session_resumption=genai_types.SessionResumptionConfig(handle=None),
+            input_audio_transcription=AudioTranscription(
+                model="gpt-4o-mini-transcribe",
+            ),
         )
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
-        # Phase 63.1-06 (gap-closure, v2): Gemini TTS plugin attached so
-        # session.say() can synthesize the opening greeting. The Gemini 3.1
-        # Live RealtimeModel does NOT support agent-first turns via any of
-        # session.generate_reply / session.say-via-realtime /
-        # update_chat_ctx (all capability-gated closed; see
-        # realtime_api.py:289 `mutable = "3.1" not in model`). The only
-        # confirmed path on the current SDK (livekit-agents==1.5.6 +
-        # livekit-plugins-google==1.5.6) is to attach a separate TTS
-        # pipeline and call session.say() — agent_activity.py:1041-1095
-        # routes say() through _tts_task whenever self.tts is set. The
-        # Gemini TTS `voice_name` set matches the Gemini Live voice set 1:1
-        # (Zephyr, Puck, Kore, etc.) so the greeting voice is IDENTICAL to
-        # the subsequent conversation voice — no audible switch.
-        greeting_tts = GeminiTTS(
-            voice_name=voice_name,
-            model="gemini-2.5-flash-preview-tts",
-            # Gemini TTS controls pace via natural-language instructions rather
-            # than a numeric speaking_rate. Ask for a noticeably brisk delivery
-            # so the ~114-char greeting finishes in ~4-5s instead of 7-8s —
-            # keeps the pre-greeting protected window short and gets the
-            # caller to the actionable question faster.
-            # Direct pace instruction — Gemini TTS prepends the full string
-            # to the text as context (gemini_tts.py:200-201), so keep it
-            # short and declarative. "Quickly" is more reliably honored than
-            # abstract adjectives like "brisk" or "efficient".
-            instructions="Say this quickly, in a warm professional tone:",
-        )
-        session = AgentSession(llm=model, tts=greeting_tts)
+        # No tts= on the session: the realtime model emits audio itself. The
+        # Gemini-era separate-TTS greeting hack is gone — the opening greeting is
+        # now delivered natively via session.generate_reply(...) after start.
+        session = AgentSession(llm=model)
         deps["session"] = session
 
         # ── Collect transcript in real-time ──
@@ -636,8 +521,8 @@ async def entrypoint(ctx: JobContext):
             sentry_sdk.capture_exception(actual_error)
 
         # [63.1-DIAG] Session state diagnostics — instrument every relevant
-        # event so a stall after a tool call can be traced through Gemini's
-        # state machine. Log lines prefix [63.1-DIAG] for easy grep.
+        # event so a stall after a tool call can be traced through the OpenAI
+        # Realtime session's state machine. Log lines prefix [63.1-DIAG] for easy grep.
         @session.on("agent_state_changed")
         def _diag_agent_state(event):
             try:
@@ -711,7 +596,6 @@ async def entrypoint(ctx: JobContext):
                 transcript_turns=transcript_turns,
                 tool_call_log=deps.get("_tool_call_log", []) or [],
                 goodbye_handler=_goodbye_handler,
-                server_cancel_handler=_server_cancel_handler,
             )
 
             end_timestamp = int(time.time() * 1000)
@@ -831,12 +715,12 @@ async def entrypoint(ctx: JobContext):
                 .execute()
             )
 
-            # Phase-fix (2026-04-23): Prefetch scheduling data at session init.
-            # Gemini Live cancels in-flight function calls if the caller speaks
-            # while a tool is pending; shortening check_availability from ~500ms
-            # (5 live Supabase queries) to ~50ms (pure slot math over cached
-            # data) narrows that race. Cache is consumed by check_availability
-            # with a 30s TTL; stale reads fall through to the live-fetch path.
+            # Prefetch scheduling data at session init so the availability tools
+            # resolve from a warm cache (~50ms of pure slot math) instead of 5
+            # live Supabase queries (~500ms) on the call's first availability
+            # check — lower caller-perceived latency. Cache is consumed by the
+            # availability tools with a 30s TTL; stale reads fall through to the
+            # live-fetch path.
             _now_iso = datetime.now(timezone.utc).isoformat()
             slot_appts_task = asyncio.to_thread(
                 lambda: supabase.table("appointments")
@@ -936,7 +820,7 @@ async def entrypoint(ctx: JobContext):
         # Fire DB queries in background — they complete while session starts + greeting plays
         db_task = asyncio.create_task(_run_db_queries())
 
-        # ── Start session (awaited — Gemini WebSocket handshake) ──
+        # ── Start session (awaited — OpenAI Realtime WebSocket handshake) ──
         await session.start(
             agent=agent,
             room=ctx.room,
@@ -968,89 +852,55 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # Phase 63.1-06 (gap-closure, v2): speak the opening greeting via the
-        # attached Gemini TTS pipeline. Fire-and-forget — the SpeechHandle
-        # returned by session.say() schedules the synthesis task; the caller
-        # hears the greeting within ~500ms of SIP audio coming up. The TTS
-        # voice matches Gemini Live's voice_name so the subsequent
-        # conversation is audibly identical. The greeting text is templated
-        # per-tenant (business_name + localized recording disclosure); this
-        # MUST match the prompt's OPENING guidance so Gemini's follow-up
-        # responses feel contextually consistent.
+        # Phase 65: native opening greeting. gpt-realtime-2 supports agent-first
+        # turns via session.generate_reply(...), so the Gemini-era separate-TTS
+        # greeting + input-mute hack is gone. We instruct the model to open the
+        # call now; exact wording varies slightly per call (accepted, decision #3)
+        # but always carries the brand + recording disclosure + "how can I help".
+        # The prompt's GREETING section reinforces the same opening. No input
+        # mute: BVCTelephony handles SIP echo, and async function calling means
+        # caller speech no longer needs to be suppressed.
         if locale == "es":
             disclosure_text = "Esta llamada puede ser grabada por motivos de calidad."
             if onboarding_complete:
-                greeting_text = (
-                    f"Hola, gracias por llamar a {business_name}. "
-                    f"{disclosure_text} ¿En qué puedo ayudarle?"
+                greeting_instruction = (
+                    "Inicie la llamada ahora con una sola frase de apertura cálida y "
+                    f"natural: agradezca al llamante por llamar a {business_name}, "
+                    f"dígale «{disclosure_text}» y pregúntele en qué puede ayudarle hoy. "
+                    "Limítese a esa apertura — no invente ningún dato del llamante."
                 )
             else:
-                greeting_text = (
-                    f"{disclosure_text} ¿En qué puedo ayudarle?"
+                greeting_instruction = (
+                    "Inicie la llamada ahora con una sola frase de apertura cálida y "
+                    f"natural: dígale al llamante «{disclosure_text}» y pregúntele en qué "
+                    "puede ayudarle hoy. Limítese a esa apertura — no invente ningún "
+                    "dato del llamante."
                 )
         else:
             disclosure_text = "This call may be recorded for quality purposes."
             if onboarding_complete:
-                greeting_text = (
-                    f"Hello, thank you for calling {business_name}. "
-                    f"{disclosure_text} How can I help you today?"
+                greeting_instruction = (
+                    "Begin the call now with a single warm, natural opening line: thank "
+                    f"the caller for calling {business_name}, tell them "
+                    f"\"{disclosure_text}\", then ask how you can help them today. Keep "
+                    "it to that opening only — do not invent any caller details."
                 )
             else:
-                greeting_text = (
-                    f"{disclosure_text} How can I help you today?"
+                greeting_instruction = (
+                    "Begin the call now with a single warm, natural opening line: tell "
+                    f"the caller \"{disclosure_text}\", then ask how you can help them "
+                    "today. Keep it to that opening only — do not invent any caller "
+                    "details."
                 )
-        # Phase 63.1-07: mute Gemini's input audio for the duration of the
-        # TTS greeting. Without this, one of two things happens:
-        #   (a) SIP acoustic echo feeds TTS audio back as user audio →
-        #       Gemini's server VAD fires → Gemini interrupts its own
-        #       greeting or produces a confused response.
-        #   (b) The caller speaks over the greeting (intentional or
-        #       accidental) and barge-in fires prematurely before they
-        #       hear the question they're supposed to answer.
-        # Disabling input audio during greeting playback, then re-enabling
-        # once playout completes, gives a clean ~3-5s protected window.
-        # Hard 6s safety cap ensures we never leave input permanently
-        # muted if playout signaling hangs.
         try:
-            session.input.set_audio_enabled(False)
-            greeting_handle = session.say(greeting_text)
+            session.generate_reply(instructions=greeting_instruction)
             logger.info(
-                "[63.1-06] greeting dispatched via TTS locale=%s chars=%d voice=%s (input muted)",
-                locale, len(greeting_text), voice_name,
+                "[agent] native greeting dispatched via generate_reply "
+                "locale=%s onboarding=%s voice=%s",
+                locale, onboarding_complete, voice_name,
             )
-
-            async def _unmute_after_greeting():
-                try:
-                    # Raised from 6s → 10s after live UAT showed Gemini TTS
-                    # synthesis of the 114-char branded greeting exceeding 6s
-                    # end-to-end (including first-audio-frame latency), causing
-                    # the force-unmute to fire while the greeting was still
-                    # playing. 10s is comfortable headroom for any normal
-                    # greeting length; the safety cap still prevents permanent
-                    # mute on broken playout signaling.
-                    await asyncio.wait_for(greeting_handle.wait_for_playout(), timeout=10.0)
-                    logger.info("[63.1-07] greeting playout complete; unmuting input")
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[63.1-07] greeting playout wait timed out at 10s; force-unmuting input"
-                    )
-                except Exception as e:
-                    logger.error(f"[63.1-07] greeting playout wait failed: {e}; force-unmuting")
-                finally:
-                    try:
-                        session.input.set_audio_enabled(True)
-                    except Exception as e2:
-                        logger.error(f"[63.1-07] failed to re-enable input audio: {e2}")
-
-            asyncio.create_task(_unmute_after_greeting())
         except Exception as e:
-            logger.error(f"[63.1-06] session.say() failed: {e}")
-            # Failed to dispatch greeting — make sure input is enabled so the
-            # caller can still talk to Gemini.
-            try:
-                session.input.set_audio_enabled(True)
-            except Exception:
-                pass
+            logger.error(f"[agent] greeting generate_reply failed: {e}")
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():

@@ -1,14 +1,18 @@
 [project]
 name = "voco-livekit-agent"
 version = "1.0.0"
-description = "Voco AI voice receptionist — Twilio SIP + LiveKit + Gemini 3.1 Flash Live"
+description = "Voco AI voice receptionist — Twilio SIP + LiveKit + OpenAI gpt-realtime-2"
 requires-python = ">=3.11"
 dependencies = [
     # Pinned at 1.5.7 (2026-04-30) — patch bump on top of Phase 63's 1.5.6 mainline.
-    # 1.5.7 picks up: gemini-live raw-schema parameters fix + realtime reply-after-interruption fix.
-    # See .planning/phases/63.2-livekit-sdk-patch-1-5-7/63.2-CONTEXT.md (audit confirms neither fix forces src/ edits in this stack).
+    # Phase 65: voice brain migrated Gemini 3.1 Flash Live -> OpenAI gpt-realtime-2.
+    # livekit-plugins-openai is pinned to the SAME 1.5.7 line as livekit-agents so the
+    # RealtimeModel API surface (TurnDetection / AudioTranscription shapes) matches what
+    # src/agent.py constructs. livekit-plugins-google was dropped (no remaining importer —
+    # the only user was src/agent.py; Calendar/Maps use google-auth/google-api-python-client,
+    # which are separate deps below and STAY).
     "livekit-agents==1.5.7",
-    "livekit-plugins-google==1.5.7",
+    "livekit-plugins-openai==1.5.7",
     "livekit-plugins-silero==1.5.7",
     "livekit-plugins-turn-detector==1.5.7",
     "livekit-plugins-noise-cancellation>=0.2,<1",

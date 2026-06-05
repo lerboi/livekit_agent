@@ -1,7 +1,7 @@
 """
-System prompt builder for the Gemini Live voice agent.
+System prompt builder for the OpenAI gpt-realtime-2 voice agent.
 
-Optimized for Gemini 3.1 Flash Live (native audio-to-audio):
+Optimized for a realtime speech-to-speech model (native audio-to-audio):
 - Goal-oriented instructions — describe desired outcomes, not exact scripts
 - Natural conversation guidance — let the model adapt to caller behavior
 - Critical constraints remain explicit (urgency, privacy, booking requirements)
@@ -554,63 +554,67 @@ def _build_working_hours_section(
 def _build_greeting_section(
     locale: str, business_name: str, onboarding_complete: bool, t
 ) -> str:
-    # Phase 63.1-06: the opening greeting is delivered by a separate TTS
-    # pipeline (src/agent.py `session.say(...)` after `session.start()`)
-    # because Gemini 3.1 Flash Live capability-gates all three public
-    # "speak first" APIs closed (generate_reply, say, update_chat_ctx).
-    # By the time the system prompt is consumed by Gemini's first
-    # generation, the caller has ALREADY heard the branded greeting.
-    # Gemini's job on its first emitted turn is to respond to the
-    # caller's actual input (their answer to "how can I help you today?")
-    # — NOT to greet them again. Because mutable_chat_context=False on
-    # 3.1 models, we cannot inform Gemini via chat history that the
-    # greeting was played; we have to say so in the system prompt.
+    # Phase 65: the opening greeting is delivered NATIVELY — the entrypoint
+    # calls session.generate_reply(...) right after session.start() and
+    # gpt-realtime-2 speaks first. (This replaces the Gemini 3.1 separate-TTS
+    # greeting hack, which existed only because 3.1 gated generate_reply/say/
+    # update_chat_ctx closed.) This section reinforces WHAT that opening should
+    # be and how to behave on the turns that follow. Exact wording may vary
+    # slightly per call (accepted); the required content is the brand + the
+    # recording disclosure + an offer to help.
     disclosure = t("agent.recording_disclosure")
 
     if locale == "es":
+        if onboarding_complete:
+            opening = (
+                f"«Hola, gracias por llamar a {business_name}. {disclosure} "
+                "¿En qué puedo ayudarle?»"
+            )
+        else:
+            opening = f"«{disclosure} ¿En qué puedo ayudarle?»"
         return (
-            "SALUDO YA REALIZADO — NO SE REPITA:\n"
-            f"Cuando el llamante habla por primera vez, YA ha escuchado un "
-            f"saludo con marca comercial: «Hola, gracias por llamar a "
-            f"{business_name}. {disclosure} ¿En qué puedo ayudarle?» (o "
-            "equivalente cuando la incorporación no está completa). Este "
-            "saludo fue pronunciado por una voz TTS separada ANTES de que "
-            "su sesión comenzara a procesar el audio del llamante.\n"
+            "APERTURA:\n"
+            "Usted abre la llamada. Comience con un saludo cálido y natural en una "
+            f"sola frase, por ejemplo: {opening} Incluya siempre la divulgación de "
+            "grabación y termine ofreciendo ayuda.\n"
             "\n"
-            "- NO repita el saludo. NO diga hola, buenas tardes, ni el "
-            "nombre del negocio al inicio. NO vuelva a anunciar que la "
-            "llamada puede ser grabada.\n"
-            f"- Responda DIRECTAMENTE a lo que el llamante acaba de decir. "
-            "Si pidieron un servicio, avance con la recopilación de "
+            "- Salude UNA sola vez, al inicio. Después de su apertura, no vuelva a "
+            "saludar, ni repita el nombre del negocio ni la divulgación de "
+            "grabación en turnos posteriores.\n"
+            "- En cada turno siguiente, responda directamente a lo que el llamante "
+            "acaba de decir. Si pidieron un servicio, avance con la recopilación de "
             "información. Si preguntaron algo, respóndalo.\n"
-            "- Si el llamante guarda silencio o sólo dice «hola» o su "
-            f"equivalente, entonces ofrezca ayuda brevemente SIN repetir "
-            f"el saludo: p. ej., «¿En qué puedo ayudarle hoy?» o «¿Qué "
-            "le trae por aquí?».\n"
+            "- Si el llamante guarda silencio o sólo dice «hola» o su equivalente, "
+            "ofrezca ayuda brevemente SIN repetir el saludo: p. ej., «¿En qué puedo "
+            "ayudarle hoy?» o «¿Qué le trae por aquí?».\n"
             "\n"
             "CONCIENCIA DE ECO:\n"
             "- Si el llamante parece repetir sus palabras, trátelo como eco de "
             "audio y continúe con naturalidad."
         )
 
+    if onboarding_complete:
+        opening = (
+            f"\"Hello, thank you for calling {business_name}. {disclosure} "
+            "How can I help you today?\""
+        )
+    else:
+        opening = f"\"{disclosure} How can I help you today?\""
     return (
-        "GREETING ALREADY PLAYED — DO NOT REPEAT:\n"
-        f"By the time the caller first speaks, they have ALREADY heard a "
-        f"branded greeting: \"Hello, thank you for calling {business_name}. "
-        f"{disclosure} How can I help you today?\" (or equivalent when "
-        "onboarding is not complete). That greeting was spoken by a "
-        "separate TTS voice BEFORE your session began processing caller "
-        "audio.\n"
+        "OPENING:\n"
+        "You open the call. Start with a warm, natural greeting in a single "
+        f"sentence, for example: {opening} Always include the recording "
+        "disclosure and end by offering to help.\n"
         "\n"
-        "- DO NOT repeat the greeting. DO NOT say hello, good afternoon, or "
-        "announce the business name at the start. DO NOT re-announce that "
-        "the call may be recorded.\n"
-        "- Respond DIRECTLY to what the caller just said. If they asked "
-        "for a service, move into info-gathering. If they asked a "
-        "question, answer it.\n"
-        "- If the caller stays silent or only says \"hello\" or equivalent, "
-        "then offer help briefly WITHOUT re-greeting: e.g., \"How can I "
-        "help you today?\" or \"What brings you in?\"\n"
+        "- Greet ONCE, at the start. After your opening, do not greet again, and "
+        "do not repeat the business name or the recording disclosure on later "
+        "turns.\n"
+        "- On every following turn, respond DIRECTLY to what the caller just "
+        "said. If they asked for a service, move into info-gathering. If they "
+        "asked a question, answer it.\n"
+        "- If the caller stays silent or only says \"hello\" or equivalent, offer "
+        "help briefly WITHOUT re-greeting: e.g., \"How can I help you today?\" or "
+        "\"What brings you in?\"\n"
         "\n"
         "ECHO AWARENESS:\n"
         "- If the caller appears to repeat your words back, treat it as audio echo "
@@ -1427,7 +1431,7 @@ def build_system_prompt(
     caller_history: dict | None = None,
 ) -> str:
     """
-    Build the full system prompt for the Gemini Live voice agent.
+    Build the full system prompt for the OpenAI gpt-realtime-2 voice agent.
 
     Args:
         locale: Language locale ('en' or 'es').
