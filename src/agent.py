@@ -54,6 +54,11 @@ logger = logging.getLogger("voco-agent")
 # is the GA id per docs/OPENAI-REALTIME-2-MIGRATION.md decision #1.)
 OPENAI_REALTIME_MODEL = "gpt-realtime-2"
 
+# Hard cap (seconds) for waiting on the opening greeting to finish playing before
+# we force-unmute caller input. The greeting runs ~3-5s; this only fires if a SIP
+# playout stalls or drops, guaranteeing input is never left muted.
+GREETING_UNMUTE_TIMEOUT_S = 10.0
+
 # Voice mapping: tone_preset -> OpenAI gpt-realtime voice name.
 # professional is the standard/default; its voice (marin) is also the fallback
 # when tone_preset is unknown. Kept in sync with the dashboard voice picker and
@@ -883,14 +888,20 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # Phase 65: native opening greeting. gpt-realtime-2 supports agent-first
-        # turns via session.generate_reply(...), so the Gemini-era separate-TTS
-        # greeting + input-mute hack is gone. We instruct the model to open the
-        # call now; exact wording varies slightly per call (accepted, decision #3)
-        # but always carries the brand + recording disclosure + "how can I help".
-        # The prompt's GREETING section reinforces the same opening. No input
-        # mute: BVCTelephony handles SIP echo, and async function calling means
-        # caller speech no longer needs to be suppressed.
+        # Phase 65: native opening greeting via session.generate_reply(...). We
+        # instruct the model to open the call now; exact wording varies slightly
+        # per call (accepted, decision #3) but always carries the brand +
+        # recording disclosure + "how can I help". The prompt's OPENING section
+        # reinforces the same opening.
+        #
+        # The greeting is made NON-INTERRUPTIBLE by muting the caller's inbound
+        # audio for its duration, then unmuting once it has played out. With
+        # OpenAI server-side turn detection (SemanticVad), the server owns
+        # interruption — allow_interruptions=False is IGNORED on generate_reply
+        # for a RealtimeModel (livekit-agents agent_activity.py resets it) — so
+        # the only reliable way to stop SIP echo / line noise from cutting the
+        # greeting in half is to gate the audio the server's VAD sees. Barge-in
+        # resumes for the rest of the call the moment the greeting finishes.
         if locale == "es":
             disclosure_text = "Esta llamada puede ser grabada por motivos de calidad."
             if onboarding_complete:
@@ -923,15 +934,49 @@ async def entrypoint(ctx: JobContext):
                     "today. Keep it to that opening only — do not invent any caller "
                     "details."
                 )
+        # Mute caller input so the server-side VAD cannot interrupt the greeting.
         try:
-            session.generate_reply(instructions=greeting_instruction)
+            session.input.set_audio_enabled(False)
+        except Exception as e:
+            logger.warning(f"[agent] could not mute input before greeting: {e}")
+
+        greeting_handle = None
+        try:
+            greeting_handle = session.generate_reply(instructions=greeting_instruction)
             logger.info(
-                "[agent] native greeting dispatched via generate_reply "
+                "[agent] native greeting dispatched via generate_reply (input muted) "
                 "locale=%s onboarding=%s voice=%s",
                 locale, onboarding_complete, voice_name,
             )
         except Exception as e:
             logger.error(f"[agent] greeting generate_reply failed: {e}")
+
+        # Re-enable caller audio once the greeting has fully played out. The
+        # GREETING_UNMUTE_TIMEOUT_S cap guarantees input is never left muted if a
+        # SIP playout stalls or drops mid-greeting. (If dispatch failed,
+        # greeting_handle is None and we unmute immediately.)
+        async def _unmute_after_greeting():
+            try:
+                if greeting_handle is not None:
+                    await asyncio.wait_for(
+                        greeting_handle.wait_for_playout(),
+                        timeout=GREETING_UNMUTE_TIMEOUT_S,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[agent] greeting playout wait timed out at %ss; force-unmuting input",
+                    GREETING_UNMUTE_TIMEOUT_S,
+                )
+            except Exception as e:
+                logger.warning(f"[agent] greeting playout wait error: {e}")
+            finally:
+                try:
+                    session.input.set_audio_enabled(True)
+                    logger.info("[agent] input unmuted after greeting")
+                except Exception as e:
+                    logger.warning(f"[agent] could not unmute input after greeting: {e}")
+
+        _greeting_unmute_task = asyncio.create_task(_unmute_after_greeting())
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
