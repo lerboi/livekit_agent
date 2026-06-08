@@ -1,16 +1,15 @@
-"""Phase 65 — tests for the OPENING directive in `_build_greeting_section`.
+"""Phase 66 — tests for the reframed OPENING directive in `_build_greeting_section`.
 
-gpt-realtime-2 supports agent-first turns, so the opening greeting is now
-delivered NATIVELY: src/agent.py calls `session.generate_reply(...)` right
-after `session.start()`. The system prompt's greeting section therefore tells
-the model HOW to open the call — a warm branded greeting + the recording
-disclosure + an offer to help — and to greet only ONCE. This replaces the
-Gemini-era "GREETING ALREADY PLAYED — DO NOT REPEAT" framing, which existed
-only because the 3.1 separate-TTS hack spoke the greeting before the model's
-first turn.
+The cascaded pipeline delivers the opening greeting deterministically via
+`session.say(<template>)` BEFORE the LLM's first turn, so the prompt's greeting
+section no longer tells the model to "open the call". Instead it tells the model
+the greeting was ALREADY delivered by the system and to respond to the caller
+without re-greeting. (Phase 65 used native generate_reply + a "you open the call"
+directive; this reframes it — leaving "you open the call" in place would make the
+model re-greet on its first real turn.)
 
-Assertions are scoped to `_build_greeting_section` output (not the full
-assembled prompt) so unrelated sections cannot leak a false-GREEN signal.
+Assertions are scoped to `_build_greeting_section` output (not the full assembled
+prompt) so unrelated sections cannot leak a false-GREEN signal.
 """
 
 from __future__ import annotations
@@ -53,56 +52,44 @@ def _greeting_es(business_name: str = "AcmeCorp", onboarding_complete: bool = Tr
     return _build_greeting_section("es", business_name, onboarding_complete, _mk_t(_es))
 
 
-def test_greeting_en_instructs_model_to_open_and_greet_once():
+def test_greeting_en_reframed_to_already_delivered():
     out = _greeting_en().lower()
     assert "opening:" in out
-    assert "you open the call" in out
-    assert "greet once" in out
+    assert "already spoken" in out
     assert "do not greet again" in out
     assert "respond directly" in out
 
 
-def test_greeting_es_instructs_model_to_open_and_greet_once():
+def test_greeting_es_reframed_to_already_delivered():
     out = _greeting_es().lower()
     assert "apertura:" in out
-    assert "salude una sola vez" in out
-    assert "no vuelva a saludar" in out
+    assert "ya pronunció" in out
+    assert "no salude de nuevo" in out
     assert "directamente" in out
 
 
-def test_greeting_includes_recording_disclosure_en():
-    out = _greeting_en().lower()
-    assert "this call may be recorded for quality purposes" in out
+def test_greeting_keeps_echo_awareness_note():
+    assert "echo awareness:" in _greeting_en().lower()
+    assert "conciencia de eco:" in _greeting_es().lower()
 
 
-def test_greeting_includes_recording_disclosure_es():
-    out = _greeting_es().lower()
-    assert "esta llamada puede ser grabada por motivos de calidad" in out
-
-
-def test_greeting_references_business_name_en():
-    out = _greeting_en(business_name="AcmeCorp").lower()
-    assert "acmecorp" in out
-
-
-def test_greeting_references_business_name_es():
-    out = _greeting_es(business_name="AcmeCorp").lower()
-    assert "acmecorp" in out
-
-
-def test_greeting_not_onboarding_complete_omits_business_name_en():
-    # When onboarding isn't complete, the example opening drops the brand line
-    # (booking is not yet available) but still carries the disclosure + offer.
-    out = _greeting_en(business_name="AcmeCorp", onboarding_complete=False).lower()
-    assert "acmecorp" not in out
-    assert "this call may be recorded for quality purposes" in out
-
-
-def test_greeting_no_stale_gemini_tts_framing():
-    # The Gemini-era "already played / do not repeat the greeting" framing must
-    # be gone in both locales.
+def test_greeting_drops_you_open_the_call_framing():
+    # The deterministic session.say greeting means the model must NOT be told to
+    # open the call (that would make it re-greet on its first real turn).
     en = _greeting_en().lower()
     es = _greeting_es().lower()
-    assert "already" not in en
-    assert "do not repeat the greeting" not in en
-    assert "ya realizado" not in es
+    assert "you open the call" not in en
+    assert "greet once" not in en
+    assert "usted abre la llamada" not in es
+    assert "salude una sola vez" not in es
+
+
+def test_greeting_section_does_not_inline_the_disclosure_text():
+    # The disclosure is spoken by session.say from the message template, not by
+    # the model — the section only refers to it, never reproduces it verbatim.
+    assert "This call may be recorded for quality purposes" not in _greeting_en()
+    assert "Esta llamada puede ser grabada por motivos de calidad" not in _greeting_es()
+
+
+def test_greeting_section_is_locale_specific():
+    assert _greeting_en() != _greeting_es()

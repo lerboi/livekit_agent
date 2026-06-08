@@ -1,18 +1,22 @@
 [project]
 name = "voco-livekit-agent"
 version = "1.0.0"
-description = "Voco AI voice receptionist — Twilio SIP + LiveKit + OpenAI gpt-realtime-2"
+description = "Voco AI voice receptionist — Twilio SIP + LiveKit + cascaded Deepgram STT / OpenAI gpt-4.1-mini LLM / ElevenLabs TTS"
 requires-python = ">=3.11"
 dependencies = [
     # Pinned at 1.5.7 (2026-04-30) — patch bump on top of Phase 63's 1.5.6 mainline.
-    # Phase 65: voice brain migrated Gemini 3.1 Flash Live -> OpenAI gpt-realtime-2.
-    # livekit-plugins-openai is pinned to the SAME 1.5.7 line as livekit-agents so the
-    # RealtimeModel API surface (TurnDetection / AudioTranscription shapes) matches what
-    # src/agent.py constructs. livekit-plugins-google was dropped (no remaining importer —
-    # the only user was src/agent.py; Calendar/Maps use google-auth/google-api-python-client,
-    # which are separate deps below and STAY).
+    # Phase 66: voice brain migrated OpenAI gpt-realtime-2 (single speech-to-speech) ->
+    # cascaded pipeline (Deepgram STT + OpenAI gpt-4.1-mini LLM + ElevenLabs Flash TTS).
+    # Every livekit-plugins-* is pinned to the SAME 1.5.7 line as livekit-agents so the
+    # plugin __init__ signatures match what src/agent.py constructs (framework discipline:
+    # pin drift across agents + plugins has historically broken constructor kwargs).
+    # livekit-plugins-openai now provides the LLM (openai.LLM), not the realtime model.
+    # livekit-plugins-google was dropped in Phase 65 (Calendar/Maps use google-auth /
+    # google-api-python-client, which are separate deps below and STAY).
     "livekit-agents==1.5.7",
     "livekit-plugins-openai==1.5.7",
+    "livekit-plugins-deepgram==1.5.7",
+    "livekit-plugins-elevenlabs==1.5.7",
     "livekit-plugins-silero==1.5.7",
     "livekit-plugins-turn-detector==1.5.7",
     "livekit-plugins-noise-cancellation>=0.2,<1",

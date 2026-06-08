@@ -1,15 +1,15 @@
 """The opening greeting must be NON-INTERRUPTIBLE.
 
-Production symptom (2026-06-05): the "Thank you for calling ..." greeting cut
-itself off halfway — SIP echo / line noise tripped the OpenAI server-side VAD
-(SemanticVad, interrupt_response=True) and cancelled the greeting mid-sentence.
+Production symptom (Phase 64 revert, 2026-04-25): the "Thank you for calling ..."
+greeting cut itself off halfway — SIP self-echo / line noise tripped the VAD and
+cancelled the greeting mid-sentence.
 
-Fix: mute the caller's inbound audio for the duration of the greeting, then
-unmute once it has played out. allow_interruptions=False is ignored on
-generate_reply for a RealtimeModel with server turn detection (the OpenAI
-server owns interruption), so gating the inbound audio is the only reliable
-way to protect the greeting. These are source-grep invariants (same shape as
-the agent's other static guards) — behavioral confirmation is the live UAT call.
+Fix (carried into the Phase 66 cascade pipeline): mute the caller's inbound audio
+for the duration of the greeting, then unmute once it has played out. The
+greeting is delivered deterministically via `session.say(greeting_text)` (no LLM
+turn), and gating the inbound audio is the only reliable way to stop echo from
+interrupting it. These are source-grep invariants (same shape as the agent's
+other static guards) — behavioral confirmation is the live UAT call.
 """
 from pathlib import Path
 
@@ -22,7 +22,7 @@ def _src() -> str:
 
 def test_greeting_mutes_caller_input():
     assert "set_audio_enabled(False)" in _src(), (
-        "greeting must mute caller input so server VAD cannot interrupt it"
+        "greeting must mute caller input so VAD/echo cannot interrupt it"
     )
 
 
@@ -40,8 +40,13 @@ def test_greeting_awaits_playout_with_safety_timeout():
     )
 
 
-def test_greeting_still_dispatched_via_generate_reply():
-    assert "generate_reply(instructions=greeting_instruction)" in _src()
+def test_greeting_dispatched_via_session_say_non_interruptible():
+    # Phase 66: deterministic greeting via session.say (was native generate_reply
+    # under the gpt-realtime-2 model). The fixed template means byte-identical
+    # wording every call and no LLM turn consumed. allow_interruptions=False is a
+    # second echo defense behind the input mute — the cascade AgentSession honors
+    # it (the realtime model ignored it).
+    assert "session.say(greeting_text, allow_interruptions=False)" in _src()
 
 
 def test_greeting_timeout_constant_is_reasonable():

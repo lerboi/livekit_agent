@@ -112,20 +112,25 @@ def test_working_hours_empty_returns_empty_es():
 # --- greeting -----------------------------------------------------------------
 
 
-def test_greeting_en_includes_disclosure():
+def test_greeting_en_references_disclosure_without_inlining():
+    # Phase 66: the disclosure is spoken by session.say from the message
+    # template, not by the model. The greeting section REFERS to it (so the
+    # model knows not to repeat it) but must NOT reproduce the verbatim sentence.
     t = _make_t("en")
     out = _build_greeting_section(
         "en", "Voco", onboarding_complete=True, t=t
     )
-    assert _en["agent"]["recording_disclosure"] in out
+    assert "recording disclosure" in out.lower()
+    assert _en["agent"]["recording_disclosure"] not in out
 
 
-def test_greeting_es_includes_spanish_disclosure():
+def test_greeting_es_references_disclosure_without_inlining():
     t = _make_t("es")
     out = _build_greeting_section(
         "es", "Voco", onboarding_complete=True, t=t
     )
-    assert _es["agent"]["recording_disclosure"] in out
+    assert "divulgación de grabación" in out.lower()
+    assert _es["agent"]["recording_disclosure"] not in out
 
 
 def test_greeting_en_es_distinct():
