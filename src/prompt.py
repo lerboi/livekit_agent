@@ -839,6 +839,14 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "llamantes empiezan por su nombre, otros describen la avería de inmediato, otros "
             "van directo a pedir una cotización. Adáptese a cómo abran la llamada y complete "
             "lo que falte. Nunca vuelva a preguntar algo que ya le dijeron.\n"
+            "\n"
+            "Sobre el problema en sí, basta con una descripción breve — tome en una o dos "
+            "frases lo que el llamante ofrezca y avance hacia la reserva. Está organizando "
+            "una visita, no diagnosticando el trabajo por teléfono, así que no interrogue al "
+            "llamante sobre el problema ni acumule preguntas de seguimiento al respecto. Haga "
+            "una sola pregunta breve de aclaración sobre el problema solo si genuinamente no "
+            "puede saber qué tipo de trabajo necesita; de lo contrario, tome lo que le dieron "
+            "y proceda.\n"
         )
         name_use_block = (
             "USO DEL NOMBRE DURANTE LA LLAMADA:\n"
@@ -902,7 +910,8 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "URGENCIA:\n"
             "Clasifique la urgencia en silencio — nunca en voz alta, y nunca pida al llamante "
             "que la califique. No use las palabras 'emergencia', 'urgente' ni 'rutina' en la "
-            "conversación. Mida la gravedad según lo que describa el llamante: cualquier cosa "
+            "conversación. Mida la gravedad según lo que el llamante ya le haya dicho — sin "
+            "hacer preguntas adicionales para determinarla: cualquier cosa "
             "activamente insegura o causando daño ahora mismo — inundaciones, olor a gas, sin "
             "calefacción en clima frío, chispas eléctricas, desbordamiento de aguas residuales — "
             "cuenta como emergencia. Todo lo demás es rutina."
@@ -916,6 +925,13 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "burst out about the leak, some jump straight to asking for a quote. Adapt to however "
             "they open the call and fill in whatever's missing. Never re-ask something they already "
             "told you.\n"
+            "\n"
+            "On the problem itself, a brief description is all you need — take what the caller "
+            "volunteers in a sentence or two and move on toward booking. You are arranging a "
+            "visit, not diagnosing the job over the phone, so do not interview the caller about "
+            "the problem or stack up follow-up questions about it. Ask one short clarifying "
+            "question about the problem only if you genuinely can't tell what kind of work they "
+            "need; otherwise take what they gave you and proceed.\n"
         )
         name_use_block = (
             "NAME USE DURING THE CALL:\n"
@@ -973,7 +989,8 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "URGENCY:\n"
             "You classify urgency silently — never out loud, and never ask the caller to rate it "
             "themselves. Don't use the words 'emergency,' 'urgent,' or 'routine' in conversation. "
-            "Gauge severity from what the caller describes: anything actively unsafe or causing "
+            "Gauge severity from what the caller has already told you — without asking extra "
+            "questions to determine it: anything actively unsafe or causing "
             "damage right now — flooding, gas smells, no heat in cold weather, electrical sparks, "
             "sewage backup — counts as an emergency. Everything else is routine."
         )
