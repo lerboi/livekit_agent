@@ -1,7 +1,9 @@
 """
-System prompt builder for the OpenAI gpt-realtime-2 voice agent.
+System prompt builder for the Voco voice agent (Phase 66 cascaded pipeline:
+Deepgram STT -> OpenAI gpt-4.1-mini LLM -> ElevenLabs TTS).
 
-Optimized for a realtime speech-to-speech model (native audio-to-audio):
+Written in an outcome-based style (carried over from the prior realtime model —
+preserved because the constraints are model-agnostic behavioral guardrails):
 - Goal-oriented instructions — describe desired outcomes, not exact scripts
 - Natural conversation guidance — let the model adapt to caller behavior
 - Critical constraints remain explicit (urgency, privacy, booking requirements)
@@ -1414,7 +1416,7 @@ def build_system_prompt(
     caller_history: dict | None = None,
 ) -> str:
     """
-    Build the full system prompt for the OpenAI gpt-realtime-2 voice agent.
+    Build the full system prompt for the Voco voice agent (cascaded-pipeline LLM).
 
     Args:
         locale: Language locale ('en' or 'es').

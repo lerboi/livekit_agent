@@ -592,8 +592,8 @@ async def entrypoint(ctx: JobContext):
             sentry_sdk.capture_exception(actual_error)
 
         # [63.1-DIAG] Session state diagnostics — instrument every relevant
-        # event so a stall after a tool call can be traced through the OpenAI
-        # Realtime session's state machine. Log lines prefix [63.1-DIAG] for easy grep.
+        # event so a stall after a tool call can be traced through the cascaded
+        # pipeline session's state machine. Log lines prefix [63.1-DIAG] for easy grep.
         @session.on("agent_state_changed")
         def _diag_agent_state(event):
             try:
@@ -891,7 +891,7 @@ async def entrypoint(ctx: JobContext):
         # Fire DB queries in background — they complete while session starts + greeting plays
         db_task = asyncio.create_task(_run_db_queries())
 
-        # ── Start session (awaited — OpenAI Realtime WebSocket handshake) ──
+        # ── Start session (awaited — cascade STT/LLM/TTS plugins initialize) ──
         await session.start(
             agent=agent,
             room=ctx.room,
