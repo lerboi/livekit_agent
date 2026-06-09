@@ -27,13 +27,13 @@ from src.prompt import _build_corrections_section
 def test_en_critical_rule_heading():
     section = _build_corrections_section("en")
     assert isinstance(section, str)
-    assert "HANDLING CORRECTIONS — CRITICAL RULE:" in section
+    assert "HANDLING CORRECTIONS:" in section
 
 
 def test_es_critical_rule_heading():
     section = _build_corrections_section("es")
     assert isinstance(section, str)
-    assert "MANEJO DE CORRECCIONES — REGLA CRÍTICA:" in section
+    assert "MANEJO DE CORRECCIONES:" in section
 
 
 def test_en_five_numbered_rules():

@@ -8,7 +8,7 @@ from src.prompt import build_system_prompt
 
 def test_no_customer_context_omits_block():
     prompt = build_system_prompt("en", business_name="Acme", customer_context=None)
-    assert "CRITICAL RULE — CUSTOMER CONTEXT" not in prompt
+    assert "CUSTOMER CONTEXT" not in prompt
     assert "STATE:" not in prompt  # no leakage from any other section
 
 
@@ -25,7 +25,7 @@ def test_jobber_only_context_renders_with_source():
         },
     }
     prompt = build_system_prompt("en", business_name="Acme", customer_context=ctx)
-    assert "CRITICAL RULE — CUSTOMER CONTEXT" in prompt
+    assert "CUSTOMER CONTEXT" in prompt
     assert "STATE:" in prompt
     assert "John" in prompt
     assert "(Jobber)" in prompt

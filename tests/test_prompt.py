@@ -86,8 +86,10 @@ def test_call_duration_is_critical_rule_framed():
     section = _build_call_duration_section(_t_stub)
     assert isinstance(section, str)
     # Case-sensitive — the word "CRITICAL RULE" must appear in that exact form
-    # so the top-attention-band framing is consistent with other CRITICAL RULE
-    # sections (OUTCOME WORDS, TOOL NARRATION, CORRECTIONS, CUSTOMER CONTEXT).
+    # so the top-attention-band framing is consistent with the other CRITICAL RULE
+    # sections (OUTCOME WORDS, ADDRESS VALIDATION, NO DOUBLE-BOOKING). Corrections,
+    # Tool Narration, and Customer Context were de-inflated to plain headers
+    # (2026-06 emphasis trim) so "CRITICAL" stays meaningful on the must-wins.
     assert "ENDING THE CALL — CRITICAL RULE:" in section
 
 
@@ -125,7 +127,7 @@ def test_call_duration_moved_above_tool_narration():
         onboarding_complete=True,
     )
     idx_call_duration = assembled.index("ENDING THE CALL — CRITICAL RULE")
-    idx_tool_narration = assembled.index("TOOL NARRATION — CRITICAL RULE")
+    idx_tool_narration = assembled.index("TOOL NARRATION:")
     assert idx_call_duration < idx_tool_narration, (
         "call_duration CRITICAL RULE must appear before tool_narration in the "
         "assembled prompt (top-attention-band placement — RESEARCH §R-B5)"

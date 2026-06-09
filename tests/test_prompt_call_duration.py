@@ -130,8 +130,8 @@ def test_section_is_position_5_or_earlier_in_both_locales():
     extended to the es branch by Plan 5; tool_narration es header added
     by Plan 6)."""
     for locale, cd_header, tn_header in (
-        ("en", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION — CRITICAL RULE"),
-        ("es", "TERMINAR LA LLAMADA — REGLA CRÍTICA", "NARRACIÓN DE HERRAMIENTAS — REGLA CRÍTICA"),
+        ("en", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION:"),
+        ("es", "TERMINAR LA LLAMADA — REGLA CRÍTICA", "NARRACIÓN DE HERRAMIENTAS:"),
     ):
         assembled = build_system_prompt(
             locale=locale,

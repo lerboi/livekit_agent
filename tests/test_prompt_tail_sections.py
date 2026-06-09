@@ -168,14 +168,17 @@ _SAMPLE_CTX = {
 }
 
 
-def test_customer_account_en_critical_rule_when_context_present():
+def test_customer_account_en_header_when_context_present():
+    # 2026-06 emphasis trim: this section was de-inflated from a CRITICAL RULE
+    # header to a plain "CUSTOMER CONTEXT:" header (its body privacy rules are
+    # unchanged). Assert the header renders when context is present.
     out = _build_customer_account_section(_SAMPLE_CTX, "en")
-    assert "CRITICAL RULE" in out
+    assert "CUSTOMER CONTEXT" in out
 
 
-def test_customer_account_es_critical_rule_when_context_present():
+def test_customer_account_es_header_when_context_present():
     out = _build_customer_account_section(_SAMPLE_CTX, "es")
-    assert "REGLA CRÍTICA" in out
+    assert "CONTEXTO DEL CLIENTE" in out
 
 
 def test_customer_account_empty_when_no_context_en():

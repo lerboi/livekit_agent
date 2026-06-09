@@ -140,7 +140,7 @@ def _build_corrections_section(locale: str) -> str:
     # - D7 (locale parity): addressed here — adds es branch.
     if locale == "es":
         return (
-            "MANEJO DE CORRECCIONES — REGLA CRÍTICA:\n"
+            "MANEJO DE CORRECCIONES:\n"
             "Cuando el llamante corrige CUALQUIER información que repetiste (nombre, "
             "dirección, número de teléfono, descripción del problema, hora, o "
             "cualquier otro detalle):\n"
@@ -165,7 +165,7 @@ def _build_corrections_section(locale: str) -> str:
             "llamante siempre anula todo lo anterior."
         )
     return (
-        "HANDLING CORRECTIONS — CRITICAL RULE:\n"
+        "HANDLING CORRECTIONS:\n"
         "When the caller corrects ANY piece of information you repeated back (name, address, "
         "phone number, issue description, time, or any other detail):\n"
         "1. The caller's correction is ALWAYS correct. Your previous version was WRONG.\n"
@@ -374,7 +374,7 @@ def _build_tool_narration_section(locale: str) -> str:
     # invites regression. See 60.3-PROMPT-AUDIT.md §_build_tool_narration_section.
     if locale == "es":
         return (
-            "NARRACIÓN DE HERRAMIENTAS — REGLA CRÍTICA:\n"
+            "NARRACIÓN DE HERRAMIENTAS:\n"
             "Antes de llamar a CUALQUIER herramienta, DEBE primero pronunciar "
             "una frase de relleno natural lo suficientemente larga como para "
             "cubrir el tiempo de ejecución de la herramienta. Las herramientas "
@@ -431,7 +431,7 @@ def _build_tool_narration_section(locale: str) -> str:
             "real a herramienta es lo peor."
         )
     return (
-        "TOOL NARRATION — CRITICAL RULE:\n"
+        "TOOL NARRATION:\n"
         "Before calling ANY tool, you MUST first speak a natural filler phrase "
         "long enough to bridge the tool's run time. Tools take one to three "
         "seconds to run, and silence on a live phone call feels broken to the "
@@ -788,7 +788,7 @@ def _build_customer_account_section(
 
     if locale == "es":
         return (
-            "REGLA CRÍTICA — CONTEXTO DEL CLIENTE:\n"
+            "CONTEXTO DEL CLIENTE:\n"
             "Los campos siguientes provienen de los sistemas CRM/contabilidad del "
             "inquilino. No mencione cifras específicas, números de factura, números "
             "de trabajo, fechas de visita ni montos a menos que el llamante pregunte "
@@ -805,7 +805,7 @@ def _build_customer_account_section(
         )
 
     return (
-        "CRITICAL RULE — CUSTOMER CONTEXT:\n"
+        "CUSTOMER CONTEXT:\n"
         "The fields below come from the tenant's CRM/accounting systems. Do not speak\n"
         "specific figures, invoice numbers, job numbers, visit dates, or amounts\n"
         "unless the caller explicitly asks about their account, bill, or recent work.\n"
@@ -918,8 +918,9 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "complete dígitos que no escuchó con claridad.\n"
         )
         name_required = (
-            "Debe tener el nombre del llamante antes de usar cualquier herramienta o guardar "
-            "información.\n"
+            "Obtenga el nombre del llamante antes de reservar cuando sea posible — pero si se "
+            "niega o no logra entenderlo, continúe sin él. La reserva nunca se bloquea por "
+            "falta de nombre.\n"
         )
         urgency_block = (
             "URGENCIA:\n"
@@ -998,7 +999,8 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
             "not clearly hear.\n"
         )
         name_required = (
-            "You must have the caller's name before using any tools or saving information.\n"
+            "Get the caller's name before you book when you can — but if they decline or you "
+            "can't make it out, proceed without it. Booking is never blocked by a missing name.\n"
         )
         urgency_block = (
             "URGENCY:\n"
