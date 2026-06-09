@@ -1,7 +1,9 @@
 """
-System prompt builder for the OpenAI gpt-realtime-2 voice agent.
+System prompt builder for the Voco voice agent (Phase 66 cascaded pipeline:
+Deepgram STT -> OpenAI gpt-4.1-mini LLM -> ElevenLabs TTS).
 
-Optimized for a realtime speech-to-speech model (native audio-to-audio):
+Written in an outcome-based style (carried over from the prior realtime model —
+preserved because the constraints are model-agnostic behavioral guardrails):
 - Goal-oriented instructions — describe desired outcomes, not exact scripts
 - Natural conversation guidance — let the model adapt to caller behavior
 - Critical constraints remain explicit (urgency, privacy, booking requirements)
@@ -554,38 +556,30 @@ def _build_working_hours_section(
 def _build_greeting_section(
     locale: str, business_name: str, onboarding_complete: bool, t
 ) -> str:
-    # Phase 65: the opening greeting is delivered NATIVELY — the entrypoint
-    # calls session.generate_reply(...) right after session.start() and
-    # gpt-realtime-2 speaks first. (This replaces the Gemini 3.1 separate-TTS
-    # greeting hack, which existed only because 3.1 gated generate_reply/say/
-    # update_chat_ctx closed.) This section reinforces WHAT that opening should
-    # be and how to behave on the turns that follow. Exact wording may vary
-    # slightly per call (accepted); the required content is the brand + the
-    # recording disclosure + an offer to help.
-    disclosure = t("agent.recording_disclosure")
-
+    # Phase 66: the opening greeting is delivered DETERMINISTICALLY by the
+    # system — the entrypoint calls session.say(<greeting template>) right after
+    # session.start(), and the cascaded-pipeline TTS speaks a fixed, branded
+    # opening (business name + recording disclosure + offer to help) BEFORE the
+    # LLM's first turn. (Phase 65 delivered it via the realtime model's native
+    # generate_reply; Phase 66 swapped to a fixed session.say so wording is
+    # byte-identical every call and no LLM turn is consumed.) Because the opening
+    # is already spoken, this section's job is the opposite of the old "you open
+    # the call" framing: it tells the model NOT to greet again and to respond to
+    # the caller's first input. (business_name / t are unused now — the greeting
+    # text lives in src/messages/{en,es}.json, read by the entrypoint.)
     if locale == "es":
-        if onboarding_complete:
-            opening = (
-                f"«Hola, gracias por llamar a {business_name}. {disclosure} "
-                "¿En qué puedo ayudarle?»"
-            )
-        else:
-            opening = f"«{disclosure} ¿En qué puedo ayudarle?»"
         return (
             "APERTURA:\n"
-            "Usted abre la llamada. Comience con un saludo cálido y natural en una "
-            f"sola frase, por ejemplo: {opening} Incluya siempre la divulgación de "
-            "grabación y termine ofreciendo ayuda.\n"
+            "El sistema YA pronunció en voz alta el saludo de la marca al llamante "
+            "— el nombre del negocio, la divulgación de grabación y un ofrecimiento "
+            "de ayuda. NO salude de nuevo, y NO repita el nombre del negocio ni la "
+            "divulgación de grabación en ningún turno posterior.\n"
             "\n"
-            "- Salude UNA sola vez, al inicio. Después de su apertura, no vuelva a "
-            "saludar, ni repita el nombre del negocio ni la divulgación de "
-            "grabación en turnos posteriores.\n"
-            "- En cada turno siguiente, responda directamente a lo que el llamante "
-            "acaba de decir. Si pidieron un servicio, avance con la recopilación de "
-            "información. Si preguntaron algo, respóndalo.\n"
+            "- Su primer turno responde DIRECTAMENTE a lo que el llamante diga "
+            "después del saludo. Si pidieron un servicio, avance con la "
+            "recopilación de información. Si preguntaron algo, respóndalo.\n"
             "- Si el llamante guarda silencio o sólo dice «hola» o su equivalente, "
-            "ofrezca ayuda brevemente SIN repetir el saludo: p. ej., «¿En qué puedo "
+            "ofrezca ayuda brevemente SIN volver a saludar: p. ej., «¿En qué puedo "
             "ayudarle hoy?» o «¿Qué le trae por aquí?».\n"
             "\n"
             "CONCIENCIA DE ECO:\n"
@@ -593,24 +587,15 @@ def _build_greeting_section(
             "audio y continúe con naturalidad."
         )
 
-    if onboarding_complete:
-        opening = (
-            f"\"Hello, thank you for calling {business_name}. {disclosure} "
-            "How can I help you today?\""
-        )
-    else:
-        opening = f"\"{disclosure} How can I help you today?\""
     return (
         "OPENING:\n"
-        "You open the call. Start with a warm, natural greeting in a single "
-        f"sentence, for example: {opening} Always include the recording "
-        "disclosure and end by offering to help.\n"
+        "The system has ALREADY spoken the branded greeting out loud to the "
+        "caller — the business name, the recording disclosure, and an offer to "
+        "help. Do NOT greet again, and do NOT repeat the business name or the "
+        "recording disclosure on any later turn.\n"
         "\n"
-        "- Greet ONCE, at the start. After your opening, do not greet again, and "
-        "do not repeat the business name or the recording disclosure on later "
-        "turns.\n"
-        "- On every following turn, respond DIRECTLY to what the caller just "
-        "said. If they asked for a service, move into info-gathering. If they "
+        "- On your first turn, respond DIRECTLY to what the caller says after the "
+        "greeting. If they asked for a service, move into info-gathering. If they "
         "asked a question, answer it.\n"
         "- If the caller stays silent or only says \"hello\" or equivalent, offer "
         "help briefly WITHOUT re-greeting: e.g., \"How can I help you today?\" or "
@@ -1431,7 +1416,7 @@ def build_system_prompt(
     caller_history: dict | None = None,
 ) -> str:
     """
-    Build the full system prompt for the OpenAI gpt-realtime-2 voice agent.
+    Build the full system prompt for the Voco voice agent (cascaded-pipeline LLM).
 
     Args:
         locale: Language locale ('en' or 'es').

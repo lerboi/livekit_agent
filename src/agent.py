@@ -2,12 +2,14 @@
 Voco LiveKit Voice Agent
 
 Main entry point for the AI receptionist agent.
-  Twilio SIP -> LiveKit -> OpenAI gpt-realtime-2 (native speech-to-speech)
+  Twilio SIP -> LiveKit -> cascaded pipeline:
+    Deepgram STT (nova-3 multi) -> OpenAI gpt-4.1-mini LLM -> ElevenLabs Flash TTS
 
 Architecture:
 - Each inbound call creates a LiveKit room via SIP dispatch rule
-- This agent joins the room, looks up the tenant, and opens an OpenAI Realtime session
-- All 6 tools execute in-process (no webhook round-trips)
+- This agent joins the room, looks up the tenant, and opens a cascaded
+  AgentSession (stt + llm + tts + vad + turn detection)
+- All 9 tools execute in-process (no webhook round-trips)
 - Post-call pipeline runs immediately when the session closes
 """
 
@@ -30,9 +32,8 @@ sentry_sdk.init(
 )
 
 from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
-from livekit.plugins import openai, noise_cancellation
-from openai.types.realtime import AudioTranscription
-from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad
+from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
 from .prompt import build_system_prompt
@@ -46,52 +47,89 @@ from .lib.phone import _normalize_phone
 
 logger = logging.getLogger("voco-agent")
 
-# Phase 65: OpenAI gpt-realtime-2 model id. The plugin accepts any string, so a
-# wrong/renamed id fails at the live OpenAI handshake (the first call), NOT at
-# import or construction — this is the single highest-risk value to confirm at
-# the UAT gate. Change it here only. (The installed plugin's known model literal
-# lists gpt-realtime / gpt-realtime-1.5 / gpt-realtime-2025-08-28; "gpt-realtime-2"
-# is the GA id per docs/OPENAI-REALTIME-2-MIGRATION.md decision #1.)
-OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+
+# Phase 66: locale message bundles for the deterministic session.say() greeting.
+# Loaded once at import (mirrors prompt.py's loader; kept local here to avoid
+# importing prompt.py's private _messages). _msg() resolves a dotted key.
+_MESSAGES_DIR = os.path.join(os.path.dirname(__file__), "messages")
+with open(os.path.join(_MESSAGES_DIR, "en.json"), "r", encoding="utf-8") as _f:
+    _EN_MESSAGES = json.load(_f)
+with open(os.path.join(_MESSAGES_DIR, "es.json"), "r", encoding="utf-8") as _f:
+    _ES_MESSAGES = json.load(_f)
+_MESSAGE_BUNDLES = {"en": _EN_MESSAGES, "es": _ES_MESSAGES}
+
+
+def _msg(locale: str, key: str) -> str:
+    """Resolve a dotted message key (e.g. 'agent.greeting_default') for a locale,
+    falling back to English then to the key itself."""
+    parts = key.split(".")
+    val = _MESSAGE_BUNDLES.get(locale) or _MESSAGE_BUNDLES["en"]
+    for part in parts:
+        if isinstance(val, dict):
+            val = val.get(part)
+        else:
+            return key
+    return val if val is not None else key
 
 # Hard cap (seconds) for waiting on the opening greeting to finish playing before
 # we force-unmute caller input. The greeting runs ~3-5s; this only fires if a SIP
 # playout stalls or drops, guaranteeing input is never left muted.
 GREETING_UNMUTE_TIMEOUT_S = 10.0
 
-# Voice mapping: tone_preset -> OpenAI gpt-realtime voice name.
-# professional is the standard/default; its voice (marin) is also the fallback
-# when tone_preset is unknown. Kept in sync with the dashboard voice picker and
-# the tenants.ai_voice CHECK constraint (main repo migration 067).
-VOICE_MAP = {
-    "professional": "marin",
-    "friendly": "cedar",
-    "local_expert": "alloy",
+# Phase 66: LLM (the decision-maker / tool-caller) for the cascaded pipeline.
+# gpt-4.1-mini is non-reasoning -> low time-to-first-token, strong tool calling,
+# cheap, and uses the already-installed livekit-plugins-openai (openai.LLM).
+# Isolated as a single constant so a model change is one edit. The plugin accepts
+# any string; a wrong id fails at the first live call, not at import — confirm at
+# the UAT gate.
+LLM_MODEL = "gpt-4.1-mini"
+
+# Phase 66: ElevenLabs TTS model. Flash v2.5 streams first-byte ~75ms — the
+# sub-500ms TTS the Phase-64 revert doc named as the prerequisite for a viable
+# cascaded pipeline (GeminiTTS's ~1.3s first-byte is what killed Phase 64).
+ELEVENLABS_TTS_MODEL = "eleven_flash_v2_5"
+
+# Voice mapping: tone_preset/ai_voice LABEL -> ElevenLabs voice_id.
+# The DB stores a stable LABEL (professional / friendly / local_expert) in
+# tenants.ai_voice (main repo migration 068), NOT a raw voice_id — so swapping an
+# ElevenLabs voice is a one-line change here and never needs a DB migration.
+# professional is the standard/default and the fallback when tone_preset/ai_voice
+# is unknown or NULL.
+#
+# Each voice_id MUST be added to the ElevenLabs account's "My Voices" (livekit/
+# agents #3992 — the plugin cannot use a voice that is not in My Voices and
+# hard-fails the call otherwise). Only two voices were provided; local_expert
+# reuses the professional voice (its prompt persona still differs via the
+# tone_preset TONE_LABELS). Kept in sync with main-repo migration 068 +
+# src/lib/ai-voice-validation.js (which store/validate the LABELS, not the ids).
+ELEVENLABS_VOICE_MAP = {
+    "professional": "BIvP0GN1cAtSRTxNHnWS",
+    "friendly": "7EzWGsX10sAS4c9m9cPf",
+    "local_expert": "BIvP0GN1cAtSRTxNHnWS",  # no separate voice provided -> reuse professional
 }
 
-# Full OpenAI gpt-realtime voice allowlist — kept in sync with the main repo's
-# src/lib/ai-voice-validation.js VALID_VOICES and migration 067's CHECK. An
-# unsupported value (e.g. a stale Gemini-era voice like "Zephyr") passed to
-# RealtimeModel(voice=...) errors the ENTIRE session at the OpenAI handshake,
-# so the stored voice is validated against this set before use.
-OPENAI_VOICES = frozenset({
-    "alloy", "ash", "ballad", "coral", "echo",
-    "sage", "shimmer", "verse", "marin", "cedar",
-})
+# Valid stored-label allowlist (the keys of the voice map).
+ELEVENLABS_VOICE_LABELS = frozenset(ELEVENLABS_VOICE_MAP.keys())
 
 
 def _resolve_voice(ai_voice, tone_preset):
-    """Resolve the OpenAI realtime voice for a call.
+    """Resolve the ElevenLabs voice_id for a call.
 
-    Use the tenant's explicitly selected voice ONLY when it is a supported
-    OpenAI realtime voice; otherwise fall back to the tone-based default
-    (professional -> marin). This guards against stale Gemini-era voices and
-    any ai_voice drift — the agent must not depend on migration 067 having
-    cleared ai_voice, because an unsupported value breaks the whole session.
+    tenants.ai_voice stores a stable LABEL (professional / friendly /
+    local_expert) or NULL. Use the tenant's explicitly selected label when it is
+    a known label; otherwise fall back to the tone_preset label; otherwise the
+    professional default. Returns an ElevenLabs voice_id string.
+
+    Until the dashboard picker (main repo) is updated and tenants re-select,
+    ai_voice is NULL (migration 068 clears it) -> tone fallback, which is safe.
+    A stale OpenAI-era value (e.g. "marin") is not a known label -> also falls
+    back cleanly.
     """
-    if ai_voice in OPENAI_VOICES:
-        return ai_voice
-    return VOICE_MAP.get(tone_preset, "marin")
+    if ai_voice in ELEVENLABS_VOICE_LABELS:
+        return ELEVENLABS_VOICE_MAP[ai_voice]
+    if tone_preset in ELEVENLABS_VOICE_MAP:
+        return ELEVENLABS_VOICE_MAP[tone_preset]
+    return ELEVENLABS_VOICE_MAP["professional"]
 
 
 # Subscription statuses that block inbound calls
@@ -442,68 +480,65 @@ async def entrypoint(ctx: JobContext):
         }
         tools = create_tools(deps)
 
-        # ── Create OpenAI Realtime model + agent + session ──
-        # Use the tenant's explicitly selected voice (Phase 44) only when it is
-        # a supported OpenAI realtime voice; otherwise fall back to the tone
-        # default. Migration 067 was meant to NULL every tenant's ai_voice, but
-        # the agent must not depend on that having run — a stale Gemini voice
-        # (e.g. "Zephyr") errors the whole session at the OpenAI handshake.
+        # ── Resolve the ElevenLabs voice + build the cascaded pipeline session ──
+        # tenants.ai_voice stores a stable LABEL (professional/friendly/local_expert)
+        # or NULL; _resolve_voice maps it (or the tone_preset) to an ElevenLabs
+        # voice_id. A stale OpenAI-era value or NULL falls back to the tone voice,
+        # so the agent never depends on migration 068 having cleared ai_voice.
         ai_voice = tenant.get("ai_voice") if tenant else None
-        voice_name = _resolve_voice(ai_voice, tone_preset)
-        if ai_voice and voice_name != ai_voice:
+        voice_id = _resolve_voice(ai_voice, tone_preset)
+        if ai_voice and ai_voice not in ELEVENLABS_VOICE_LABELS:
             logger.warning(
-                "[agent] unsupported ai_voice=%r (not an OpenAI realtime voice) "
-                "— using tone default %r", ai_voice, voice_name,
+                "[agent] unrecognized ai_voice=%r (not an ElevenLabs voice label) "
+                "— using tone default voice_id=%r", ai_voice, voice_id,
             )
         logger.info(
-            "[agent] voice_resolved tenant_ai_voice=%r tone_preset=%r -> voice=%r",
-            ai_voice, tone_preset, voice_name,
+            "[agent] voice_resolved tenant_ai_voice=%r tone_preset=%r -> voice_id=%r",
+            ai_voice, tone_preset, voice_id,
         )
 
-        # Phase 65: OpenAI gpt-realtime-2 (speech-to-speech, native async /
-        # NON_BLOCKING function calling). Unlike Gemini 3.1 Flash Live, an
-        # in-flight tool call is NOT cancelled when the caller speaks — so the
-        # entire server-cancellation cascade class of hallucination is gone at
-        # the source, and the Gemini-era input-mute / cascade-recovery
-        # workarounds were removed alongside this swap.
+        # Phase 66: cascaded STT -> LLM -> TTS pipeline (replaces the single
+        # gpt-realtime-2 speech-to-speech model). The migration rationale is
+        # tool-calling reliability: a strong text LLM (gpt-4.1-mini) is a more
+        # reliable, debuggable tool-caller than a realtime speech model, running
+        # on LiveKit's mature pipeline plugin APIs.
         #
-        # Instructions come from Agent(instructions=...) below — the
-        # RealtimeModel has no instructions kwarg.
-        #
-        # turn_detection: semantic_vad/medium is both the plugin default and the
-        # recommended starting point for this SIP topology. If live UAT shows
-        # over- or under-eager turn-taking, switch to ServerVad(threshold=...,
-        # silence_duration_ms=...) — see docs/OPENAI-REALTIME-2-MIGRATION.md §7.5.
-        #
-        # input_audio_transcription MUST be an explicit typed AudioTranscription
-        # (a plain dict is NOT converted by the plugin's to_audio_transcription).
-        # Without caller-side transcription the post-call triage + lead
-        # extraction degrade silently even though the call still "works".
-        # gpt-4o-mini-transcribe is the low-latency default.
-        #
-        # reasoning effort is NOT a constructor param in livekit-plugins-openai
-        # 1.5.7 (it would be silently swallowed by **kwargs); gpt-realtime-2
-        # defaults to "low" effort, which is what we want for phone latency.
-        model = openai.realtime.RealtimeModel(
-            model=OPENAI_REALTIME_MODEL,
-            voice=voice_name,
-            turn_detection=SemanticVad(
-                type="semantic_vad",
-                eagerness="medium",
-                create_response=True,
-                interrupt_response=True,
-            ),
-            input_audio_transcription=AudioTranscription(
-                model="gpt-4o-mini-transcribe",
-            ),
-        )
+        # STT (D1 default): Deepgram nova-3 with language="multi" preserves EN+ES
+        # code-switching. Deliberately isolated to these two lines so the STT is
+        # one-line-swappable — AssemblyAI Universal-3 Pro and Deepgram Flux-multi
+        # are the UAT A/B candidates for alphanumeric/address accuracy (see
+        # My Prompts/Migration.md §D1). MultilingualModel() supplies semantic
+        # end-of-turn detection (more robust to brief SIP echo than raw Silero
+        # endpointing) and needs the model files the Dockerfile pre-downloads.
+        stt = deepgram.STT(model="nova-3", language="multi")
+        turn_detection = MultilingualModel()
+
+        # LLM: non-reasoning gpt-4.1-mini for low TTFT + strong tool calling.
+        # parallel_tool_calls=False keeps the booking flow strictly sequential
+        # (e.g. never fires check_slot and book_appointment in one turn) — the
+        # slot_token contract assumes one tool call resolves before the next.
+        llm = openai.LLM(model=LLM_MODEL, parallel_tool_calls=False)
+
+        # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
+        # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
+        tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+
+        # VAD: Silero defaults for barge-in. DO NOT port the realtime model's
+        # 2.5s silence value here — Phase 64 did exactly that and added ~2s/turn.
+        vad = silero.VAD.load()
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
-        # No tts= on the session: the realtime model emits audio itself. The
-        # Gemini-era separate-TTS greeting hack is gone — the opening greeting is
-        # now delivered natively via session.generate_reply(...) after start.
-        session = AgentSession(llm=model)
+        session = AgentSession(
+            stt=stt,
+            llm=llm,
+            tts=tts,
+            vad=vad,
+            turn_detection=turn_detection,
+            # Callers must be able to barge in (emergencies). Echo defense for the
+            # OPENING line is the input-mute below, not disabling interruptions.
+            allow_interruptions=True,
+        )
         deps["session"] = session
 
         # ── Collect transcript in real-time ──
@@ -557,8 +592,8 @@ async def entrypoint(ctx: JobContext):
             sentry_sdk.capture_exception(actual_error)
 
         # [63.1-DIAG] Session state diagnostics — instrument every relevant
-        # event so a stall after a tool call can be traced through the OpenAI
-        # Realtime session's state machine. Log lines prefix [63.1-DIAG] for easy grep.
+        # event so a stall after a tool call can be traced through the cascaded
+        # pipeline session's state machine. Log lines prefix [63.1-DIAG] for easy grep.
         @session.on("agent_state_changed")
         def _diag_agent_state(event):
             try:
@@ -856,7 +891,7 @@ async def entrypoint(ctx: JobContext):
         # Fire DB queries in background — they complete while session starts + greeting plays
         db_task = asyncio.create_task(_run_db_queries())
 
-        # ── Start session (awaited — OpenAI Realtime WebSocket handshake) ──
+        # ── Start session (awaited — cascade STT/LLM/TTS plugins initialize) ──
         await session.start(
             agent=agent,
             room=ctx.room,
@@ -888,53 +923,27 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[agent] Failed to install goodbye-race audio frame wrapper: {e}")
 
-        # Phase 65: native opening greeting via session.generate_reply(...). We
-        # instruct the model to open the call now; exact wording varies slightly
-        # per call (accepted, decision #3) but always carries the brand +
-        # recording disclosure + "how can I help". The prompt's OPENING section
-        # reinforces the same opening.
+        # Phase 66: deterministic opening greeting via session.say(...). The
+        # cascaded pipeline speaks a fixed, byte-identical branded greeting
+        # (business name + recording disclosure + offer to help) from the
+        # src/messages/{en,es}.json templates — no LLM turn consumed, no per-call
+        # wording drift. _build_greeting_section in prompt.py tells the model the
+        # greeting was already delivered, so it does not re-greet on turn 1.
         #
         # The greeting is made NON-INTERRUPTIBLE by muting the caller's inbound
-        # audio for its duration, then unmuting once it has played out. With
-        # OpenAI server-side turn detection (SemanticVad), the server owns
-        # interruption — allow_interruptions=False is IGNORED on generate_reply
-        # for a RealtimeModel (livekit-agents agent_activity.py resets it) — so
-        # the only reliable way to stop SIP echo / line noise from cutting the
-        # greeting in half is to gate the audio the server's VAD sees. Barge-in
-        # resumes for the rest of the call the moment the greeting finishes.
-        if locale == "es":
-            disclosure_text = "Esta llamada puede ser grabada por motivos de calidad."
-            if onboarding_complete:
-                greeting_instruction = (
-                    "Inicie la llamada ahora con una sola frase de apertura cálida y "
-                    f"natural: agradezca al llamante por llamar a {business_name}, "
-                    f"dígale «{disclosure_text}» y pregúntele en qué puede ayudarle hoy. "
-                    "Limítese a esa apertura — no invente ningún dato del llamante."
-                )
-            else:
-                greeting_instruction = (
-                    "Inicie la llamada ahora con una sola frase de apertura cálida y "
-                    f"natural: dígale al llamante «{disclosure_text}» y pregúntele en qué "
-                    "puede ayudarle hoy. Limítese a esa apertura — no invente ningún "
-                    "dato del llamante."
-                )
+        # audio for its duration, then unmuting once it has played out. This is
+        # echo-defense layer 2 (BVCTelephony is layer 1): the Phase-64 revert
+        # showed SIP self-echo can trip the VAD and cut the opening line in half
+        # if the input is live during the greeting. Barge-in resumes for the rest
+        # of the call the moment the greeting finishes.
+        if onboarding_complete:
+            greeting_text = _msg(locale, "agent.greeting_onboarding").format(
+                business_name=business_name
+            )
         else:
-            disclosure_text = "This call may be recorded for quality purposes."
-            if onboarding_complete:
-                greeting_instruction = (
-                    "Begin the call now with a single warm, natural opening line: thank "
-                    f"the caller for calling {business_name}, tell them "
-                    f"\"{disclosure_text}\", then ask how you can help them today. Keep "
-                    "it to that opening only — do not invent any caller details."
-                )
-            else:
-                greeting_instruction = (
-                    "Begin the call now with a single warm, natural opening line: tell "
-                    f"the caller \"{disclosure_text}\", then ask how you can help them "
-                    "today. Keep it to that opening only — do not invent any caller "
-                    "details."
-                )
-        # Mute caller input so the server-side VAD cannot interrupt the greeting.
+            greeting_text = _msg(locale, "agent.greeting_default")
+
+        # Mute caller input so SIP echo / line noise cannot cut the opening line.
         try:
             session.input.set_audio_enabled(False)
         except Exception as e:
@@ -942,14 +951,20 @@ async def entrypoint(ctx: JobContext):
 
         greeting_handle = None
         try:
-            greeting_handle = session.generate_reply(instructions=greeting_instruction)
+            # allow_interruptions=False is a second echo defense behind the input
+            # mute above: unlike the realtime model (where it was ignored), the
+            # cascade AgentSession honors it (agent_activity.py only resets it for
+            # a RealtimeModel). So even if set_audio_enabled(False) ever throws,
+            # the greeting still can't be barge-in-cut. Barge-in resumes for the
+            # rest of the call (session default allow_interruptions=True).
+            greeting_handle = session.say(greeting_text, allow_interruptions=False)
             logger.info(
-                "[agent] native greeting dispatched via generate_reply (input muted) "
-                "locale=%s onboarding=%s voice=%s",
-                locale, onboarding_complete, voice_name,
+                "[agent] greeting via session.say (input muted, non-interruptible) "
+                "locale=%s onboarding=%s voice_id=%s",
+                locale, onboarding_complete, voice_id,
             )
         except Exception as e:
-            logger.error(f"[agent] greeting generate_reply failed: {e}")
+            logger.error(f"[agent] greeting say failed: {e}")
 
         # Re-enable caller audio once the greeting has fully played out. The
         # GREETING_UNMUTE_TIMEOUT_S cap guarantees input is never left muted if a
