@@ -95,7 +95,15 @@ def _build_voice_behavior_section(locale: str) -> str:
             "Mantenga la conversación centrada preguntando una cosa específica a la vez. "
             "Después de que el llamante responda, reconozca brevemente lo que escuchó "
             "antes de seguir adelante — eso indica que está escuchando en lugar de "
-            "seguir un guion."
+            "seguir un guion.\n"
+            "\n"
+            "Varíe cómo reconoce — no abra dos turnos seguidos con la misma palabra. Si "
+            "abrió con «Entendido» en el turno anterior, use «De acuerdo» o «Claro» la "
+            "próxima vez, o pase directo a la pregunta. Sonar humano vale más que sonar "
+            "consistente.\n"
+            "Ejemplo — llamante: «Mi calentador de agua tiene una fuga bastante grande.» "
+            "Débil: «Entendido. ¿Y cuál es su nombre?» (y de nuevo «Entendido» dos turnos "
+            "después). Mejor: «De acuerdo — enviémosle a alguien. ¿Me puede dar su nombre?»"
         )
     return (
         "VOICE & CONVERSATION STYLE:\n"
@@ -106,7 +114,14 @@ def _build_voice_behavior_section(locale: str) -> str:
         "\n"
         "Keep the conversation grounded by asking one focused thing at a time. After the caller "
         "answers, briefly acknowledge what you heard before moving forward — it signals you're "
-        "listening rather than running a script."
+        "listening rather than running a script.\n"
+        "\n"
+        "Vary how you acknowledge — don't open two turns in a row with the same word. If you "
+        "opened with \"Got it\" last turn, reach for \"Okay\" or \"Sure\" next time, or just go "
+        "straight to the question. Sounding human beats sounding consistent.\n"
+        "Example — caller: \"My water heater's leaking pretty badly.\" Weak: \"Got it. And what's "
+        "your name?\" (then \"Got it\" again two turns later). Better: \"Okay — let's get someone "
+        "out to you. Can I grab your name?\""
     )
 
 
@@ -1416,6 +1431,47 @@ def _build_call_duration_section(t, locale: str = "en") -> str:
     )
 
 
+def _build_final_nonnegotiables_section(locale: str = "en") -> str:
+    # Best-practices optimization (2026-06): a short recap of the must-win
+    # invariants, placed LAST in the assembled prompt. Rationale (cited in the
+    # prompt-optimization research): GPT-4.1 follows the LATER of two
+    # conflicting instructions, and long-context models attend most strongly to
+    # the beginning and end (the "lost in the middle" effect). The high-stakes
+    # anti-fabrication / no-double-booking / clean-goodbye rules live in the
+    # MIDDLE of this long prompt; restating them at the recency position
+    # reinforces them without weakening or duplicating the authoritative
+    # sections above. Item 4 also re-anchors the brief-description behavior.
+    # This is a RECAP, not a re-teach — kept deliberately short.
+    if locale == "es":
+        return (
+            "FINAL — INNEGOCIABLES (prevalecen sobre cualquier cosa anterior si llegan a "
+            "entrar en conflicto):\n"
+            "1. No diga que una hora está 'disponible', ni diga 'reservado', 'confirmado' "
+            "ni 'todo listo', a menos que una herramienta haya devuelto ese resultado exacto "
+            "en ESTE turno. Si aún no ha llamado a la herramienta, no lo sabe.\n"
+            "2. Después de que book_appointment devuelva éxito, la reserva está hecha — no "
+            "reserve el mismo espacio otra vez, y solo pase un slot_token real que check_slot "
+            "haya devuelto.\n"
+            "3. Termine toda su despedida, deje pasar un breve silencio, y LUEGO llame a "
+            "end_call en un turno separado sin más palabras — para que el llamante nunca lo "
+            "escuche cortarse.\n"
+            "4. Mantenga el problema en una descripción breve — una o dos frases, y luego "
+            "avance hacia la reserva. No interrogue al llamante sobre la situación."
+        )
+    return (
+        "FINAL — NON-NEGOTIABLES (these override anything above if they ever conflict):\n"
+        "1. Don't say a time is 'available', or say 'booked', 'confirmed', or 'all set', "
+        "unless a tool returned that exact result earlier in THIS turn. If you haven't called "
+        "the tool yet, you don't know it.\n"
+        "2. After book_appointment returns success, the booking is done — don't book the same "
+        "slot again, and only ever pass a real slot_token that check_slot returned.\n"
+        "3. Finish your whole goodbye, let a brief silence pass, THEN call end_call in a "
+        "separate turn with no more words — so the caller never hears you cut off.\n"
+        "4. Keep the problem to a brief description — a sentence or two, then move toward "
+        "booking. Don't interrogate the caller about the situation."
+    )
+
+
 # --- Main builder -------------------------------------------------------------
 
 
@@ -1490,6 +1546,11 @@ def build_system_prompt(
             _build_transfer_section(business_name, locale),
         ]
     )
+
+    # Must be LAST: a short recap of the must-win invariants at the recency
+    # position (last-instruction-wins + lost-in-the-middle — see the function's
+    # docstring). Appended after every other section so nothing follows it.
+    sections.append(_build_final_nonnegotiables_section(locale))
 
     # Filter out empty strings (equivalent to JS .filter(Boolean))
     sections = [s for s in sections if s]
