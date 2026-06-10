@@ -62,12 +62,12 @@ def test_identity_en_contains_business_name():
 
 
 def test_identity_es_contains_business_name():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    # body — the invariant (identity renders for es-locale calls with the
+    # business name) maps to the EN pins.
     out = _build_identity_section("Voco", "measured and formal", "es")
     assert "Voco" in out
-    assert (
-        "recepcionista de teléfono con IA" in out
-        or "recepcionista telefónico" in out
-    )
+    assert "AI phone receptionist" in out
 
 
 # --- working_hours ------------------------------------------------------------
@@ -92,13 +92,15 @@ def test_working_hours_en_nonempty_when_hours_provided():
     assert "Closed" in out
 
 
-def test_working_hours_es_translated_prose_when_hours_provided():
+def test_working_hours_es_renders_same_as_en():
+    # 2026-06-11 collapse: the schedule block is prompt-internal data, not
+    # caller-facing prose — es-locale now renders the same EN labels (the
+    # LANGUAGE section's Spanish guide covers speaking days/times in Spanish).
     out = _build_working_hours_section(_SAMPLE_HOURS, "America/Chicago", "es")
     assert out.strip() != ""
-    # Caller-facing prose translated
-    lowered = out.lower()
-    assert "lun" in lowered  # Spanish short label for Monday
-    assert "cerrado" in lowered
+    assert "Mon" in out
+    assert "Closed" in out
+    assert out == _build_working_hours_section(_SAMPLE_HOURS, "America/Chicago", "en")
 
 
 def test_working_hours_empty_returns_empty_en():
@@ -125,20 +127,27 @@ def test_greeting_en_references_disclosure_without_inlining():
 
 
 def test_greeting_es_references_disclosure_without_inlining():
+    # 2026-06-11 collapse: es-locale section is the same EN text — the
+    # invariant (refer to the disclosure, never inline either locale's
+    # template sentence) keeps both non-inlining checks.
     t = _make_t("es")
     out = _build_greeting_section(
         "es", "Voco", onboarding_complete=True, t=t
     )
-    assert "divulgación de grabación" in out.lower()
+    assert "recording disclosure" in out.lower()
     assert _es["agent"]["recording_disclosure"] not in out
+    assert _en["agent"]["recording_disclosure"] not in out
 
 
-def test_greeting_en_es_distinct():
+def test_greeting_en_es_identical():
+    # 2026-06-11 collapse: the old distinctness guard inverts — the greeting
+    # SECTION must not fork on locale (the spoken session.say template in
+    # messages/{en,es}.json stays per-locale and untouched).
     t_en = _make_t("en")
     t_es = _make_t("es")
     out_en = _build_greeting_section("en", "Voco", True, t_en)
     out_es = _build_greeting_section("es", "Voco", True, t_es)
-    assert out_en != out_es
+    assert out_en == out_es
 
 
 # --- language -----------------------------------------------------------------
@@ -151,12 +160,12 @@ def test_language_en_directive():
 
 
 def test_language_es_directive():
+    # 2026-06-11 collapse: the default-to-Spanish directive is now stated in
+    # English — same invariant (locale flips the tenant default language).
     t = _make_t("es")
     out = _build_language_section(t, "es")
-    lowered = out.lower()
-    # Spanish directive to default to Spanish
-    assert "español" in lowered or "espanol" in lowered
-    assert "por defecto" in lowered
+    assert "This business operates in Spanish" in out
+    assert "default to Spanish" in out
 
 
 # --- customer_account ---------------------------------------------------------
@@ -177,8 +186,10 @@ def test_customer_account_en_header_when_context_present():
 
 
 def test_customer_account_es_header_when_context_present():
+    # 2026-06-11 collapse: es-locale output is the same EN frame — invariant
+    # (section renders for es-locale calls when context present) maps to EN.
     out = _build_customer_account_section(_SAMPLE_CTX, "es")
-    assert "CONTEXTO DEL CLIENTE" in out
+    assert "CUSTOMER CONTEXT" in out
 
 
 def test_customer_account_empty_when_no_context_en():
@@ -201,9 +212,10 @@ def test_intake_en_preamble():
 
 
 def test_intake_es_preamble():
+    # 2026-06-11 collapse: es-locale preamble is the same EN text.
     out = _build_intake_questions_section("Ask about pets", "es")
     lowered = out.lower()
-    assert "preguntas adicionales" in lowered
+    assert "additional questions" in lowered
 
 
 def test_intake_empty_when_no_questions_en():
@@ -231,10 +243,11 @@ def test_decline_es_nonempty_onboarded():
     assert "Voco" in out
 
 
-def test_decline_en_es_distinct():
+def test_decline_en_es_identical():
+    # 2026-06-11 collapse: the old distinctness guard inverts — must not fork.
     out_en = _build_decline_handling_section("Voco", "en")
     out_es = _build_decline_handling_section("Voco", "es")
-    assert out_en != out_es
+    assert out_en == out_es
 
 
 # --- transfer -----------------------------------------------------------------
@@ -248,20 +261,23 @@ def test_transfer_en_two_triggers():
 
 
 def test_transfer_es_two_triggers():
+    # 2026-06-11 collapse: same two-trigger invariant for es-locale calls;
+    # EN pins.
     out = _build_transfer_section("Voco", "es")
     lowered = out.lower()
-    assert "pide explícitamente" in lowered or "pide explicitamente" in lowered
-    assert ("3 intentos" in lowered) or ("tres intentos" in lowered)
+    assert "explicitly asks" in lowered
+    assert ("3 attempts" in lowered) or ("three attempts" in lowered)
 
 
 # --- Global full-assembled regression guard ----------------------------------
 
 
-def test_full_assembled_prompt_es_contains_spanish_markers():
+def test_full_assembled_prompt_es_is_single_english_prompt():
     """
-    Catches silent en-fallback regressions — assembled ES prompt must contain
-    enough Spanish-specific markers across the support sections added in this
-    batch that no tail section silently reverts to English.
+    2026-06-11 single-prompt collapse: the old guard (assembled ES prompt
+    contains Spanish prose) INVERTS — the es-locale prompt must now be the
+    single English prompt carrying only the Spanish-default line and the
+    Spanish delivery guide, with no resurrected ES section headers.
     """
     prompt = build_system_prompt(
         locale="es",
@@ -272,22 +288,22 @@ def test_full_assembled_prompt_es_contains_spanish_markers():
         working_hours=_SAMPLE_HOURS,
         customer_context=None,
     )
-    # At least 5 independent Spanish markers
-    markers = [
-        "¿",
-        "llamante",
-        "cita",
-        "herramienta",
-        "español",
-        "recepcionista",
-        "REGLA CRÍTICA",
-        "dirección",
-    ]
-    hits = sum(1 for m in markers if m in prompt)
-    assert hits >= 5, (
-        f"Expected >= 5 Spanish markers in assembled ES prompt; got {hits}. "
-        "Likely a tail section silently fell back to English."
-    )
+    # locale="es" effect: the default-to-Spanish line + the Spanish guide.
+    assert "This business operates in Spanish" in prompt
+    assert "SPEAKING SPANISH — DELIVERY GUIDE:" in prompt
+    # No ES section headers may come back (anti-fork lock).
+    for es_header in (
+        "IDIOMA:",
+        "RESERVA:",
+        "PALABRAS DE RESULTADO",
+        "VALIDACIÓN DE DIRECCIÓN",
+        "NARRACIÓN DE HERRAMIENTAS:",
+        "FINAL — INNEGOCIABLES",
+    ):
+        assert es_header not in prompt, (
+            f"ES section header {es_header!r} resurfaced — the prompt must "
+            "stay single-language English"
+        )
 
 
 def test_full_assembled_prompt_en_stays_english():

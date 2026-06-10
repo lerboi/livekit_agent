@@ -62,12 +62,14 @@ def test_en_exists_single_question_framing():
 
 
 def test_es_exists_single_question_framing():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    # body — the single-question framing pins map to the EN words.
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
     assert isinstance(section, str)
     assert section
     lowered = section.lower()
-    assert "una" in lowered
-    assert ("a la vez" in lowered) or ("por vez" in lowered)
+    assert "one" in lowered
+    assert "at a time" in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +83,9 @@ def test_en_address_intake_present():
 
 
 def test_es_address_intake_present():
+    # 2026-06-11 collapse: address-intake invariant unchanged; EN word.
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
-    assert "dirección" in section.lower()
+    assert "address" in section.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +101,11 @@ def test_en_phone_readback_present():
 
 
 def test_es_phone_readback_present():
+    # 2026-06-11 collapse: phone-readback invariant unchanged; EN pins.
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
     lowered = section.lower()
-    assert "número de teléfono" in lowered
-    assert "confirmar" in lowered
+    assert "phone number" in lowered
+    assert ("read back" in lowered) or ("confirm" in lowered)
 
 
 # ---------------------------------------------------------------------------

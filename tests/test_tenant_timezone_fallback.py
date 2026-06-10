@@ -7,9 +7,10 @@ those fallbacks with "UTC" plus a structured WARN so operators can detect
 unconfigured tenants during Phase 60.4 UAT.
 
 Sites covered:
-  - src/tools/book_appointment.py:266
-  - src/tools/check_availability.py:142
-  - src/post_call.py:612
+  - src/tools/book_appointment.py (assignment + WARN block)
+  - src/tools/check_slot.py / check_day.py / next_available_days.py
+    (inline `or "UTC"` — ported from the retired check_availability.py)
+  - src/post_call.py (assignment + WARN block)
 """
 from __future__ import annotations
 
@@ -40,20 +41,29 @@ def test_book_appointment_null_tz_falls_back_to_UTC_with_warn(caplog):
     )
 
 
-def test_check_availability_null_tz_falls_back_to_UTC_with_warn():
-    src = open(
-        "C:/Users/leheh/.Projects/livekit-agent/src/tools/check_availability.py",
-        encoding="utf-8",
-    ).read()
-    assert "[tenant_config] null tenant_timezone" in src, (
-        "check_availability.py: structured WARN substring missing"
-    )
-    assert 'tenant_timezone = "UTC"' in src, (
-        "check_availability.py: UTC fallback assignment missing"
-    )
-    assert 'or "America/Chicago"' not in src, (
-        "check_availability.py: legacy America/Chicago silent fallback still present"
-    )
+def test_availability_tools_null_tz_fall_back_to_UTC():
+    """Ported 2026-06-10: check_availability.py was split into check_slot /
+    check_day / next_available_days. The D-A-05 invariant they must keep is
+    the UTC fallback (never the silent America/Chicago default that
+    miscalculated SG bookings by 13 hours). The split tools use an inline
+    `or "UTC"` fallback rather than the assignment+WARN block, so the WARN
+    pin no longer applies at these sites (book_appointment/post_call keep
+    theirs — see the sibling tests)."""
+    for fname in (
+        "src/tools/check_slot.py",
+        "src/tools/check_day.py",
+        "src/tools/next_available_days.py",
+    ):
+        src = open(
+            f"C:/Users/leheh/.Projects/livekit-agent/{fname}",
+            encoding="utf-8",
+        ).read()
+        assert 'or "UTC"' in src, (
+            f"{fname}: UTC fallback for null tenant_timezone missing"
+        )
+        assert "America/Chicago" not in src, (
+            f"{fname}: legacy America/Chicago silent fallback still present"
+        )
 
 
 def test_post_call_null_tz_falls_back_to_UTC_with_warn():

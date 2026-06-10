@@ -101,7 +101,7 @@ def calculate_initial_slots(supabase, tenant: dict) -> str:
 
     events_result = (
         supabase.table("calendar_events")
-        .select("start_time, end_time")
+        .select("start_time, end_time, is_all_day")
         .eq("tenant_id", tenant["id"])
         .gte("end_time", now_iso)
         .execute()

@@ -199,7 +199,7 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
             ),
             asyncio.to_thread(
                 lambda: supabase.table("calendar_events")
-                .select("start_time, end_time")
+                .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
                 .gte("end_time", now_iso)
                 .execute()
@@ -218,7 +218,7 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
             ),
             asyncio.to_thread(
                 lambda: supabase.table("calendar_blocks")
-                .select("start_time, end_time")
+                .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
                 .gte("end_time", now_iso)
                 .execute()

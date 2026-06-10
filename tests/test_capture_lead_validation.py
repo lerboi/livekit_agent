@@ -74,10 +74,13 @@ def _make_validation_result(verdict: str, formatted: str | None = None) -> dict:
 
 @pytest.fixture
 def patched_handler():
-    """Patches validate_address_bounded + record_outcome (both async) inside the
-    capture_lead module."""
-    with patch("src.tools.capture_lead.validate_address_bounded", new_callable=AsyncMock) as mock_validate, \
+    """Patches validate_address_with_region_fallback + record_outcome (both
+    async) inside the capture_lead module. The region-fallback wrapper returns
+    a (result, region_used) tuple; the side_effect wraps the bare result dict
+    each test assigns so the tests stay tuple-agnostic."""
+    with patch("src.tools.capture_lead.validate_address_with_region_fallback", new_callable=AsyncMock) as mock_validate, \
          patch("src.tools.capture_lead.record_outcome", new_callable=AsyncMock) as mock_record:
+        mock_validate.side_effect = lambda *a, **k: (mock_validate.return_value, "US")
         yield {"validate": mock_validate, "record": mock_record}
 
 

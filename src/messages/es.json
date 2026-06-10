@@ -12,7 +12,8 @@
     "fallback_no_booking": "He anotado su informacion y alguien de nuestro equipo se comunicara con usted pronto.",
     "language_barrier_escalation": "Voy a asegurarme de que alguien que hable {language} se comunique con usted de inmediato.",
     "greeting_onboarding": "Hola, gracias por llamar a {business_name}. Esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
-    "greeting_default": "Hola, esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?"
+    "greeting_default": "Hola, esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
+    "max_duration_goodbye": "Lo siento, hemos alcanzado la duracion maxima de la llamada. Alguien del equipo le contactara en breve. Gracias por llamar — adios."
   },
   "notifications": {
     "booking_confirmation": "Su cita con {business_name} esta confirmada para el {date} a las {time}. Direccion: {address}",

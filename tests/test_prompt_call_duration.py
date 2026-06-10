@@ -54,25 +54,23 @@ def test_en_contains_critical_rule_frame():
 
 
 def test_es_contains_spanish_critical_rule():
-    """D7 locale parity: Spanish output uses REGLA CRÍTICA framing
-    (mirrors English CRITICAL RULE convention for top-attention-band)."""
+    """2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    body — the invariant (CRITICAL RULE framing present for es-locale calls)
+    maps to the EN header."""
     section = _build_call_duration_section(_t_stub, locale="es")
-    # Plan 5 selects "TERMINAR LA LLAMADA — REGLA CRÍTICA" as the canonical
-    # Spanish header (documented in the diff).
-    assert "TERMINAR LA LLAMADA — REGLA CRÍTICA" in section
+    assert "ENDING THE CALL — CRITICAL RULE" in section
 
 
 # ── Locale differentiation ─────────────────────────────────────────────────
 
 
-def test_en_and_es_are_distinct():
-    """D7 locale parity: en and es branches must return different strings
-    (i.e. the es branch is not a copy-paste of the en body)."""
+def test_en_and_es_are_identical():
+    """2026-06-11 collapse: the old distinctness guard inverts — this section
+    must NOT fork on locale anymore."""
     en = _build_call_duration_section(_t_stub, locale="en")
     es = _build_call_duration_section(_t_stub, locale="es")
-    assert en != es
+    assert en == es
     assert len(en) > 0
-    assert len(es) > 0
 
 
 # ── Shared numeric invariants (D1 anti-hallucination) ──────────────────────
@@ -94,15 +92,13 @@ def test_both_locales_retain_9_and_10_minute_bounds():
 
 
 def test_both_locales_have_failure_mode_example():
-    """D2 realtime-model: each locale must have a WRONG/RIGHT (or
-    INCORRECTO/CORRECTO) failure-mode contrast — concrete examples are
-    load-bearing for realtime models per 60.3-RESEARCH §R-B5."""
-    en = _build_call_duration_section(_t_stub, locale="en")
-    es = _build_call_duration_section(_t_stub, locale="es")
-    assert "WRONG:" in en
-    assert "RIGHT:" in en
-    assert "INCORRECTO:" in es
-    assert "CORRECTO:" in es
+    """D2: each locale must carry the WRONG/RIGHT failure-mode contrast —
+    concrete examples are load-bearing per 60.3-RESEARCH §R-B5.
+    2026-06-11 collapse: both locales now carry the EN example."""
+    for locale in ("en", "es"):
+        section = _build_call_duration_section(_t_stub, locale=locale)
+        assert "WRONG:" in section
+        assert "RIGHT:" in section
 
 
 # ── Brand-name invariants (CLAUDE.md rule) ─────────────────────────────────
@@ -129,9 +125,10 @@ def test_section_is_position_5_or_earlier_in_both_locales():
     i.e. inside the top-attention band (Plan 3 Branch P invariant,
     extended to the es branch by Plan 5; tool_narration es header added
     by Plan 6)."""
+    # 2026-06-11 collapse: both locales assemble the same EN headers.
     for locale, cd_header, tn_header in (
         ("en", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION:"),
-        ("es", "TERMINAR LA LLAMADA — REGLA CRÍTICA", "NARRACIÓN DE HERRAMIENTAS:"),
+        ("es", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION:"),
     ):
         assembled = build_system_prompt(
             locale=locale,

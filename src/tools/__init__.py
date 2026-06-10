@@ -12,6 +12,7 @@ from .check_slot import create_check_slot_tool
 from .check_day import create_check_day_tool
 from .next_available_days import create_next_available_days_tool
 from .book_appointment import create_book_appointment_tool
+from .validate_address import create_validate_address_tool
 
 
 def create_tools(deps: dict) -> list:
@@ -19,8 +20,10 @@ def create_tools(deps: dict) -> list:
     Create all tools for the voice agent session.
 
     Tool ordering:
-    - transfer_call, capture_lead, check_caller_history, check_customer_account,
-      end_call -- always available
+    - transfer_call, capture_lead, validate_address, check_caller_history,
+      check_customer_account, end_call -- always available. validate_address
+      is always-on (2026-06-10) because capture_lead needs addresses too and
+      capture_lead is always registered.
     - check_slot, check_day, next_available_days, book_appointment -- only when
       onboarding_complete. The three availability tools split the former
       monolithic check_availability; see
@@ -29,6 +32,7 @@ def create_tools(deps: dict) -> list:
     tools = [
         create_transfer_call_tool(deps),
         create_capture_lead_tool(deps),
+        create_validate_address_tool(deps),
         create_check_caller_history_tool(deps),
         create_check_customer_account_tool(deps),
         create_end_call_tool(deps),

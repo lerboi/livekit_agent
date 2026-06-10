@@ -38,35 +38,46 @@ def test_en_critical_rule_heading():
 
 
 def test_es_critical_rule_heading():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same English
+    # body — invariant (outcome-words CRITICAL RULE present for es-locale
+    # calls) maps to the EN header.
     section = _build_outcome_words_section("es")
     assert isinstance(section, str)
-    assert "PALABRAS DE RESULTADO — REGLA CRÍTICA:" in section
+    assert "OUTCOME WORDS — CRITICAL RULE:" in section
 
 
 def test_en_reserved_words_enumerated():
+    # 2026-06-10: tool pin updated from the retired monolithic
+    # check_availability to check_slot (the split tool that licenses the
+    # 'available' reserved word). Same invariant — reserved words map to
+    # real, untranslated tool identifiers.
     section = _build_outcome_words_section("en")
     for word in (
         "available",
         "not available",
         "confirmed",
         "booked",
-        "check_availability",
+        "check_slot",
         "book_appointment",
     ):
         assert word in section, f"EN missing reserved word/tool: {word!r}"
 
 
 def test_es_reserved_words_enumerated():
-    # Tool names (check_availability, book_appointment) are code identifiers
-    # wired to src/tools/ — they MUST NOT be translated. Reserved Spanish
-    # words (disponible/no disponible/confirmado/reservado) MUST appear.
+    # Tool names (check_slot, book_appointment) are code identifiers wired
+    # to src/tools/ — they MUST NOT be translated. Reserved Spanish words
+    # (disponible/no disponible/confirmado/reservado) MUST appear.
+    # (2026-06-10: check_availability → check_slot.)
+    # 2026-06-11 collapse: the Spanish forms now live in the unified EN
+    # section's "in any language, including Spanish" clause — same invariant,
+    # no ES branch needed.
     section = _build_outcome_words_section("es")
     for word in (
         "disponible",
         "no disponible",
         "confirmado",
         "reservado",
-        "check_availability",
+        "check_slot",
         "book_appointment",
     ):
         assert word in section, f"ES missing reserved word/tool: {word!r}"
@@ -78,34 +89,38 @@ def test_en_failure_mode_3pm_example():
     assert "WRONG" in section
     # Characterization of tool-free fabrication — the example must show the
     # model claiming availability without a tool call in the same turn.
-    assert "check_availability" in section
+    # (2026-06-10: check_availability → check_slot, the real tool name.)
+    assert "check_slot" in section
 
 
 def test_es_failure_mode_3pm_example():
+    # 2026-06-11 collapse: the failure-mode teaching invariant maps to the EN
+    # example (3pm + WRONG) for es-locale calls too.
     section = _build_outcome_words_section("es")
-    # Spanish-speaking markets vary on clock convention: "3pm" (US/PR/MX
-    # informal), "3 pm" (spaced), or "15:00" (ES/LatAm formal).
-    assert ("3pm" in section) or ("3 pm" in section) or ("15:00" in section)
-    assert "INCORRECTO" in section
+    assert "3pm" in section
+    assert "WRONG" in section
 
 
 def test_both_locales_worst_failure_mode_framing():
-    en = _build_outcome_words_section("en").lower()
-    es = _build_outcome_words_section("es").lower()
-    assert "worst failure mode" in en
-    assert ("peor modo de falla" in es) or ("peor escenario" in es)
+    # 2026-06-11 collapse: worst-failure framing unchanged; EN text in both.
+    for locale in ("en", "es"):
+        assert "worst failure mode" in _build_outcome_words_section(locale).lower()
 
 
 def test_both_locales_silence_acceptable():
-    en = _build_outcome_words_section("en").lower()
-    es = _build_outcome_words_section("es").lower()
-    assert "silence" in en and "acceptable" in en
-    assert "silencio" in es and "aceptable" in es
+    # 2026-06-11 collapse: silence-during-tool license unchanged; EN in both.
+    for locale in ("en", "es"):
+        lowered = _build_outcome_words_section(locale).lower()
+        assert "silence" in lowered and "acceptable" in lowered
 
 
-def test_en_es_distinct():
+def test_en_es_identical():
+    # 2026-06-11 collapse: the old distinctness guard inverts — this section
+    # must NOT fork on locale. The Spanish reserved-word forms now live in
+    # the bilingual any-language clause (asserted by
+    # test_es_reserved_words_enumerated above).
     en = _build_outcome_words_section("en")
     es = _build_outcome_words_section("es")
-    assert en != es
-    # Sanity: ES must actually contain Spanish text, not be an EN fallback.
-    assert "REGLA CRÍTICA" in es
+    assert en == es
+    # And the bilingual clause must stay framed as any-language.
+    assert "in any language, including Spanish" in en

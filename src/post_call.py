@@ -209,7 +209,7 @@ async def run_post_call_pipeline(params: dict):
     )
 
     # ── 6.5. Record call outcome (Phase 59 RPC) ─────────────────────────────
-    # MUST run BEFORE suggested_slots calculation (Section 7). The full pipeline
+    # MUST run BEFORE suggested_slots calculation (Section 8). The full pipeline
     # has an 8s hard timeout in agent.py (SDK SIGKILL safety belt). On unbooked
     # calls, _calculate_suggested_slots runs multiple DB queries + slot math
     # that frequently eats 5-7s of the budget, leaving no time to create the
@@ -224,19 +224,20 @@ async def run_post_call_pipeline(params: dict):
     # plus links the call to customer_calls and job_calls junctions.
     #
     # D-02a: NO fallback to legacy leads — if the RPC raises, log and move on.
-    caller_name = None
-    job_type = None
-    lead: dict | None = None  # shape-compat dict for Section 10 notification block
+    #
+    # caller_name/job_type are extracted OUTSIDE the call_uuid gate so the
+    # owner-notification block (Section 7) can degrade gracefully to
+    # transcript-derived call metadata even when the calls-row insert failed
+    # (call_uuid None) or the RPC raised. Prefer the caller_name captured at
+    # booking time (verified by the AI) over the regex fallback, which has a
+    # high false-positive rate on phrases like "it's raining" or "i'm calling".
+    caller_name = booked_caller_name or _extract_field_from_transcript(
+        transcript_turns, "name"
+    )
+    job_type = _extract_field_from_transcript(transcript_turns, "job")
+    lead: dict | None = None  # shape-compat dict for the Section 7 notification block
     if call_uuid and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
         try:
-            # Prefer the caller_name captured at booking time (verified by the AI)
-            # over the regex fallback, which has a high false-positive rate on
-            # phrases like "it's raining" or "i'm calling".
-            caller_name = booked_caller_name or _extract_field_from_transcript(
-                transcript_turns, "name"
-            )
-            job_type = _extract_field_from_transcript(transcript_turns, "job")
-
             # Prefer the appointment_id returned directly from the booking tool;
             # fall back to the FK lookup only if we don't have it.
             appointment_id = booked_appointment_id
@@ -263,7 +264,7 @@ async def run_post_call_pipeline(params: dict):
                 job_type=job_type,
             )
 
-            # Build a lead-compat dict for Section 10 (owner notifications).
+            # Build a lead-compat dict for Section 7 (owner notifications).
             lead = {
                 "from_number": from_number,
                 "caller_name": caller_name,
@@ -279,7 +280,99 @@ async def run_post_call_pipeline(params: dict):
         except Exception as e:
             print(f"[post-call] record_outcome unexpected error (call_id={call_id}): {e}")
 
-    # ── 7. Calculate suggested slots for unbooked calls ──
+    # ── 7. Send owner notifications ──
+    # Runs IMMEDIATELY after triage + the record_outcome attempt, BEFORE the
+    # slower optional steps (suggested slots, hallucination detection), so the
+    # 8s post-call budget can never starve the owner alert. Notifications no
+    # longer require the record_call_outcome RPC to have succeeded: `lead`
+    # only enriches the message; when it is None we degrade to call metadata
+    # (caller number + transcript-derived name/job, no CRM ids/address) so a
+    # transient DB error can never silently drop an EMERGENCY alert.
+    if tenant_id and tenant:
+        try:
+            tenant_info_resp = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
+                .select("business_name, owner_phone, owner_email, notification_preferences")
+                .eq("id", tenant_id)
+                .single()
+                .execute()
+            )
+            tenant_info = tenant_info_resp.data
+
+            if tenant_info:
+                # Use the in-memory outcome (booking reconciliation + the post-call
+                # calls fetch keep it current) instead of re-querying the DB —
+                # saves a round-trip inside the 8s budget.
+                final_outcome = booking_outcome or "not_attempted"
+                is_emergency = triage_result["urgency"] == "emergency"
+
+                # Degrade gracefully when record_outcome failed or was skipped:
+                # fall back to call metadata; CRM ids are simply absent.
+                notify_lead = dict(lead) if lead else {
+                    "from_number": from_number,
+                    "caller_name": caller_name,
+                    "job_type": job_type,
+                    "service_address": None,
+                }
+                # send_owner_email reads urgency off the lead dict.
+                notify_lead["urgency"] = triage_result["urgency"]
+
+                prefs = tenant_info.get("notification_preferences") or {}
+                if is_emergency:
+                    outcome_prefs = {"sms": True, "email": True}
+                else:
+                    outcome_prefs = prefs.get(final_outcome, {"sms": True, "email": True})
+
+                # Phase 59: route owners to the correct dashboard surface and
+                # flip notification wording by outcome. Booked → /dashboard/jobs
+                # + "New booking"; unbooked → /dashboard/inquiries + "New inquiry".
+                is_booked = (final_outcome == "booked")
+                callback_link = f"tel:{notify_lead.get('from_number', '') or from_number}"
+                dashboard_path = "/dashboard/jobs" if is_booked else "/dashboard/inquiries"
+                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}{dashboard_path}"
+                business_name = tenant_info.get("business_name", "Your Business")
+
+                tasks = []
+
+                if outcome_prefs.get("sms") and tenant_info.get("owner_phone"):
+                    tasks.append(asyncio.to_thread(
+                        send_owner_sms,
+                        to=tenant_info["owner_phone"],
+                        from_number=to_number,  # tenant's own Twilio number
+                        business_name=business_name,
+                        caller_name=notify_lead.get("caller_name"),
+                        job_type=notify_lead.get("job_type"),
+                        urgency=triage_result["urgency"],
+                        address=notify_lead.get("service_address"),
+                        callback_link=callback_link,
+                        dashboard_link=dashboard_link,
+                        is_booked=is_booked,
+                    ))
+
+                if outcome_prefs.get("email") and tenant_info.get("owner_email"):
+                    tasks.append(asyncio.to_thread(
+                        send_owner_email,
+                        to=tenant_info["owner_email"],
+                        lead=notify_lead,
+                        is_booked=is_booked,
+                        business_name=business_name,
+                        dashboard_url=dashboard_link,
+                    ))
+
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    statuses = ", ".join(
+                        f"{'first' if i == 0 else 'second'}={'fulfilled' if not isinstance(r, Exception) else 'rejected'}"
+                        for i, r in enumerate(results)
+                    )
+                    print(
+                        f"[post-call] Owner notify: tenant={tenant_id} outcome={final_outcome} "
+                        f"emergency={is_emergency} degraded={lead is None} {statuses}"
+                    )
+        except Exception as e:
+            print(f"[post-call] Notification error: {e}")
+
+    # ── 8. Calculate suggested slots for unbooked calls ──
     suggested_slots = None
     if not booking_outcome or booking_outcome == "not_attempted":
         try:
@@ -289,14 +382,14 @@ async def run_post_call_pipeline(params: dict):
         except Exception as e:
             print(f"[post-call] Suggested slots calculation failed: {e}")
 
-    # ── 8. Update call with triage + language data ──
+    # ── 9. Update call with triage + language data ──
     notification_priority = (
         "high" if triage_result["urgency"] in ("emergency", "urgent") else "standard"
     )
 
-    # Defensive: any failure here must NOT propagate up and skip steps 8b/9/10.
-    # A single failed update should never lose the lead, owner notification, and
-    # hallucination flag for the entire call.
+    # Defensive: any failure here must NOT propagate up and skip step 9b.
+    # A single failed update should never lose the hallucination flag for the
+    # entire call. (Lead creation and owner notifications already ran above.)
     try:
         await asyncio.to_thread(
             lambda: supabase.table("calls").update({
@@ -321,7 +414,7 @@ async def run_post_call_pipeline(params: dict):
     except Exception as e:
         print(f"[post-call] booking_outcome NULL fallback error (non-fatal): {e}")
 
-    # ── 8b. Silent hallucination detection (observability only) ──
+    # ── 9b. Silent hallucination detection (observability only) ──
     # If the agent verbally confirmed a booking but book_appointment never returned
     # success, flag it in call_metadata + Sentry. NO owner notification — Layers 1-3
     # (prompt + tool descriptions + non-parrotable returns) are the prevention; this
@@ -393,84 +486,9 @@ async def run_post_call_pipeline(params: dict):
         # Detection must never break the post-call pipeline.
         print(f"[post-call] Hallucination detector error (non-fatal): {halluc_err}")
 
-    # ── 9. (moved to Section 6.5 — record_outcome now runs before suggested_slots
-    #      so unbooked calls don't time out before writing the inquiry row.)
-
-    # ── 10. Send owner notifications ──
-    if tenant_id and tenant:
-        try:
-            tenant_info_resp = await asyncio.to_thread(
-                lambda: supabase.table("tenants")
-                .select("business_name, owner_phone, owner_email, notification_preferences")
-                .eq("id", tenant_id)
-                .single()
-                .execute()
-            )
-            tenant_info = tenant_info_resp.data
-
-            if tenant_info and lead:
-                call_row_resp = await asyncio.to_thread(
-                    lambda: supabase.table("calls")
-                    .select("booking_outcome")
-                    .eq("call_id", call_id)
-                    .single()
-                    .execute()
-                )
-                call_row = call_row_resp.data
-                final_outcome = (call_row.get("booking_outcome") if call_row else None) or "not_attempted"
-                is_emergency = triage_result["urgency"] == "emergency"
-
-                prefs = tenant_info.get("notification_preferences") or {}
-                if is_emergency:
-                    outcome_prefs = {"sms": True, "email": True}
-                else:
-                    outcome_prefs = prefs.get(final_outcome, {"sms": True, "email": True})
-
-                # Phase 59: route owners to the correct dashboard surface and
-                # flip notification wording by outcome. Booked → /dashboard/jobs
-                # + "New booking"; unbooked → /dashboard/inquiries + "New inquiry".
-                is_booked = (final_outcome == "booked")
-                callback_link = f"tel:{lead.get('from_number', '') or from_number}"
-                dashboard_path = "/dashboard/jobs" if is_booked else "/dashboard/inquiries"
-                dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}{dashboard_path}"
-                business_name = tenant_info.get("business_name", "Your Business")
-
-                tasks = []
-
-                if outcome_prefs.get("sms") and tenant_info.get("owner_phone"):
-                    tasks.append(asyncio.to_thread(
-                        send_owner_sms,
-                        to=tenant_info["owner_phone"],
-                        from_number=to_number,  # tenant's own Twilio number
-                        business_name=business_name,
-                        caller_name=lead.get("caller_name"),
-                        job_type=lead.get("job_type"),
-                        urgency=triage_result["urgency"],
-                        address=lead.get("service_address"),
-                        callback_link=callback_link,
-                        dashboard_link=dashboard_link,
-                        is_booked=is_booked,
-                    ))
-
-                if outcome_prefs.get("email") and tenant_info.get("owner_email"):
-                    tasks.append(asyncio.to_thread(
-                        send_owner_email,
-                        to=tenant_info["owner_email"],
-                        lead=lead,
-                        is_booked=is_booked,
-                        business_name=business_name,
-                        dashboard_url=dashboard_link,
-                    ))
-
-                if tasks:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    statuses = ", ".join(
-                        f"{'first' if i == 0 else 'second'}={'fulfilled' if not isinstance(r, Exception) else 'rejected'}"
-                        for i, r in enumerate(results)
-                    )
-                    print(f"[post-call] Owner notify: tenant={tenant_id} outcome={final_outcome} emergency={is_emergency} {statuses}")
-        except Exception as e:
-            print(f"[post-call] Notification error: {e}")
+    # ── (owner notifications moved to Section 7 — they now run before the
+    #     optional suggested-slots / hallucination steps and no longer depend
+    #     on the record_call_outcome RPC having succeeded.)
 
     print(
         f"[post-call] Complete: callId={call_id} duration={duration_seconds}s "
@@ -637,7 +655,7 @@ def _calculate_suggested_slots(supabase, tenant):
     )
     events_resp = (
         supabase.table("calendar_events")
-        .select("start_time, end_time")
+        .select("start_time, end_time, is_all_day")
         .eq("tenant_id", tenant["id"])
         .execute()
     )

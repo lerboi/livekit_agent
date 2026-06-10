@@ -50,6 +50,18 @@ JOBBER_API_VERSION = "2025-04-16"  # keep in sync with Next.js Plan 01
 DEFAULT_PHONE_REGION = "US"
 E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
+# Token refresh gets its OWN generous HTTP budget, separate from the
+# sub-second context-fetch client. Jobber consumes the single-use refresh
+# token the moment its server processes the request — aborting before the
+# response is read orphans the rotated token and permanently bricks the
+# connection (owner must reconnect). Never let the 0.3/0.7s fetch timeouts
+# or the caller's 0.8s context budget cut a rotation short.
+REFRESH_HTTP_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0)
+
+# Strong refs to in-flight shielded refresh tasks — asyncio holds only weak
+# refs to tasks, and these must outlive a cancelled context fetch.
+_REFRESH_TASKS: set = set()
+
 OUTSTANDING_STATUSES = {"AWAITING_PAYMENT", "BAD_DEBT", "PARTIAL", "PAST_DUE"}
 
 # Mirrors src/lib/integrations/jobber.js FETCH_QUERY literal.
@@ -236,48 +248,62 @@ async def _touch_last_context_fetch_at(cred_id: str) -> None:
         pass
 
 
-async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+async def _do_wire_refresh(cred: dict) -> Optional[dict]:
     """POST refresh_token grant; persist the NEW token set back. Caller holds lock.
 
+    Uses a DEDICATED httpx client with REFRESH_HTTP_TIMEOUT — never the
+    sub-second context-fetch client (a 0.7s read timeout on the token
+    endpoint loses the rotated refresh_token Jobber has already issued).
+
+    error_state='token_refresh_failed' is persisted ONLY on definitive
+    grant rejections (HTTP 400/401 — revoked/expired/consumed refresh
+    token). Timeouts, network errors, and 5xx are transient: the stored
+    refresh token is still good, so flagging them would show a false
+    "Reconnect Jobber" banner and email the owner for nothing.
+
     Returns an updated cred dict with fresh access_token + rotated refresh_token
-    on success. Returns None on failure (401, 5xx, timeout, missing rotation).
+    on success. Returns None on any failure.
     """
     client_id = os.environ.get("JOBBER_CLIENT_ID", "")
     client_secret = os.environ.get("JOBBER_CLIENT_SECRET", "")
     if not client_id or not client_secret:
+        # Deployment config problem — reconnecting wouldn't fix it; don't flag.
         logger.warning("jobber: JOBBER_CLIENT_ID/SECRET missing; cannot refresh")
-        await _persist_refresh_failure(cred["id"])
         return None
 
     try:
-        resp = await client.post(
-            JOBBER_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": cred["refresh_token"],
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
-        )
+        async with httpx.AsyncClient(timeout=REFRESH_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                JOBBER_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": cred["refresh_token"],
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+            )
     except Exception as exc:  # noqa: BLE001
-        # Log the exception TYPE only — never the message (may echo body).
+        # Transient (timeout / connection error) — log the exception TYPE only
+        # (never the message, may echo body) and leave error_state untouched.
         logger.warning("jobber: refresh exception type=%s", type(exc).__name__)
-        await _persist_refresh_failure(cred["id"])
         return None
 
-    if getattr(resp, "status_code", 500) != 200:
-        logger.warning("jobber: refresh non-200 status=%d", resp.status_code)
-        await _persist_refresh_failure(cred["id"])
+    status = getattr(resp, "status_code", 500)
+    if status != 200:
+        logger.warning("jobber: refresh non-200 status=%d", status)
+        if status in (400, 401):
+            # invalid_grant / unauthorized — the refresh token is dead.
+            await _persist_refresh_failure(cred["id"])
         return None
 
     try:
         body = resp.json()
     except Exception:  # noqa: BLE001
-        await _persist_refresh_failure(cred["id"])
+        logger.warning("jobber: refresh 200 with unparseable body")
         return None
 
     new_access = body.get("access_token")
@@ -285,7 +311,7 @@ async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[di
     # Jobber mandates rotation — a missing new refresh_token is a contract
     # violation. Do NOT persist the old token (would break next cycle).
     if not new_access or not new_refresh:
-        await _persist_refresh_failure(cred["id"])
+        logger.warning("jobber: refresh 200 missing token rotation fields")
         return None
 
     # expiry_date is BIGINT epoch-MILLISECONDS (migration 030). _decode_jwt_exp_ms
@@ -304,7 +330,7 @@ async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[di
     }
 
 
-async def _refresh_token(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
+async def _refresh_token_locked(cred: dict) -> Optional[dict]:
     """Refresh with the per-(tenant, provider) lease lock (mirrors adapter.js).
 
     Acquire the lock before the wire refresh. The winner refreshes + persists +
@@ -333,10 +359,27 @@ async def _refresh_token(client: httpx.AsyncClient, cred: dict) -> Optional[dict
             )
 
     try:
-        return await _do_wire_refresh(client, cred)
+        return await _do_wire_refresh(cred)
     finally:
         if holder_id and tenant_id:
             await release_refresh_lock(tenant_id, "jobber", holder_id)
+
+
+async def _refresh_token(cred: dict) -> Optional[dict]:
+    """Cancellation-shielded refresh entry point.
+
+    The pre-session context fetch runs under asyncio.wait_for(0.8s). Without a
+    shield, that deadline CANCELS the refresh mid-POST — Jobber has already
+    consumed the single-use refresh token server-side, the rotated replacement
+    is never read or persisted, and the stored token is permanently dead. The
+    shield lets the outer fetch give up (call proceeds without context) while
+    the rotation runs to completion in the background and persists, so the
+    NEXT call finds a healthy token.
+    """
+    task = asyncio.ensure_future(_refresh_token_locked(cred))
+    _REFRESH_TASKS.add(task)
+    task.add_done_callback(_REFRESH_TASKS.discard)
+    return await asyncio.shield(task)
 
 
 # ---- GraphQL request ------------------------------------------------------
@@ -479,10 +522,12 @@ async def fetch_jobber_customer_by_phone(
         timeout = httpx.Timeout(connect=0.3, read=0.7, write=0.3, pool=0.3)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            # Proactive refresh if expired
+            # Proactive refresh if expired — runs on its own shielded task +
+            # dedicated long-timeout client (see _refresh_token), NOT this
+            # sub-second fetch client.
             expiry_epoch = _expiry_to_epoch(cred.get("expiry_date"))
             if expiry_epoch and expiry_epoch <= datetime.now(timezone.utc).timestamp():
-                refreshed = await _refresh_token(client, cred)
+                refreshed = await _refresh_token(cred)
                 if not refreshed:
                     return None
                 cred = refreshed
@@ -491,7 +536,7 @@ async def fetch_jobber_customer_by_phone(
 
             # Reactive refresh + single retry on 401
             if resp is not None and getattr(resp, "status_code", 500) == 401:
-                refreshed = await _refresh_token(client, cred)
+                refreshed = await _refresh_token(cred)
                 if not refreshed:
                     return None
                 cred = refreshed

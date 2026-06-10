@@ -31,9 +31,12 @@ def test_en_critical_rule_heading():
 
 
 def test_es_critical_rule_heading():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same English
+    # body — invariant (corrections rule present for es-locale calls) maps to
+    # the EN header.
     section = _build_corrections_section("es")
     assert isinstance(section, str)
-    assert "MANEJO DE CORRECCIONES:" in section
+    assert "HANDLING CORRECTIONS:" in section
 
 
 def test_en_five_numbered_rules():
@@ -55,35 +58,29 @@ def test_en_address_example():
 
 
 def test_es_address_example():
+    # 2026-06-11 collapse: the concrete-example invariant maps to the EN
+    # example (the ES example was a pure localization of the same teaching).
     section = _build_corrections_section("es")
-    assert "Calle Principal 123" in section
-    assert "Avenida Roble 456" in section
+    assert "123 Main" in section
+    assert "456 Oak" in section
 
 
 def test_both_locales_discard_rule():
-    en = _build_corrections_section("en").lower()
-    es = _build_corrections_section("es").lower()
-    assert "completely discard" in en
-    assert "descarta completamente" in es
+    # 2026-06-11 collapse: discard rule unchanged; both locales carry EN text.
+    for locale in ("en", "es"):
+        assert "completely discard" in _build_corrections_section(locale).lower()
 
 
 def test_both_locales_always_correct():
-    en = _build_corrections_section("en").lower()
-    es = _build_corrections_section("es").lower()
-    assert "always correct" in en
-    # Accept either phrasing of the Spanish equivalent. Grammatical gender on
-    # "corrección" (feminine) requires "correcta" in prose — accept both
-    # masculine and feminine forms to keep the test tolerant of either ES
-    # rewording that future audits might prefer.
-    assert (
-        "siempre correcto" in es
-        or "siempre es correcto" in es
-        or "siempre correcta" in es
-        or "siempre es correcta" in es
-    )
+    # 2026-06-11 collapse: caller-correction-always-wins unchanged; EN text
+    # in both locales.
+    for locale in ("en", "es"):
+        assert "always correct" in _build_corrections_section(locale).lower()
 
 
-def test_en_es_distinct():
+def test_en_es_identical():
+    # 2026-06-11 collapse: the old distinctness guard inverts — this section
+    # must NOT fork on locale anymore.
     en = _build_corrections_section("en")
     es = _build_corrections_section("es")
-    assert en != es
+    assert en == es

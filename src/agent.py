@@ -38,12 +38,13 @@ from livekit import api, rtc
 
 from .prompt import build_system_prompt
 from .tools import create_tools
+from .tools.end_call import _delayed_disconnect
 from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
 from .integrations.xero import fetch_xero_context_bounded
 from .lib.customer_context import fetch_merged_customer_context_bounded
-from .lib.phone import _normalize_phone
+from .lib.phone import _normalize_phone, derive_caller_region
 
 logger = logging.getLogger("voco-agent")
 
@@ -75,6 +76,15 @@ def _msg(locale: str, key: str) -> str:
 # we force-unmute caller input. The greeting runs ~3-5s; this only fires if a SIP
 # playout stalls or drops, guaranteeing input is never left muted.
 GREETING_UNMUTE_TIMEOUT_S = 10.0
+
+# Server-side call-duration cap (the prompt's "wrap up at 9 / hard max 10
+# minutes" is prose, not enforcement). At WRAP_UP_CALL_SECONDS the watchdog
+# injects a system-message nudge so the LLM starts closing; at
+# MAX_CALL_SECONDS it speaks a short goodbye via session.say() and tears the
+# call down through end_call's shutdown path (disconnection_reason
+# 'max_duration'). Both env-overridable.
+WRAP_UP_CALL_SECONDS = int(os.environ.get("VOCO_WRAP_UP_CALL_SECONDS", "540"))
+MAX_CALL_SECONDS = int(os.environ.get("VOCO_MAX_CALL_SECONDS", "600"))
 
 # Phase 66: LLM (the decision-maker / tool-caller) for the cascaded pipeline.
 # gpt-4.1-mini is non-reasoning -> low time-to-first-token, strong tool calling,
@@ -448,6 +458,14 @@ async def entrypoint(ctx: JobContext):
             # region_code; without it those tools always fell back to "US"
             # for non-US tenants (region defaulted wrong on every non-US call).
             "country": country,
+            # Caller's ISO region derived from caller-ID (E.164 → "US"/"CA"/
+            # "SG"/...; +1 disambiguated by area code via phonenumbers).
+            # None for anonymous/withheld callers or any parse failure —
+            # derive_caller_region never raises. Tenant `country` above stays
+            # the PRIMARY address-validation region; this only powers the
+            # automatic SECOND validation attempt when the first verdict is
+            # unhelpful (see google_maps.validate_address_with_region_fallback).
+            "caller_region": derive_caller_region(from_number),
             "room_name": call_id,
             "sip_participant_identity": sip_participant_identity,
             "call_end_reason": call_end_reason,
@@ -517,7 +535,18 @@ async def entrypoint(ctx: JobContext):
         # parallel_tool_calls=False keeps the booking flow strictly sequential
         # (e.g. never fires check_slot and book_appointment in one turn) — the
         # slot_token contract assumes one tool call resolves before the next.
-        llm = openai.LLM(model=LLM_MODEL, parallel_tool_calls=False)
+        # max_completion_tokens=500 is a RUNAWAY BACKSTOP, not a style lever:
+        # conciseness is enforced by the prompt (one or two short sentences per
+        # turn); 500 tokens is far beyond any legitimate spoken turn (even the
+        # booking-confirmation readback), so it never truncates normal speech —
+        # it only caps a pathological generation before the caller sits through
+        # minutes of runaway TTS. Verified accepted by the installed
+        # livekit-plugins-openai 1.5.7 LLM.__init__ signature.
+        llm = openai.LLM(
+            model=LLM_MODEL,
+            parallel_tool_calls=False,
+            max_completion_tokens=500,
+        )
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
@@ -655,8 +684,15 @@ async def entrypoint(ctx: JobContext):
         # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
         recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"
+        # Call-duration watchdog task — created after session.start() below;
+        # referenced here (closure) so it can be cancelled on normal close.
+        watchdog_task = None
 
         async def _on_close_async(reason: str = ""):
+            # Cancel the duration watchdog first — the call is already ending,
+            # so the max-duration goodbye/disconnect must never fire mid-teardown.
+            if watchdog_task is not None and not watchdog_task.done():
+                watchdog_task.cancel()
             # Phase 60.3 Stream A (R-A7): flush goodbye-race diagnostic record
             # FIRST. If run_post_call_pipeline below times out (8s Fix I
             # monitoring), the record is already logged to Railway and
@@ -804,7 +840,7 @@ async def entrypoint(ctx: JobContext):
             )
             slot_events_task = asyncio.to_thread(
                 lambda: supabase.table("calendar_events")
-                .select("start_time, end_time")
+                .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
                 .gte("end_time", _now_iso)
                 .execute()
@@ -823,7 +859,7 @@ async def entrypoint(ctx: JobContext):
             )
             slot_blocks_task = asyncio.to_thread(
                 lambda: supabase.table("calendar_blocks")
-                .select("start_time, end_time")
+                .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
                 .gte("end_time", _now_iso)
                 .execute()
@@ -992,6 +1028,67 @@ async def entrypoint(ctx: JobContext):
                     logger.warning(f"[agent] could not unmute input after greeting: {e}")
 
         _greeting_unmute_task = asyncio.create_task(_unmute_after_greeting())
+
+        # ── Call-duration watchdog (server-side cap; prompt prose is not enforcement) ──
+        async def _call_duration_watchdog():
+            try:
+                # Sleep relative to start_timestamp (ms) so the few seconds of
+                # session-start latency don't extend the cap.
+                elapsed = time.time() - start_timestamp / 1000.0
+                if WRAP_UP_CALL_SECONDS < MAX_CALL_SECONDS:
+                    await asyncio.sleep(max(0.0, WRAP_UP_CALL_SECONDS - elapsed))
+                    # Wrap-up nudge: append a system message the LLM sees on its
+                    # next turn — cheap and non-disruptive (no forced speech
+                    # mid-conversation, unlike generate_reply/say here).
+                    try:
+                        nudge_ctx = agent.chat_ctx.copy()
+                        nudge_ctx.add_message(
+                            role="system",
+                            content=(
+                                "TIME LIMIT: this call has been running for "
+                                f"{WRAP_UP_CALL_SECONDS // 60} minutes and will be "
+                                "disconnected shortly. Begin wrapping up now: finish "
+                                "the current matter, capture any missing contact info, "
+                                "and move to your goodbye."
+                            ),
+                        )
+                        await agent.update_chat_ctx(nudge_ctx)
+                        logger.info(
+                            "[agent] duration watchdog: wrap-up nudge injected at %ss room=%s",
+                            WRAP_UP_CALL_SECONDS, call_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[agent] duration watchdog: wrap-up nudge failed: {e}")
+
+                elapsed = time.time() - start_timestamp / 1000.0
+                await asyncio.sleep(max(0.0, MAX_CALL_SECONDS - elapsed))
+
+                logger.warning(
+                    "[agent] duration watchdog: max call duration %ss reached — ending call room=%s",
+                    MAX_CALL_SECONDS, call_id,
+                )
+                # Set the reason BEFORE teardown so post_call records it.
+                call_end_reason[0] = "max_duration"
+                try:
+                    # Cascade has TTS, so session.say() works — same delivery as
+                    # the deterministic greeting (non-interruptible).
+                    goodbye_handle = session.say(
+                        _msg(locale, "agent.max_duration_goodbye"),
+                        allow_interruptions=False,
+                    )
+                    await asyncio.wait_for(goodbye_handle.wait_for_playout(), timeout=20)
+                except Exception as e:
+                    logger.warning(f"[agent] duration watchdog: goodbye say failed: {e}")
+                # Reuse end_call's shutdown path: remove the SIP participant,
+                # then ctx.shutdown() — which triggers the registered shutdown
+                # callback, so the post-call pipeline still runs.
+                await _delayed_disconnect(deps)
+            except asyncio.CancelledError:
+                pass  # normal close — nothing to do
+            except Exception as e:
+                logger.error(f"[agent] duration watchdog error: {e}")
+
+        watchdog_task = asyncio.create_task(_call_duration_watchdog())
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():

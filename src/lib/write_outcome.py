@@ -13,6 +13,7 @@ D-02b: On failure, the fix is forward — patch + redeploy. Do NOT add
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -103,7 +104,9 @@ async def record_outcome(
         "p_address_validation_verdict": address_validation_verdict,
     }
     try:
-        result = supabase.rpc("record_call_outcome", params).execute()
+        result = await asyncio.to_thread(
+            lambda: supabase.rpc("record_call_outcome", params).execute()
+        )
     except Exception as e:
         raise RecordOutcomeError(f"rpc_failed: {e}") from e
 

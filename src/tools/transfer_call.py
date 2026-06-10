@@ -66,6 +66,11 @@ def create_transfer_call_tool(deps: dict):
         )
         logger.info("[agent] Transfer context: %s", whisper_context)
 
+        # Remember the prior reason so a failed transfer can revert it — the
+        # call continues after a failed REFER, and leaving "transferred" (and
+        # the exception_reason written above) in place would poison the
+        # disconnection_reason recorded by the post-call pipeline.
+        prior_end_reason = deps["call_end_reason"][0]
         deps["call_end_reason"][0] = "transferred"
 
         # Perform SIP REFER transfer via LiveKit
@@ -88,6 +93,20 @@ def create_transfer_call_tool(deps: dict):
 
         except Exception as err:
             logger.error("[agent] Transfer failed: %s", str(err))
+            # Transfer failed and the call continues — revert both markers set
+            # optimistically above so the eventual disconnect is recorded truthfully.
+            deps["call_end_reason"][0] = prior_end_reason
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("calls").update(
+                        {"exception_reason": None}
+                    ).eq("call_id", deps.get("call_id", "")).execute()
+                )
+            except Exception as revert_err:
+                logger.warning(
+                    "[agent] transfer_call: exception_reason revert failed (non-fatal): %s",
+                    revert_err,
+                )
             return (
                 "STATE:transfer_failed reason=sip_error"
                 " | DIRECTIVE:apologize briefly; offer to book an appointment via"

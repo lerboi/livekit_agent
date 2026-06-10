@@ -29,37 +29,39 @@ def test_en_contains_voice_style_heading():
 
 
 def test_es_contains_voice_style_heading():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same English
+    # body — the invariant (es-locale calls get the voice-style section) maps
+    # to the EN header being present for es too.
     section = _build_voice_behavior_section("es")
     assert isinstance(section, str)
-    assert "ESTILO DE VOZ Y CONVERSACIÓN:" in section
+    assert "VOICE & CONVERSATION STYLE:" in section
 
 
 def test_both_locales_instruct_energy_matching():
+    # 2026-06-11 collapse: invariant unchanged (energy matching governs every
+    # call regardless of locale); both locales now carry the EN phrasing.
     en = _build_voice_behavior_section("en").lower()
     es = _build_voice_behavior_section("es").lower()
-    # EN: "match the caller's energy"
     assert "match the caller's energy" in en
-    # ES: "coincide con la energía"
-    assert "coincide con la energía" in es
+    assert "match the caller's energy" in es
 
 
 def test_both_locales_advise_slow_readback():
-    en = _build_voice_behavior_section("en").lower()
-    es = _build_voice_behavior_section("es").lower()
-    # EN: "slow down" + references to addresses and dates
-    assert "slow down" in en
-    assert "addresses" in en
-    assert "dates" in en
-    # ES: "más despacio" + references to direcciones and fechas
-    assert "más despacio" in es
-    assert "direcciones" in es
-    assert "fechas" in es
+    # 2026-06-11 collapse: invariant unchanged (slow readback of addresses/
+    # dates); both locales carry the EN phrasing.
+    for locale in ("en", "es"):
+        section = _build_voice_behavior_section(locale).lower()
+        assert "slow down" in section
+        assert "addresses" in section
+        assert "dates" in section
 
 
-def test_en_and_es_are_distinct():
+def test_en_and_es_are_identical():
+    # 2026-06-11 collapse: the old distinctness guard (es branch present)
+    # inverts — this section must NOT fork on locale anymore.
     en = _build_voice_behavior_section("en")
     es = _build_voice_behavior_section("es")
-    assert en != es
+    assert en == es
 
 
 def test_both_locales_nonempty_nontrivial():

@@ -9,7 +9,15 @@ from src.prompt import build_system_prompt
 def test_no_customer_context_omits_block():
     prompt = build_system_prompt("en", business_name="Acme", customer_context=None)
     assert "CUSTOMER CONTEXT" not in prompt
-    assert "STATE:" not in prompt  # no leakage from any other section
+    # No leakage of the customer-context STATE block (its STATE header uses
+    # the "STATE: <fields>" spaced form from format_customer_context_state).
+    # 2026-06-10: the old blanket `"STATE:" not in prompt` proxy broke when
+    # the ADDRESS VALIDATION rule legitimately began teaching the
+    # validate_address `STATE:address_*` tokens — the protected invariant
+    # (customer-context block fully omitted when context is None) is
+    # unchanged and still asserted here.
+    assert "STATE: " not in prompt
+    assert "(Jobber)" not in prompt and "(Xero)" not in prompt
 
 
 def test_jobber_only_context_renders_with_source():

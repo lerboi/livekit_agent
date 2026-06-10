@@ -7,8 +7,12 @@ structured shape, and emit per-validate telemetry to gmaps_validate_events.
 
 Public API
 ----------
+- `validate_address_with_region_fallback(...)` — orchestrator over the
+  bounded wrapper: tenant country is the primary region, with an automatic
+  caller-region (caller-ID-derived) second attempt when the first verdict
+  is unhelpful. Never raises. What the function tools call (2026-06-10).
 - `validate_address_bounded(...)` — outer wrapper, never raises, always
-  returns a Voco-shaped dict. The function tools call.
+  returns a Voco-shaped dict. One telemetry row per call.
 - `validate_address(...)` — bare HTTP call (no timeout wrapper, no Sentry
   capture, no telemetry insert). Exported for direct callers / tests.
 - `map_verdict(google_response)` — pure mapper for Google's possibleNextAction
@@ -577,3 +581,151 @@ async def validate_address_bounded(
                 )
 
     return result
+
+
+# ── Caller-region fallback orchestrator (2026-06-10) ────────────────────────
+
+# Verdict preference order for choosing between the primary-region and
+# caller-region attempts. Lower rank = better. Ties go to the primary attempt
+# (strict less-than below), so "both unconfirmed" returns the primary result.
+_VERDICT_RANK = {
+    "confirmed": 0,
+    "confirmed_with_changes": 1,
+    "unconfirmed": 2,
+    "unsupported_region": 3,
+    "skipped": 4,
+    "error": 5,
+}
+
+# First-attempt verdicts that justify spending a second attempt on the
+# caller's region: the primary region produced nothing usable.
+_RETRY_VERDICTS = frozenset({"unconfirmed", "unsupported_region"})
+
+
+def _safe_region(value) -> str:
+    """Uppercased/stripped region code; '' for None/garbage. Never raises."""
+    try:
+        return (value or "").strip().upper()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def validate_address_with_region_fallback(
+    tenant_id: Optional[str],
+    call_id: Optional[str],
+    *,
+    region_code: str,
+    caller_region: Optional[str] = None,
+    address_lines: list,
+    postal_code: Optional[str] = None,
+    locality: Optional[str] = None,
+    supabase=None,
+    timeout_seconds: float = HTTP_TIMEOUT_SECONDS,
+) -> tuple:
+    """Validate with the tenant's region first, retrying once with the
+    CALLER's region (derived from caller-ID) when the first verdict is
+    unhelpful. Never raises (same contract as validate_address_bounded).
+
+    Decision table:
+      1. Attempt 1 uses `region_code` (tenant country) — the PRIMARY region,
+         exactly as before. Exception: if the primary region is missing or
+         not in SUPPORTED_REGION_CODES while `caller_region` IS supported,
+         attempt 1 uses `caller_region` instead (a known-unsupported primary
+         would come back verdict='skipped' without ever reaching Google —
+         don't waste the useful attempt).
+      2. Attempt 2 (caller_region) fires ONLY when ALL hold:
+           - attempt 1 verdict is 'unconfirmed' or 'unsupported_region'
+           - caller_region is truthy
+           - caller_region != the region attempt 1 actually used
+           - caller_region is in SUPPORTED_REGION_CODES
+      3. The better verdict wins (confirmed > confirmed_with_changes >
+         unconfirmed > unsupported_region > skipped > error); ties go to
+         attempt 1, so "both unconfirmed" returns the primary result.
+
+    Latency: the second attempt adds up to `timeout_seconds` (1.5s default)
+    — but only on the rare unconfirmed/unsupported path, where the call was
+    already headed for a clarifying follow-up question. Acceptable.
+
+    Telemetry: each attempt goes through validate_address_bounded, so each
+    writes its OWN gmaps_validate_events row (per-attempt by design) and
+    keeps its own Sentry gate.
+
+    Returns:
+        (result, region_used) — `result` is the chosen Voco-shaped dict;
+        `region_used` is the region code string of the winning attempt
+        (for logging). Callers that cache should cache `result`.
+    """
+    primary = _safe_region(region_code)
+    caller = _safe_region(caller_region)
+
+    # Don't waste attempt 1 on a region validate_address would short-circuit
+    # as 'skipped' when the caller's region is actually usable.
+    first_region = primary
+    if primary not in SUPPORTED_REGION_CODES and caller in SUPPORTED_REGION_CODES:
+        first_region = caller
+
+    # validate_address_bounded is contractually never-raising; the guard here
+    # keeps THIS function never-raising even if that contract ever breaks.
+    try:
+        result = await validate_address_bounded(
+            tenant_id,
+            call_id,
+            region_code=first_region,
+            address_lines=address_lines,
+            postal_code=postal_code,
+            locality=locality,
+            supabase=supabase,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 — never-raises contract
+        logger.warning(
+            "[gmaps-fallback] bounded validate raised unexpectedly (%s)", exc
+        )
+        result = _voco_result(verdict="error", latency_ms=0, raw_status=None)
+    region_used = first_region
+
+    # Everything past attempt 1 is best-effort selection logic — a bug here
+    # must degrade to "return attempt 1's result", never to an exception.
+    try:
+        should_retry = (
+            isinstance(result, dict)
+            and result.get("verdict") in _RETRY_VERDICTS
+            and bool(caller)
+            and caller != first_region
+            and caller in SUPPORTED_REGION_CODES
+        )
+        if should_retry:
+            second = await validate_address_bounded(
+                tenant_id,
+                call_id,
+                region_code=caller,
+                address_lines=address_lines,
+                postal_code=postal_code,
+                locality=locality,
+                supabase=supabase,
+                timeout_seconds=timeout_seconds,
+            )
+            first_rank = _VERDICT_RANK.get(result.get("verdict"), 99)
+            second_rank = _VERDICT_RANK.get(
+                (second or {}).get("verdict"), 99
+            )
+            if second_rank < first_rank:
+                logger.info(
+                    "[gmaps-fallback] caller_region=%s won over primary=%s "
+                    "(%s beats %s) call_id=%s",
+                    caller,
+                    first_region,
+                    (second or {}).get("verdict"),
+                    result.get("verdict"),
+                    call_id or "unknown",
+                )
+                result = second
+                region_used = caller
+    except Exception as exc:  # noqa: BLE001 — never-raises contract
+        logger.warning(
+            "[gmaps-fallback] region-fallback selection failed (%s) — "
+            "keeping primary attempt result",
+            exc,
+        )
+
+    return result, region_used

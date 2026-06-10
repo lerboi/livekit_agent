@@ -49,6 +49,17 @@ XERO_API_BASE = "https://api.xero.com/api.xro/2.0"
 XERO_TOKEN_URL = "https://identity.xero.com/connect/token"
 HTTP_TIMEOUT_SECONDS = 1.5  # Xero cold API can exceed 500ms per call
 REFRESH_BUFFER_SECONDS = 300  # refresh if access_token expires in < 5 min
+
+# Token refresh gets its OWN generous HTTP budget, separate from the 1.5s
+# data-fetch client. Xero rotates the refresh token on every refresh (old one
+# stays valid only for a ~30-min grace window) — aborting before the response
+# is read can orphan the rotation and kill the connection. Never let the data
+# timeouts or the caller's 0.8s context budget cut a rotation short.
+REFRESH_HTTP_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0)
+
+# Strong refs to in-flight shielded refresh tasks — asyncio holds only weak
+# refs to tasks, and these must outlive a cancelled context fetch.
+_REFRESH_TASKS: set = set()
 E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
 
@@ -176,8 +187,19 @@ async def _touch_last_context_fetch_at(cred_id: str) -> None:
         pass  # telemetry — silent on failure
 
 
-async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
-    """Perform the actual HTTP token refresh + persist. Caller holds the lock."""
+async def _do_wire_refresh(cred: dict) -> Optional[dict]:
+    """Perform the actual HTTP token refresh + persist. Caller holds the lock.
+
+    Uses a DEDICATED httpx client with REFRESH_HTTP_TIMEOUT — never the 1.5s
+    data-fetch client (a short timeout on the token endpoint can lose a
+    rotation Xero has already committed server-side).
+
+    error_state='token_refresh_failed' is persisted ONLY on definitive grant
+    rejections (HTTP 400/401 — revoked/expired refresh token). Timeouts,
+    network errors, and 5xx are transient: the stored refresh token is still
+    good, so flagging them would show a false "Reconnect Xero" banner and
+    email the owner for nothing.
+    """
     client_id = os.environ.get("XERO_CLIENT_ID")
     client_secret = os.environ.get("XERO_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -185,31 +207,34 @@ async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[di
         return None
 
     try:
-        resp = await client.post(
-            XERO_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": cred["refresh_token"],
-            },
-            auth=(client_id, client_secret),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+        async with httpx.AsyncClient(timeout=REFRESH_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                XERO_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": cred["refresh_token"],
+                },
+                auth=(client_id, client_secret),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
         status = getattr(resp, "status_code", 500)
         if status != 200:
             logger.warning("xero: refresh non-200 status=%d", status)
-            await _persist_refresh_failure(cred["id"])
+            if status in (400, 401):
+                # invalid_grant / unauthorized — the refresh token is dead.
+                await _persist_refresh_failure(cred["id"])
             return None
         body = resp.json()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("xero: refresh exception: %s", exc)
-        await _persist_refresh_failure(cred["id"])
+        # Transient (timeout / connection error) — leave error_state untouched.
+        logger.warning("xero: refresh exception type=%s", type(exc).__name__)
         return None
 
     new_access = body.get("access_token")
     new_refresh = body.get("refresh_token", cred["refresh_token"])  # Xero may rotate
     expires_in = int(body.get("expires_in", 1800))
     if not new_access:
-        await _persist_refresh_failure(cred["id"])
+        logger.warning("xero: refresh 200 missing access_token")
         return None
 
     # expiry_date is BIGINT epoch-MILLISECONDS (migration 030) — store an int,
@@ -228,8 +253,8 @@ async def _do_wire_refresh(client: httpx.AsyncClient, cred: dict) -> Optional[di
     }
 
 
-async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[dict]:
-    """Returns updated cred dict with fresh access_token, or None on refresh failure.
+async def _refresh_locked(cred: dict) -> Optional[dict]:
+    """Lock-guarded wire refresh (winner refreshes; loser polls for the row).
 
     Concurrency guard (mirrors adapter.js refreshTokenIfNeeded): acquire the
     per-(tenant, provider) lease lock before the wire refresh. The winner
@@ -237,10 +262,6 @@ async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[
     freshly-persisted token and reuses it. On poll timeout the loser falls back
     to refreshing itself (logged) — availability beats perfect dedup.
     """
-    expiry_epoch = _expiry_to_epoch(cred.get("expiry_date"))
-    if expiry_epoch - _now_ts() > REFRESH_BUFFER_SECONDS:
-        return cred  # still valid
-
     tenant_id = cred.get("tenant_id")
     holder_id = None
     if tenant_id:
@@ -261,10 +282,32 @@ async def _refresh_if_needed(client: httpx.AsyncClient, cred: dict) -> Optional[
             )
 
     try:
-        return await _do_wire_refresh(client, cred)
+        return await _do_wire_refresh(cred)
     finally:
         if holder_id and tenant_id:
             await release_refresh_lock(tenant_id, "xero", holder_id)
+
+
+async def _refresh_if_needed(cred: dict) -> Optional[dict]:
+    """Returns updated cred dict with fresh access_token, or None on refresh failure.
+
+    Cancellation shield: the pre-session context fetch runs under
+    asyncio.wait_for(0.8s). Without a shield, that deadline CANCELS the refresh
+    mid-POST — Xero may have already rotated the refresh token server-side, the
+    replacement is never read or persisted, and once the ~30-min grace window
+    on the old token lapses the connection dies (owner must reconnect). The
+    shield lets the outer fetch give up (call proceeds without context) while
+    the rotation completes in the background and persists, so the NEXT call
+    finds a healthy token.
+    """
+    expiry_epoch = _expiry_to_epoch(cred.get("expiry_date"))
+    if expiry_epoch - _now_ts() > REFRESH_BUFFER_SECONDS:
+        return cred  # still valid
+
+    task = asyncio.ensure_future(_refresh_locked(cred))
+    _REFRESH_TASKS.add(task)
+    task.add_done_callback(_REFRESH_TASKS.discard)
+    return await asyncio.shield(task)
 
 
 def _xero_headers(access_token: str, xero_tenant_id: str) -> dict:
@@ -421,7 +464,9 @@ async def fetch_xero_customer_by_phone(
         return None
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        cred = await _refresh_if_needed(client, cred)
+        # Refresh runs on its own shielded task + dedicated long-timeout
+        # client (see _refresh_if_needed), NOT this 1.5s data-fetch client.
+        cred = await _refresh_if_needed(cred)
         if not cred:
             logger.info("xero: refresh returned None (failure) for tenant=%s", tenant_id)
             return None

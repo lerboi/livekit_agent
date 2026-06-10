@@ -14,8 +14,9 @@ EN:
    (case-insensitive). Mirrors 60.2 Plan 05 Pitfall 6 guard.
 2. test_en_instructs_model_to_speak_filler — EN output contains
    "never emit a tool call without speaking first" (lowercased).
-3. test_en_instructs_three_second_target — EN contains "~3 seconds" OR
-   "3 seconds" (duration target preserved).
+3. test_en_instructs_one_sentence_filler_target — EN contains the bounded
+   one-warm-sentence (~2s) filler target (2026-06-10 conciseness pass;
+   was "~3 seconds").
 
 ES:
 4. test_es_exists_and_nonempty — ES returns string >200 chars.
@@ -25,8 +26,10 @@ ES:
    ("herramienta" OR "tool") AND "hablar"/"habla" (filler-before-tool
    contract in Spanish).
 7. test_es_mentions_tool_names — ES contains the exact strings
-   "check_availability", "book_appointment", "capture_lead",
-   "transfer_call" (tool names are code identifiers, never translated).
+   "check_slot", "check_day", "next_available_days", "validate_address",
+   "book_appointment", "capture_lead", "transfer_call" (tool names are
+   code identifiers, never translated; 2026-06-10 — was the retired
+   "check_availability").
 
 Parity:
 8. test_en_and_es_are_distinct — not a copy-paste.
@@ -62,16 +65,25 @@ def test_en_instructs_model_to_speak_filler():
     assert "never emit a tool call without speaking first" in lowered
 
 
-def test_en_instructs_three_second_target():
-    """EN branch keeps the ~3-second filler duration target (Rule 3).
+def test_en_instructs_one_sentence_filler_target():
+    """EN branch keeps a bounded filler duration target (Rule 3).
 
-    Case-insensitive match — Rule 3's "AIM FOR ~3 SECONDS" header uses
-    uppercase; the example-list prefix "these are ~3-second phrases"
-    uses lowercase. Either form satisfies the invariant.
+    2026-06-10 conciseness pass: the target moved from "AIM FOR ~3 SECONDS
+    … longer, warmer filler" to ONE warm sentence (~2 seconds). The invariant
+    this test protects is unchanged: filler is REQUIRED (it covers tool
+    latency — never license silence) and has an explicit duration bound so
+    it neither under-covers (two words) nor balloons (a paragraph).
     """
     section = _build_tool_narration_section("en")
     lowered = section.lower()
-    assert ("~3 seconds" in lowered) or ("3 seconds" in lowered)
+    # Bounded duration target present…
+    assert ("~2 second" in lowered) or ("2 seconds" in lowered) or (
+        "one warm sentence" in lowered
+    )
+    # …and the old unbounded "longer, warmer" license is gone.
+    assert "longer, warmer filler" not in lowered
+    # Filler is still mandatory — no silence license crept in.
+    assert "never emit a tool call without speaking first" in lowered
 
 
 # --- ES invariants (new Spanish branch, D7 locale parity) ---
@@ -96,28 +108,27 @@ def test_es_does_not_claim_runtime_filler():
 
 
 def test_es_instructs_filler_before_tool():
-    """ES branch must contain the filler-before-tool contract in Spanish:
-    a negated 'nunca' clause + a clear speak-first instruction."""
+    """2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    body — the filler-before-tool contract pins map to the EN words (the
+    anti-silent-tool-call NEVER guard stays negated)."""
     section = _build_tool_narration_section("es")
     lowered = section.lower()
-    # Anti-silent-tool-call negation must stay negated (anti-hallucination
-    # NEVER guard — R-B5 A1 exception, per 60.3-PROMPT-AUDIT.md).
-    assert "nunca" in lowered
-    # The tool concept must be present (either Spanish "herramienta" or the
-    # code identifier "tool" carried over unchanged).
-    assert ("herramienta" in lowered) or ("tool" in lowered)
-    # The speak-first instruction uses some form of "hablar" (to speak) or
-    # "habla" (speak!) — both are acceptable imperative forms.
-    assert ("hablar" in lowered) or ("habla" in lowered)
+    assert "never emit a tool call without speaking first" in lowered
+    assert "tool" in lowered
 
 
 def test_es_mentions_tool_names():
     """Tool names are code identifiers — they must appear untranslated in
     the Spanish branch so the model wires filler examples to the actual
-    tool registry."""
+    tool registry. (2026-06-10: pins updated from the retired
+    check_availability to the split availability tools, plus the new
+    validate_address early-validation tool.)"""
     section = _build_tool_narration_section("es")
     for tool in (
-        "check_availability",
+        "check_slot",
+        "check_day",
+        "next_available_days",
+        "validate_address",
         "book_appointment",
         "capture_lead",
         "transfer_call",
@@ -125,15 +136,24 @@ def test_es_mentions_tool_names():
         assert tool in section, f"tool name {tool!r} missing from ES branch"
 
 
+def test_both_locales_have_validate_address_filler_example():
+    """The validate_address tool runs the moment the caller gives their
+    address — it needs a per-tool filler example like every other tool so
+    the line is never silent while it runs (Phase 61.1 no-silence rule)."""
+    for locale in ("en", "es"):
+        section = _build_tool_narration_section(locale)
+        assert "validate_address" in section, (
+            f"{locale}: validate_address missing from per-tool filler examples"
+        )
+
+
 # --- Parity ---
 
 
-def test_en_and_es_are_distinct():
-    """EN and ES branches must be different — guards against a copy-paste
-    bug where locale='es' accidentally returns the EN body."""
+def test_en_and_es_are_identical():
+    """2026-06-11 collapse: the old distinctness guard inverts — this section
+    must NOT fork on locale anymore (Spanish filler delivery is covered by
+    the LANGUAGE section's Spanish guide)."""
     en = _build_tool_narration_section("en")
     es = _build_tool_narration_section("es")
-    assert en != es
-    # And ES must actually contain Spanish prose (not just a header).
-    # A Spanish-specific word that has no EN cognate: "llamante" (the caller).
-    assert "llamante" in es.lower()
+    assert en == es

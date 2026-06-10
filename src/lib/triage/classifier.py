@@ -1,6 +1,6 @@
 from supabase import Client
 
-from .layer1_keywords import run_keyword_classifier
+from .layer1_keywords import extract_caller_text, run_keyword_classifier
 from .layer2_llm import run_llm_scorer
 from .layer3_rules import apply_owner_rules
 
@@ -24,6 +24,10 @@ async def classify_call(
     if not transcript or len(transcript) < 10:
         return {"urgency": "routine", "confidence": "low", "layer": "layer1"}
 
+    # Classify on caller-only turns: the agent's own speech ("let me take a
+    # look at the schedule") must never drive the urgency. layer1 filters
+    # internally too (defense in depth); layer2 gets the same caller-only text.
+    caller_text = extract_caller_text(transcript)
     layer1_result = run_keyword_classifier(transcript)
 
     if layer1_result["confident"]:
@@ -38,7 +42,7 @@ async def classify_call(
             "layer": final_layer,
         }
 
-    layer2_result = await run_llm_scorer(transcript)
+    layer2_result = await run_llm_scorer(caller_text or transcript)
     layer2_urgency = _sanitize_urgency(layer2_result.get("urgency", "routine"))
     layer3_result = await apply_owner_rules(
         supabase, layer2_urgency, tenant_id, detected_service,

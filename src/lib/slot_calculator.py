@@ -97,6 +97,34 @@ def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _all_day_busy_bounds(
+    start: datetime, end: datetime, tenant_timezone: str
+) -> tuple[datetime, datetime]:
+    """Expand an all-day mirror row to tenant-local day bounds.
+
+    All-day rows store pure dates as UTC-midnight timestamps (e.g. Google's
+    exclusive end.date '2026-06-11' lands as 2026-06-11T00:00:00Z). Compared
+    literally they block the wrong local hours — 08:00→08:00-next-day for an
+    Asia/Singapore tenant. The covered calendar days are derived from the UTC
+    date components (the pure-date encoding, NOT the local conversion, which
+    would shift the day for negative-offset tenants), then expanded to
+    [00:00 local of first day, 00:00 local of day-after-last-day).
+
+    The exclusive end is stepped back 1 microsecond so a provider-style
+    next-day-midnight end does not over-block an extra day; dashboard-created
+    all-day calendar_blocks (07:00→20:00 same date) land on the same day's
+    bounds. A degenerate end <= start still blocks the start day.
+    """
+    tz = ZoneInfo(tenant_timezone)
+    start_utc = start.astimezone(timezone.utc)
+    end_anchor = max(end.astimezone(timezone.utc) - timedelta(microseconds=1), start_utc)
+    first_day = start_utc.date()
+    last_day = end_anchor.date()
+    local_start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=tz)
+    local_end = datetime(last_day.year, last_day.month, last_day.day, tzinfo=tz) + timedelta(days=1)
+    return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+
+
 def calculate_available_slots(
     *,
     working_hours: dict,
@@ -117,7 +145,7 @@ def calculate_available_slots(
         working_hours: Day-keyed working hours config.
         slot_duration_mins: Slot length in minutes (e.g. 60).
         existing_bookings: List of {start_time, end_time, zone_id?} (ISO strings).
-        external_blocks: List of {start_time, end_time} (ISO strings).
+        external_blocks: List of {start_time, end_time, is_all_day?} (ISO strings).
         zones: List of {id, name} zone objects.
         zone_pair_buffers: List of {zone_a_id, zone_b_id, buffer_mins}.
         target_date: 'YYYY-MM-DD' date string.
@@ -186,14 +214,19 @@ def calculate_available_slots(
         for b in existing_bookings
     ]
 
-    # Parse external blocks to datetime objects
-    parsed_blocks = [
-        {
-            "start": _parse_iso(b["start_time"]),
-            "end": _parse_iso(b["end_time"]),
-        }
-        for b in external_blocks
-    ]
+    # Parse external blocks to datetime objects. All-day rows (is_all_day=true
+    # on calendar_events / calendar_blocks) are expanded to tenant-local day
+    # bounds — their raw timestamps are UTC-midnight date encodings that would
+    # otherwise block the wrong local hours.
+    parsed_blocks = []
+    for b in external_blocks:
+        block_start = _parse_iso(b["start_time"])
+        block_end = _parse_iso(b["end_time"])
+        if b.get("is_all_day"):
+            block_start, block_end = _all_day_busy_bounds(
+                block_start, block_end, tenant_timezone
+            )
+        parsed_blocks.append({"start": block_start, "end": block_end})
 
     available: list[dict] = []
     cursor = window_start

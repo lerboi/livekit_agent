@@ -90,15 +90,19 @@ def test_en_position_in_top_attention_zone():
 
 
 def test_es_address_validation_rule_present():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same English
+    # body — invariant (rule present for es-locale calls) maps to EN header.
     section = _build_address_validation_section("es")
     assert isinstance(section, str)
-    assert "VALIDACIÓN DE DIRECCIÓN — REGLA CRÍTICA" in section
+    assert "ADDRESS VALIDATION — CRITICAL RULE" in section
 
 
 def test_es_prohibited_phrases_enumerated():
-    section = _build_address_validation_section("es")
-    # Spanish prohibited phrases (planner-pinned). Test counts unique
-    # base lemmas — `validado` and `validada` both count as "validado*".
+    # 2026-06-11 collapse: the Spanish prohibited forms moved from the
+    # removed ES branch to the LANGUAGE section's Spanish delivery guide —
+    # same protection (a Spanish-speaking turn may not fabricate "validado"),
+    # asserted against the assembled es-locale prompt.
+    full = build_system_prompt(locale="es", business_name="Voco")
     prohibited_groups = [
         ("validado", "validada"),
         ("verificado", "verificada"),
@@ -107,10 +111,10 @@ def test_es_prohibited_phrases_enumerated():
         ("consulté su dirección",),
         ("coincide con nuestros registros",),
     ]
-    hits = sum(1 for group in prohibited_groups if any(p in section for p in group))
+    hits = sum(1 for group in prohibited_groups if any(p in full for p in group))
     assert hits >= 4, (
-        f"ES missing prohibited phrases — got {hits}/6 group-hits; "
-        f"expected at least 4. Section: {section!r}"
+        f"Spanish prohibited phrases missing from assembled es prompt — got "
+        f"{hits}/6 group-hits; expected at least 4."
     )
 
 
@@ -138,32 +142,70 @@ def test_es_position_in_top_attention_zone():
 # ----- Cross-locale parity guard -----
 
 
-def test_en_es_distinct():
+def test_en_es_identical():
+    # 2026-06-11 collapse: the old distinctness guard inverts — this section
+    # must NOT fork on locale anymore.
     en = _build_address_validation_section("en")
     es = _build_address_validation_section("es")
-    assert en != es
-    # Sanity: ES must contain Spanish text, not be an EN fallback.
-    assert "REGLA CRÍTICA" in es
+    assert en == es
 
 
 def test_both_locales_pre_tool_readback_explicit():
-    """Phase 61.1: post-tool gating + pre-tool readback license must be explicit.
+    """Phase 61.1: post-tool gating + a readback license must be explicit.
 
     The Phase 61 prompt deadlocked the pre-tool readback step because the rule
     read as if it governed the entire address conversation AND silence was
     explicitly licensed. The fix scopes the rule to post-tool speech and
-    explicitly licenses caller-readback before the tool runs.
+    explicitly licenses a caller-words readback.
+
+    2026-06-10 (early validation): the exact gating-sentence pin changed
+    because validate_address joined the gated tool set — the sentence now
+    reads "After validate_address, book_appointment, or capture_lead
+    returns". The readback license moved from a pre-tool readback to the
+    validate_address confirmation (address_ok/address_corrected directives)
+    plus the address_noted caller-words readback — the "read back what the
+    caller said" license is still asserted verbatim. The protected
+    invariants are unchanged: post-tool gating is explicit, a readback is
+    licensed, and NO silence license exists anywhere in the block.
     """
-    en = _build_address_validation_section("en")
-    es = _build_address_validation_section("es")
-    # Post-tool gating must be EXPLICIT in both locales.
-    assert "After book_appointment or capture_lead returns" in en
-    assert "Después de que book_appointment o capture_lead retorne" in es
-    # Pre-tool readback must be EXPLICITLY licensed in both locales.
-    assert "read back what the caller said" in en
-    assert ("repita lo que el llamante dijo" in es) or ("repita lo que dijo el llamante" in es)
-    # The silence escape hatch and unqualified worst-failure framing must be GONE.
-    assert "Silence or a neutral readback is always acceptable" not in en
-    assert "El silencio o una repetición neutral siempre es aceptable" not in es
-    assert "worst failure mode in this section" not in en
-    assert "peor modo de falla de esta sección" not in es
+    # 2026-06-11 collapse: locale="es" returns the same EN body — the ES
+    # string pins map to the EN pins applied to BOTH locale outputs.
+    for locale in ("en", "es"):
+        section = _build_address_validation_section(locale)
+        # Post-tool gating must be EXPLICIT (covering the early
+        # validate_address tool as well).
+        assert "After validate_address, book_appointment, or capture_lead returns" in section
+        # A caller-words readback must be EXPLICITLY licensed (the
+        # address_noted branch — never leaves the model with nothing it is
+        # allowed to say about the address).
+        assert "read back what the caller said" in section
+        # The silence escape hatch and unqualified worst-failure framing must be GONE.
+        assert "Silence or a neutral readback is always acceptable" not in section
+        assert "worst failure mode in this section" not in section
+
+
+def test_both_locales_early_validation_flow():
+    """2026-06-10: the rule must encode the early-validation flow — call
+    validate_address the moment the address is given (after a one-sentence
+    filler), speak the result once, cap at one correction loop, never read
+    the address more than twice, and booking does not re-read a validated
+    address."""
+    # 2026-06-11 collapse: locale="es" returns the same EN body — the ES
+    # twice-cap / no-silence pins map to the EN pins on BOTH locale outputs.
+    for locale in ("en", "es"):
+        section = _build_address_validation_section(locale)
+        assert "validate_address" in section
+        # All four STATE branches of the new tool are taught.
+        for state in (
+            "STATE:address_ok",
+            "STATE:address_corrected",
+            "STATE:address_unclear",
+            "STATE:address_noted",
+        ):
+            assert state in section, f"missing {state!r}"
+        # The read-at-most-twice cap.
+        assert "more than twice" in section
+        # No silence license anywhere (Phase 61.1 deadlock class) — the
+        # filler before validate_address must be REQUIRED, not optional.
+        assert "silence is acceptable" not in section.lower()
+        assert "never leave the line silent" in section

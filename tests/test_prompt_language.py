@@ -29,15 +29,20 @@ def test_en_language_section_has_anti_hallucination_directive():
 
 
 def test_es_language_section_has_anti_hallucination_directive():
-    out = _build_language_section(None, locale="es").lower()
-    # Spanish mirror — mention the unintelligibility concept in ES and pin
-    # the response language back to Spanish.
-    assert re.search(r"distorsionado|ininteligible|apagado", out), (
-        "ES branch missing unintelligibility directive"
+    # 2026-06-11 single-prompt collapse: the es-locale section is the same
+    # unified English text — the invariant (anti-hallucination directive
+    # covers es-locale calls) maps to the EN pins, plus the Spanish-default
+    # line that is now locale's ONLY effect.
+    out = _build_language_section(None, locale="es")
+    lowered = out.lower()
+    assert re.search(r"garbled|unintelligible|muffled", lowered), (
+        "es-locale output missing unintelligibility directive"
     )
-    assert "español" in out
-    assert "anti-alucinación" in out or "nunca invente" in out, (
-        "ES branch should carry an explicit anti-hallucination framing"
+    assert "anti-hallucination" in lowered or "never invent" in lowered, (
+        "es-locale output should carry an explicit anti-hallucination framing"
+    )
+    assert "This business operates in Spanish" in out, (
+        "es-locale output must carry the default-to-Spanish line"
     )
 
 
@@ -53,7 +58,13 @@ def test_language_section_en_es_parity_character_delta_within_30pct():
 
 
 def test_language_section_preserves_60_3_plan_12_defaults():
+    # 2026-06-11 collapse: the ES default pin moves from "Por defecto en
+    # español" to the new English-stated Spanish-default line — same
+    # invariant (locale still flips the tenant's default language).
     en = _build_language_section(None, locale="en")
     es = _build_language_section(None, locale="es")
     assert "Default to English" in en, "60.3 Plan 12 EN default lost"
-    assert "Por defecto en español" in es, "60.3 Plan 12 ES default lost"
+    assert (
+        "This business operates in Spanish — open in Spanish and default to "
+        "Spanish on every call." in es
+    ), "default-to-Spanish line lost"

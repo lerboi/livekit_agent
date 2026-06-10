@@ -73,22 +73,32 @@ def test_en_es_length_within_1pt5x():
 
 
 def test_en_availability_contract():
+    # 2026-06-10: pins updated from the retired monolithic `check_availability`
+    # to the real availability tool names (prod-readiness split:
+    # check_slot / check_day / next_available_days). Same invariant — the
+    # two-step availability contract names real, untranslated tool ids.
     section = _build_booking_section("Voco", True, "postal code", "en")
     lowered = section.lower()
-    assert "check_availability" in lowered
+    assert "check_slot" in lowered
+    assert "check_day" in lowered
+    assert "next_available_days" in lowered
     assert "before" in lowered
     assert "book" in lowered
 
 
 def test_es_availability_contract():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same English
+    # body — the two-step availability contract pins map to the EN words.
     section = _build_booking_section("Voco", True, "postal code", "es")
     lowered = section.lower()
-    # Tool names NOT translated.
-    assert "check_availability" in lowered
-    # Temporal contract word in Spanish.
-    assert "antes" in lowered
-    # Booking concept present — either verb or tool name.
-    assert ("reservar" in lowered) or ("book_appointment" in lowered)
+    # Tool names NOT translated. (2026-06-10: check_availability → split tools.)
+    assert "check_slot" in lowered
+    assert "check_day" in lowered
+    assert "next_available_days" in lowered
+    # Temporal contract word.
+    assert "before" in lowered
+    # Booking concept present.
+    assert "book_appointment" in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +117,14 @@ def test_en_readback_invariant():
 
 
 def test_es_readback_invariant():
+    # 2026-06-11 collapse: readback invariant unchanged; es-locale output is
+    # the EN body — pins map to the EN words.
     section = _build_booking_section("Voco", True, "postal code", "es")
     lowered = section.lower()
     # Readback/confirmation cue present.
-    assert "confirmar" in lowered or "confirme" in lowered or "confirma" in lowered
+    assert ("read back" in lowered) or ("confirm" in lowered)
     # Address concept in scope.
-    assert "dirección" in lowered
+    assert "address" in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +169,10 @@ def test_en_onboarding_incomplete_simplified():
     lowered = section.lower()
     # Simplified path — mentions business name and lead-capture flow.
     assert "voco" in lowered
-    # Full 3-step protocol NOT present.
-    assert "check_availability" not in lowered
+    # Full 3-step protocol NOT present. (2026-06-10: pin moved from the
+    # retired check_availability to the real availability tool names.)
+    assert "check_slot" not in lowered
+    assert "check_day" not in lowered
 
 
 def test_es_onboarding_incomplete_simplified():
@@ -168,15 +182,17 @@ def test_es_onboarding_incomplete_simplified():
     lowered = section.lower()
     assert "voco" in lowered
     # Full 3-step protocol NOT present in simplified path.
-    assert "check_availability" not in lowered
+    assert "check_slot" not in lowered
+    assert "check_day" not in lowered
 
 
 def test_both_locales_onboarding_gated_full_protocol():
     en_full = _build_booking_section("Voco", True, "postal code", "en")
     es_full = _build_booking_section("Voco", True, "postal code", "es")
-    # Full protocol path contains the two-step contract.
-    assert "check_availability" in en_full.lower()
-    assert "check_availability" in es_full.lower()
+    # Full protocol path contains the two-step contract. (2026-06-10: pin
+    # moved from the retired check_availability to check_slot.)
+    assert "check_slot" in en_full.lower()
+    assert "check_slot" in es_full.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -185,12 +201,13 @@ def test_both_locales_onboarding_gated_full_protocol():
 # ---------------------------------------------------------------------------
 
 
-def test_en_es_distinct_and_nonempty_full_protocol():
+def test_en_es_identical_and_nonempty_full_protocol():
+    # 2026-06-11 collapse: the old distinctness guard inverts — this section
+    # must NOT fork on locale anymore (es gains EN's NO DOUBLE-BOOKING block).
     en = _build_booking_section("Voco", True, "postal code", "en")
     es = _build_booking_section("Voco", True, "postal code", "es")
     assert en
-    assert es
-    assert en != es
+    assert en == es
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +226,10 @@ def test_en_anti_fabrication_rule():
 
 
 def test_es_anti_fabrication_rule():
+    # 2026-06-11 collapse: anti-fabrication invariant unchanged; es-locale
+    # output is the EN body — Spanish reserved words now live in OUTCOME
+    # WORDS' any-language clause (see test_prompt_outcome_words.py).
     section = _build_booking_section("Voco", True, "postal code", "es")
     lowered = section.lower()
     assert "book_appointment" in lowered
-    assert ("confirmado" in lowered) or ("reservado" in lowered)
+    assert ("confirmed" in lowered) or ("booked" in lowered)

@@ -48,15 +48,16 @@ def test_en_name_use_forbidden_patterns_block_present():
 
 
 def test_es_name_use_forbidden_patterns_block_present():
-    """Spanish info-gathering section must mirror the EN forbidden-patterns
-    block with locale-appropriate vocative examples."""
+    """2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    body — the invariant (forbidden vocative patterns enumerated for
+    es-locale calls) maps to the EN enumeration."""
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
-    assert "Patrones prohibidos" in section, (
-        "ES info-gathering must enumerate forbidden name-use patterns"
+    assert "Forbidden patterns" in section, (
+        "es-locale info-gathering must enumerate forbidden name-use patterns"
     )
-    for pattern in ("Gracias, {nombre}", "{nombre}, tengo"):
+    for pattern in ("Thanks, {name}", "{name}, I have"):
         assert pattern in section, (
-            f"ES forbidden-patterns block must include {pattern!r}"
+            f"es-locale forbidden-patterns block must include {pattern!r}"
         )
 
 
@@ -70,10 +71,10 @@ def test_en_acknowledgment_outcome_no_name():
 
 
 def test_es_acknowledgment_outcome_no_name():
-    """ES mirror — acuse de recibo sin nombre."""
+    """2026-06-11 collapse: same invariant for es-locale calls, EN pin."""
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
-    assert "no debe contener el nombre" in section, (
-        "ES must explicitly state acknowledgment cannot contain the name"
+    assert "must not contain the caller's name" in section, (
+        "es-locale output must state acknowledgment cannot contain the name"
     )
 
 
@@ -88,9 +89,10 @@ def test_en_sole_on_air_name_moment_is_booking_readback():
 
 
 def test_es_sole_on_air_name_moment_is_booking_readback():
+    # 2026-06-11 collapse: same invariant for es-locale calls, EN pin.
     section = _build_info_gathering_section(_noop_t, "código postal", "es")
-    assert "ÚNICO momento" in section or "único momento" in section.lower(), (
-        "ES must frame booking readback as the ÚNICO on-air name moment"
+    assert "SOLE moment" in section or "sole moment" in section.lower(), (
+        "es-locale output must frame booking readback as the SOLE name moment"
     )
 
 
@@ -101,29 +103,36 @@ def test_en_anti_hallucination_reframed_to_stt_error():
     """EN ANTI-HALLUCINATION must trigger on transcription-language
     mismatch, not just unintelligible audio. The original predicate
     ("if you cannot understand") missed the AJ_gpRzniyNoJBd failure
-    where Gemini was confident the German transcript was correct."""
+    where Gemini was confident the German transcript was correct.
+
+    2026-06-11 collapse: pin widened from "STT errors of English audio" to
+    "STT errors of English or Spanish audio" — the unified section merged
+    the removed ES branch's Spanish-audio-misheard semantic; the protected
+    invariant (language mismatch = STT error, not a switch) is unchanged."""
     section = _build_language_section(_noop_t, "en")
-    assert "STT errors of English audio" in section, (
-        "EN anti-hallucination must classify transcription-language "
-        "mismatch as an STT error of English audio"
+    assert "STT errors of English or Spanish audio" in section, (
+        "anti-hallucination must classify transcription-language "
+        "mismatch as an STT error of supported-language audio"
     )
-    # The list of unsupported languages Gemini may misclassify English as.
+    # The list of unsupported languages the STT may misclassify audio as.
     for lang in ("German", "French", "Italian"):
         assert lang in section, (
-            f"EN anti-hallucination must list {lang} as an example "
+            f"anti-hallucination must list {lang} as an example "
             "language that almost always indicates a STT error"
         )
 
 
 def test_es_anti_hallucination_reframed_to_stt_error():
+    # 2026-06-11 collapse: es-locale output is the same English text — same
+    # invariant, EN pins.
     section = _build_language_section(_noop_t, "es")
-    assert "errores de STT" in section, (
-        "ES anti-hallucination must classify transcription-language "
-        "mismatch as STT error of Spanish audio"
+    assert "STT errors of English or Spanish audio" in section, (
+        "es-locale anti-hallucination must classify transcription-language "
+        "mismatch as an STT error of supported-language audio"
     )
-    for lang in ("alemán", "francés", "italiano"):
+    for lang in ("German", "French", "Italian"):
         assert lang in section, (
-            f"ES anti-hallucination must list {lang} as an example "
+            f"es-locale anti-hallucination must list {lang} as an example "
             "misheard-language"
         )
 
@@ -140,9 +149,11 @@ def test_en_forbids_self_disclosing_only_speaks_english():
 
 
 def test_es_forbids_self_disclosing_only_speaks_spanish():
+    # 2026-06-11 collapse: same self-disclosure ban for es-locale calls; the
+    # es-locale output is the same English text — EN pin.
     section = _build_language_section(_noop_t, "es")
-    assert "NO le diga al llamante" in section, (
-        "ES must explicitly forbid telling the caller 'solo habla español'"
+    assert "do NOT tell the caller you only speak" in section, (
+        "es-locale output must forbid disclosing the language limitation"
     )
 
 
@@ -158,11 +169,15 @@ def test_en_explicit_switch_phrase_required():
 
 
 def test_es_explicit_switch_phrase_required():
+    # 2026-06-11 collapse: same invariant for es-locale calls, EN pin (the
+    # unified text also carries the "¿Podemos hablar en inglés?" example
+    # harvested from the removed ES branch).
     section = _build_language_section(_noop_t, "es")
-    assert "NO es consentimiento para cambiar" in section, (
-        "ES must clarify that foreign text in transcript is NOT consent "
-        "to switch languages"
+    assert "NOT consent to switch" in section, (
+        "es-locale output must clarify that foreign text in transcript is "
+        "NOT consent to switch languages"
     )
+    assert "¿Podemos hablar en inglés?" in section
 
 
 def test_en_connection_issue_framing_for_repeat_request():
@@ -177,7 +192,8 @@ def test_en_connection_issue_framing_for_repeat_request():
 
 
 def test_es_connection_issue_framing_for_repeat_request():
+    # 2026-06-11 collapse: same invariant for es-locale calls, EN pin.
     section = _build_language_section(_noop_t, "es")
-    assert "el audio se cortó" in section, (
-        "ES must offer a connection-issue substitution phrase"
+    assert "audio cut out" in section, (
+        "es-locale output must offer a connection-issue substitution phrase"
     )

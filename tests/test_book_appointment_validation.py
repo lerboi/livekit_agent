@@ -112,15 +112,19 @@ def _make_validation_result(verdict: str, formatted: str | None = None) -> dict:
 
 @pytest.fixture
 def patched_handler():
-    """Patches validate_address_bounded + atomic_book_slot (both async) inside the
-    book_appointment module. Yields {'validate': mock, 'atomic': mock} where each
-    is an AsyncMock — set .return_value on each per test to control behavior.
+    """Patches validate_address_with_region_fallback + atomic_book_slot (both
+    async) inside the book_appointment module. Yields {'validate': mock,
+    'atomic': mock} where each is an AsyncMock — set .return_value on each per
+    test to control behavior. The region-fallback wrapper returns a
+    (result, region_used) tuple; the side_effect below wraps the bare result
+    dict each test assigns so the tests stay tuple-agnostic.
     """
-    with patch("src.tools.book_appointment.validate_address_bounded", new_callable=AsyncMock) as mock_validate, \
+    with patch("src.tools.book_appointment.validate_address_with_region_fallback", new_callable=AsyncMock) as mock_validate, \
          patch("src.tools.book_appointment.atomic_book_slot", new_callable=AsyncMock) as mock_atomic, \
          patch("src.tools.book_appointment.push_booking_to_calendar"), \
          patch("src.tools.book_appointment.send_caller_sms"), \
          patch("src.tools.book_appointment.send_caller_recovery_sms"):
+        mock_validate.side_effect = lambda *a, **k: (mock_validate.return_value, "US")
         yield {"validate": mock_validate, "atomic": mock_atomic}
 
 

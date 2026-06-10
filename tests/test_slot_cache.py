@@ -1,18 +1,24 @@
-"""Phase-fix tests (2026-04-23): check_availability consumes deps["_slot_cache"]
-when fresh, bypassing the 5 parallel Supabase queries.
+"""Slot-cache reuse tests (ported 2026-06-10 from
+test_check_availability_slot_cache.py).
 
-Motivation: Gemini Live cancels pending function calls on caller barge-in.
-Shortening this tool from ~500ms to ~50ms materially shrinks that race
-(observed in live UAT 05:42:05Z where the caller heard 2+ minutes of
-stuttered half-utterances).
+Original phase-fix (2026-04-23): the monolithic check_availability consumed
+deps["_slot_cache"] when fresh, bypassing the 5 parallel Supabase scheduling
+queries (shrinking the in-flight window the realtime model could cancel).
+That tool was split into check_slot / check_day / next_available_days; the
+cache behavior now lives in src/tools/_availability_lib.fetch_scheduling_data
+(SLOT_CACHE_TTL_S = 30s), shared by all three. These tests port the same
+invariants against check_slot, the primary booking-path tool.
 """
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.tools.check_availability import create_check_availability_tool
+from src.tools._availability_lib import SLOT_CACHE_TTL_S
+from src.tools.check_slot import create_check_slot_tool
 
 
 def _fresh_cache(**overrides):
@@ -51,9 +57,6 @@ class _TrippedSupabase:
 
     def table(self, name):
         self.calls.append(name)
-        # Only scheduling tables must never be hit on the fresh-cache path.
-        # (tenant fetch is an allowed fallback if deps["tenant"] is missing
-        # needed fields — we always set a complete tenant here.)
         scheduling = {
             "appointments",
             "calendar_events",
@@ -65,7 +68,6 @@ class _TrippedSupabase:
             raise _FakeSupabaseCalledError(
                 f"supabase.table({name!r}) called despite fresh slot_cache"
             )
-        # Minimal fallback so tenant-only paths don't blow up.
         raise AssertionError(
             f"unexpected supabase.table({name!r}) call in slot_cache test"
         )
@@ -82,16 +84,14 @@ def _make_deps(cache, tenant):
 
 
 def _complete_tenant():
-    # Field set mirrors src/agent.py tenant fetch via `select("*")`;
-    # check_availability reads tenant_timezone, working_hours,
-    # slot_duration_mins, business_name from deps["tenant"].
+    # Field set mirrors _availability_lib._NEEDED_TENANT_FIELDS so
+    # ensure_tenant() never falls back to a live tenants fetch.
     return {
         "id": "test-tenant-id",
         "business_name": "ACME",
         "tenant_timezone": "Asia/Singapore",
         "slot_duration_mins": 60,
         "working_hours": {
-            # All-week 08:00-17:00 SGT. Covers the 2026-04-24 Friday request.
             d: {"open": "08:00", "close": "17:00", "enabled": True,
                 "lunchStart": None, "lunchEnd": None}
             for d in (
@@ -102,8 +102,15 @@ def _complete_tenant():
     }
 
 
+def _tomorrow_sgt() -> str:
+    """A guaranteed-future local date (the original test hard-coded
+    2026-04-24, which went stale and would now hit the past-date guard)."""
+    now_sgt = datetime.now(ZoneInfo("Asia/Singapore"))
+    return (now_sgt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 class _FakeRunContext:
-    """Minimal RunContext-shaped object — check_availability only reads tenant
+    """Minimal RunContext-shaped object — check_slot only reads the tenant
     dict and deps; no livekit-agents internals are exercised."""
     def __init__(self):
         pass
@@ -111,34 +118,33 @@ class _FakeRunContext:
 
 @pytest.mark.asyncio
 async def test_fresh_cache_bypasses_supabase_scheduling_queries():
-    """If deps['_slot_cache'] is fresh (TTL 30s), check_availability must not
-    call supabase.table() for any of the 5 scheduling tables. It should
-    compute slots purely from cached data."""
+    """If deps['_slot_cache'] is fresh (TTL 30s), check_slot must not call
+    supabase.table() for any of the 5 scheduling tables. It should compute
+    slots purely from cached data."""
     cache = _fresh_cache()
     deps = _make_deps(cache, _complete_tenant())
-    tool = create_check_availability_tool(deps)
+    tool = create_check_slot_tool(deps)
 
-    # Tomorrow 15:00 SGT request. With the cache having no appointments/
-    # events/blocks, the slot should be available.
-    result = await tool(
+    # Tomorrow 15:00 SGT request. With the cache holding no appointments/
+    # events/blocks and all-week 08:00-17:00 hours, the slot is available.
+    result = await tool.__wrapped__(
+        {"date": _tomorrow_sgt(), "time": "15:00"},
         _FakeRunContext(),
-        date="2026-04-24",
-        time="15:00",
     )
 
-    # No supabase calls to scheduling tables (the _TrippedSupabase would raise).
-    assert "STATE:slot_available" in result or "STATE:slot_not_available" in result, (
+    # No supabase calls to scheduling tables (the _TrippedSupabase would raise,
+    # which check_slot's outer handler surfaces as STATE:lookup_failed).
+    assert ("STATE:slot_ok" in result) or ("STATE:slot_taken" in result), (
         f"expected a slot verdict; got {result!r}"
     )
-    # Must NOT be the scheduling_data_error path
-    assert "scheduling_data_error" not in result
-    # Tool-call log must show the cache was consulted (success=True)
+    assert "lookup_failed" not in result
+    # Tool-call log must show the cached compute succeeded.
     last = deps["_tool_call_log"][-1] if deps["_tool_call_log"] else {}
     assert last.get("success") is True
 
 
 def test_slot_cache_has_fetched_at_timestamp_and_five_tables():
-    """Cache shape contract — check_availability reads exactly these keys."""
+    """Cache shape contract — fetch_scheduling_data reads exactly these keys."""
     cache = _fresh_cache()
     for k in (
         "fetched_at",
@@ -158,11 +164,8 @@ def test_slot_cache_has_fetched_at_timestamp_and_five_tables():
 
 
 def test_stale_cache_triggers_live_refetch_path():
-    """Sanity: a cache older than TTL (30s) is NOT reused. This test asserts
-    the structural condition (not the runtime behavior, which would require
-    a full Supabase mock chain for the 5 scheduling tables). The fresh-cache
-    test above is the positive bypass proof; this guards against a code edit
-    that accidentally widens the TTL window."""
+    """Sanity: a cache older than TTL (30s) is NOT reused. Mirrors the
+    production gate in _availability_lib.fetch_scheduling_data — guards
+    against a code edit that accidentally widens the TTL window."""
     stale = _stale_cache(age_s=31.0)
-    # Mirror the production gate in check_availability.py
-    assert (time.time() - stale["fetched_at"]) >= 30.0
+    assert (time.time() - stale["fetched_at"]) >= SLOT_CACHE_TTL_S

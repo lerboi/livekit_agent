@@ -12,7 +12,8 @@
     "fallback_no_booking": "I've noted your information and someone from our team will follow up with you shortly.",
     "language_barrier_escalation": "I'm going to make sure someone who speaks {language} gets back to you right away.",
     "greeting_onboarding": "Hello, thank you for calling {business_name}. This call may be recorded for quality purposes. How can I help you today?",
-    "greeting_default": "Hello, this call may be recorded for quality purposes. How can I help you today?"
+    "greeting_default": "Hello, this call may be recorded for quality purposes. How can I help you today?",
+    "max_duration_goodbye": "I'm sorry, we've reached the maximum call length. Someone from the team will follow up with you shortly. Thank you for calling — goodbye."
   },
   "notifications": {
     "booking_confirmation": "Your appointment with {business_name} is confirmed for {date} at {time}. Address: {address}",

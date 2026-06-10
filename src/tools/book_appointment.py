@@ -16,7 +16,8 @@ from ..lib.booking import atomic_book_slot
 from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
 from ..lib.calendar_push import push_booking_to_calendar
-from ..integrations.google_maps import validate_address_bounded
+from ..integrations.google_maps import validate_address_with_region_fallback
+from .validate_address import get_cached_validation
 from ..utils import (
     format_slot_for_speech,
     to_local_date_string,
@@ -189,13 +190,13 @@ _BOOK_APPOINTMENT_SCHEMA = {
     # readback rule (D-E3) lives in the prompt CRITICAL RULE block.
     "description": (
         "Book a confirmed appointment for the caller. Call this after "
-        "check_slot has confirmed the slot is open and the caller has "
-        "acknowledged the address you heard back from them — that pre-tool "
-        "readback is the ordinary 'I heard you say X, is that right?' "
-        "exchange, not a 'validated' claim. Pass slot_token from the most "
-        "recent check_slot result verbatim — never invent or reconstruct "
-        "it. The address fields you provide will be validated against an "
-        "external service before booking — the tool return will indicate "
+        "check_slot has confirmed the slot is open and the address has been "
+        "validated with validate_address (call validate_address the moment "
+        "the caller gives their address; if it was never called, this tool "
+        "performs the same validation itself as a fallback). Pass "
+        "slot_token from the most recent check_slot result verbatim — "
+        "never invent or reconstruct it. Pass the address pieces exactly "
+        "as confirmed with the caller. The tool return will indicate "
         "whether the address was confirmed, corrected, or could not be "
         "verified, and will tell you what to speak back to the caller. "
         "Speak only what the return tells you. Speak a short filler phrase "
@@ -286,16 +287,42 @@ def create_book_appointment_tool(deps: dict):
             else []
         )
 
-        validation_result = await validate_address_bounded(
-            tenant_id=tenant_id,
-            call_id=deps.get("call_id"),
-            region_code=region_code,
-            address_lines=address_lines_for_validation,
-            postal_code=postal_code or None,
-            locality=None,  # not captured by current single-question intake (Phase 60 D-08)
-            supabase=supabase,
-            timeout_seconds=1.5,
-        )
+        # 2026-06-10 early-validation reuse: if the validate_address tool
+        # already validated this exact address mid-call (normalized street +
+        # postal match; unit differences tolerated), reuse its cached result —
+        # no second Google call. Any mismatch (or a cached transient error)
+        # falls back to validating here, exactly as before.
+        cached_validation = get_cached_validation(deps, street_name, postal_code)
+        used_cached_validation = cached_validation is not None
+        if used_cached_validation:
+            logger.info(
+                "[book_appointment] reusing mid-call validate_address result "
+                "(verdict=%s) for call=%s",
+                cached_validation.get("verdict"),
+                deps.get("call_id"),
+            )
+            validation_result = cached_validation
+        else:
+            # Tenant region first; automatic caller-region (caller-ID) second
+            # attempt only when the first verdict is unconfirmed/unsupported —
+            # up to 1.5s extra on that rare path only (see google_maps).
+            validation_result, _validation_region = await validate_address_with_region_fallback(
+                tenant_id=tenant_id,
+                call_id=deps.get("call_id"),
+                region_code=region_code,
+                caller_region=deps.get("caller_region"),
+                address_lines=address_lines_for_validation,
+                postal_code=postal_code or None,
+                locality=None,  # not captured by current single-question intake (Phase 60 D-08)
+                supabase=supabase,
+                timeout_seconds=1.5,
+            )
+            if _validation_region != region_code:
+                logger.info(
+                    "[book_appointment] address validated with region=%s "
+                    "(tenant region=%s) call=%s",
+                    _validation_region, region_code, deps.get("call_id"),
+                )
 
         # D-D3' service_address overwrite: only on confirmed / confirmed_with_changes
         validation_verdict = validation_result.get("verdict", "error")
@@ -519,7 +546,7 @@ def create_book_appointment_tool(deps: dict):
                 ),
                 asyncio.to_thread(
                     lambda: supabase.table("calendar_events")
-                    .select("start_time, end_time")
+                    .select("start_time, end_time, is_all_day")
                     .eq("tenant_id", tenant_id)
                     .gte("end_time", now_iso)
                     .execute()
@@ -601,28 +628,54 @@ def create_book_appointment_tool(deps: dict):
         # where a duplicate could fall through to the slot_taken branch.
         appointment_id = result.get("appointment_id")
 
-        # Phase 61 D-E2: verdict-driven STATE+DIRECTIVE return string. The agent
-        # reads these in the prompt (Plan 04) and decides how to speak the result;
-        # the strings themselves are NEVER spoken aloud verbatim.
+        # Phase 61 D-E2 verdict-driven return strings, SHORTENED 2026-06-10 for
+        # the early-validation flow: when the address was already validated and
+        # confirmed mid-call via validate_address (used_cached_validation), the
+        # post-commit confirmation is ONE short sentence — day + time only, no
+        # address re-read. The address only re-enters the directive when this
+        # tool had to validate it itself (fallback path — the caller never
+        # heard the final form). The verdict= tokens are load-bearing: tests
+        # and the prompt's ADDRESS VALIDATION rule key on them — do not rename.
+        # The agent reads these; the strings are NEVER spoken aloud verbatim.
         slot_speech = format_slot_for_speech(slot_start, tenant_timezone)
         formatted_address_for_return = validation_result.get("formatted_address")
         if validation_verdict == "confirmed":
-            return_msg = (
-                f"BOOKED [verdict=validated]: relay normalized address "
-                f"[{formatted_address_for_return}] and time [{slot_speech}] "
-                f"as confirmed; ask if anything else is needed"
-            )
+            if used_cached_validation:
+                return_msg = (
+                    f"BOOKED [verdict=validated]: confirm day and time "
+                    f"[{slot_speech}] in ONE short sentence; the address was "
+                    f"already confirmed — do not re-read it; "
+                    f"ask if anything else is needed"
+                )
+            else:
+                return_msg = (
+                    f"BOOKED [verdict=validated]: confirm day and time "
+                    f"[{slot_speech}] and normalized address "
+                    f"[{formatted_address_for_return}] once, briefly; "
+                    f"ask if anything else is needed"
+                )
         elif validation_verdict == "confirmed_with_changes":
-            return_msg = (
-                f"BOOKED [verdict=validated_with_corrections]: relay normalized address "
-                f"[{formatted_address_for_return}] as the final form, "
-                f"explicitly invite caller confirmation before closing; "
-                f"if caller corrects, accept correction and re-read full address"
-            )
+            if used_cached_validation:
+                return_msg = (
+                    f"BOOKED [verdict=validated_with_corrections]: confirm day "
+                    f"and time [{slot_speech}] in ONE short sentence; the "
+                    f"corrected address was already confirmed — do not re-read "
+                    f"it; ask if anything else is needed"
+                )
+            else:
+                return_msg = (
+                    f"BOOKED [verdict=validated_with_corrections]: confirm day "
+                    f"and time [{slot_speech}]; read corrected address "
+                    f"[{formatted_address_for_return}] once and "
+                    f"explicitly invite caller confirmation; "
+                    f"if caller corrects, accept correction and re-read once"
+                )
         else:
             # unconfirmed | error | skipped | unsupported_region
             return_msg = (
-                "BOOKED [verdict=unvalidated]: relay address as caller spoke it; "
+                f"BOOKED [verdict=unvalidated]: confirm day and time "
+                f"[{slot_speech}] in ONE short sentence; "
+                "relay address as caller spoke it only if it was never read back; "
                 "do NOT claim \"validated\", \"confirmed against records\", or "
                 "\"looked up your address\""
             )

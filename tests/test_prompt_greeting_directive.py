@@ -61,16 +61,20 @@ def test_greeting_en_reframed_to_already_delivered():
 
 
 def test_greeting_es_reframed_to_already_delivered():
+    # 2026-06-11 single-prompt collapse: locale="es" returns the same EN
+    # section (the spoken session.say greeting itself stays per-locale via
+    # messages/es.json) — the already-delivered framing pins map to EN.
     out = _greeting_es().lower()
-    assert "apertura:" in out
-    assert "ya pronunció" in out
-    assert "no salude de nuevo" in out
-    assert "directamente" in out
+    assert "opening:" in out
+    assert "already spoken" in out
+    assert "do not greet again" in out
+    assert "respond directly" in out
 
 
 def test_greeting_keeps_echo_awareness_note():
+    # 2026-06-11 collapse: echo-awareness invariant unchanged; EN in both.
     assert "echo awareness:" in _greeting_en().lower()
-    assert "conciencia de eco:" in _greeting_es().lower()
+    assert "echo awareness:" in _greeting_es().lower()
 
 
 def test_greeting_drops_you_open_the_call_framing():
@@ -91,5 +95,8 @@ def test_greeting_section_does_not_inline_the_disclosure_text():
     assert "Esta llamada puede ser grabada por motivos de calidad" not in _greeting_es()
 
 
-def test_greeting_section_is_locale_specific():
-    assert _greeting_en() != _greeting_es()
+def test_greeting_section_is_locale_independent():
+    # 2026-06-11 collapse: the old locale-specific guard inverts — the
+    # greeting SECTION must not fork on locale (the spoken greeting template
+    # in messages/{en,es}.json remains per-locale and untouched).
+    assert _greeting_en() == _greeting_es()

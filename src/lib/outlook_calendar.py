@@ -6,6 +6,7 @@ import time
 import requests
 
 from ..supabase_client import get_supabase_admin
+from .google_calendar import _to_naive_local_iso
 
 logger = logging.getLogger("voco-agent")
 
@@ -107,11 +108,16 @@ def push_booking_to_outlook(tenant_id, appointment_id):
         if appt.get("notes"):
             description_parts.append(f"Notes: {appt['notes']}")
 
+        # Graph ignores the UTC offset in dateTime when timeZone is also set —
+        # sending the raw offset-suffixed ISO shifted events by the tenant's UTC
+        # offset (e.g. +8h for SG). Same fix as the Google twin (Phase 60.4
+        # D-A-01): convert to naive tenant-local ISO and let timeZone be
+        # authoritative.
         event_body = {
             "subject": summary,
             "body": {"contentType": "text", "content": "\n".join(description_parts)},
-            "start": {"dateTime": appt["start_time"], "timeZone": tz},
-            "end": {"dateTime": appt["end_time"], "timeZone": tz},
+            "start": {"dateTime": _to_naive_local_iso(appt["start_time"], tz), "timeZone": tz},
+            "end": {"dateTime": _to_naive_local_iso(appt["end_time"], tz), "timeZone": tz},
         }
         if appt.get("service_address"):
             event_body["location"] = {"displayName": appt["service_address"]}
