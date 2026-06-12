@@ -162,7 +162,11 @@ async def test_capture_lead_confirmed_return_shape(patched_handler):
     result = await tool.__wrapped__(ctx, **_kwargs())
 
     assert result.startswith("LEAD CAPTURED [verdict=validated]:")
-    assert "1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA" in result
+    # 2026-06-11 naturalness pass (findings.md P2): the fallback-validated
+    # directive no longer re-reads the normalized address (mirrors
+    # book_appointment — the caller already heard the address read back).
+    assert "1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA" not in result
+    assert "do not re-read" in result
     assert "ask if anything else is needed" in result
 
 

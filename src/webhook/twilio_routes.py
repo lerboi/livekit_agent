@@ -24,11 +24,9 @@ from src.lib.phone import _normalize_phone
 from .schedule import ScheduleDecision, evaluate_schedule
 from .caps import check_outbound_cap
 from .security import verify_twilio_signature
+from src.lib.subscription_gate import is_subscription_blocked
 
 logger = logging.getLogger("voco-webhook")
-
-# Subscription statuses that block inbound calls (copied from agent.py:52)
-BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
 
 
 router = APIRouter(
@@ -162,9 +160,16 @@ async def incoming_call(request: Request) -> Response:
                 supabase.table("tenants")
                 .select(
                     "id, call_forwarding_schedule, tenant_timezone, country, "
-                    "pickup_numbers, dial_timeout_seconds, vip_numbers, subscriptions(status)"
+                    "pickup_numbers, dial_timeout_seconds, vip_numbers, "
+                    "subscriptions(status, current_period_end)"
                 )
                 .eq("phone_number", to_number)
+                # Filter the EMBED to the current row. subscriptions is a
+                # history table (one row per webhook event) — without this the
+                # embed returned an arbitrary historical row, so a canceled
+                # tenant whose random row read 'active' kept free owner-pickup
+                # forwarding (2026-06-12 audit M3).
+                .eq("subscriptions.is_current", True)
                 .limit(1)
                 .execute()
             )
@@ -183,11 +188,15 @@ async def incoming_call(request: Request) -> Response:
     if not tenant:
         return _xml_response(_ai_sip_twiml())
 
-    # 2. Subscription check (fail-open: if parsing fails, continue)
+    # 2. Subscription check (fail-open: if parsing fails, continue).
+    # Blocked tenants are routed to the AI SIP path, where agent.py's own gate
+    # (same shared rule) refuses the call — this keeps them out of owner-pickup
+    # forwarding, which never passes through the agent gate.
     try:
         sub_rows = tenant.get("subscriptions") or []
-        status = sub_rows[0]["status"] if sub_rows else None
-        if status in BLOCKED_STATUSES:
+        sub = sub_rows[0] if sub_rows else None
+        status = sub.get("status") if sub else None
+        if sub and is_subscription_blocked(status, sub.get("current_period_end")):
             logger.info(
                 "[webhook] Blocked subscription (%s) for tenant %s — AI TwiML",
                 status, tenant["id"],

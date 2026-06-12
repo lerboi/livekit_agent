@@ -33,16 +33,34 @@ async def verify_twilio_signature(request: Request) -> None:
     internally but this is explicit and version-independent).
     """
     if os.environ.get("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true":
-        logger.warning(
-            "[webhook] ALLOW_UNSIGNED_WEBHOOKS=true — skipping signature check"
-        )
-        # Still read form so handlers can access via request.state uniformly
-        form_data = await request.form()
-        request.state.form_data = dict(form_data)
-        return
+        # Dev convenience only. NEVER honored in production — one stray env
+        # var would otherwise disable signature checks entirely
+        # (2026-06-12 audit M9). Unset PYTHON_ENV defaults to "production"
+        # (fail closed), matching the Sentry init default in agent.py.
+        if os.environ.get("PYTHON_ENV", "production").lower() == "production":
+            logger.error(
+                "[webhook] ALLOW_UNSIGNED_WEBHOOKS=true ignored: PYTHON_ENV is "
+                "production — signature check enforced"
+            )
+        else:
+            logger.warning(
+                "[webhook] ALLOW_UNSIGNED_WEBHOOKS=true — skipping signature check"
+            )
+            # Still read form so handlers can access via request.state uniformly
+            form_data = await request.form()
+            request.state.form_data = dict(form_data)
+            return
 
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     signature = request.headers.get("X-Twilio-Signature", "")
+
+    # Fail closed on a missing/blank auth token. RequestValidator("") computes
+    # HMACs with an EMPTY key, so anyone could forge valid signatures — a
+    # misconfigured deploy must reject webhooks, not silently accept forgeries
+    # (2026-06-12 audit M9).
+    if not auth_token:
+        logger.error("[webhook] TWILIO_AUTH_TOKEN is not set — rejecting webhook")
+        raise HTTPException(status_code=503, detail="Webhook validation unavailable")
 
     # Reconstruct URL the way Twilio signed it (D-15)
     proto = request.headers.get("x-forwarded-proto", "https")

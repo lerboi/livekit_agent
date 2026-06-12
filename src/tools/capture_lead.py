@@ -200,10 +200,15 @@ def create_capture_lead_tool(deps: dict):
                         "ask if anything else is needed"
                     )
                 else:
+                    # 2026-06-11 (findings.md P2): fallback path no longer
+                    # re-reads the normalized address — the caller already
+                    # heard their address read back before this tool ran
+                    # (mirrors book_appointment; Call B repetition failure).
                     state = (
-                        f"LEAD CAPTURED [verdict=validated]: relay normalized address "
-                        f"[{formatted_address_for_return}] once, briefly; "
-                        f"ask if anything else is needed"
+                        "LEAD CAPTURED [verdict=validated]: confirm in ONE short "
+                        "sentence that the team will follow up; do not re-read "
+                        "the address — the caller already heard it; "
+                        "ask if anything else is needed"
                     )
                 deps["_last_tool_state"] = state
                 return state

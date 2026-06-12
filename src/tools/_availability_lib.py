@@ -268,6 +268,23 @@ def calc_slots_for_dates(
     return all_slots
 
 
+def pick_spread(slots: list[dict], n: int = 3) -> list[dict]:
+    """Pick up to `n` slots spread across the list (first / middle / last for
+    n=3) so the agent can offer a representative range of the day — a morning,
+    a midday, and a late option — instead of three back-to-back times.
+    Input order is preserved (slot calculator returns chronological order);
+    duplicates collapse when the list is short."""
+    if not slots:
+        return []
+    ordered = sorted(slots, key=lambda s: s.get("start") or "")
+    if len(ordered) <= n:
+        return ordered
+    if n == 1:
+        return [ordered[0]]
+    idxs = sorted({round(i * (len(ordered) - 1) / (n - 1)) for i in range(n)})
+    return [ordered[i] for i in idxs]
+
+
 def next_n_local_dates(n: int, tenant_timezone: str) -> list[str]:
     """Return the next N calendar dates (including today) as YYYY-MM-DD strings
     in the tenant's local timezone."""

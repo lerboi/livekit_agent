@@ -201,8 +201,15 @@ def test_book_appointment_description_mentions_slot_token():
     from src.tools.book_appointment import _BOOK_APPOINTMENT_SCHEMA
 
     desc = _BOOK_APPOINTMENT_SCHEMA["description"]
-    assert "Pass slot_token from the most recent check_slot result verbatim" in desc, (
+    # 2026-06-11 naturalness pass (findings.md P1): check_day now also issues
+    # slot_tokens (OPTIONS), so the description names "an availability tool
+    # (check_slot or check_day)" instead of check_slot alone. The invariant
+    # (pass the token exactly as returned, never invent) is unchanged.
+    assert "slot_token of the slot the caller chose" in desc, (
         "book_appointment description must prominently mention slot_token"
+    )
+    assert "check_slot or check_day" in desc, (
+        "description must name both token-issuing availability tools"
     )
     assert "never invent or reconstruct" in desc, (
         "description must forbid inventing/reconstructing the token"

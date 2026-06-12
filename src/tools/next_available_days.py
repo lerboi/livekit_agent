@@ -1,7 +1,13 @@
 """
-next_available_days -- yes/no whether the business has any slots in the next
-3 days. For callers who won't name a date ("whenever works"). No args, no
-times, never. The agent then asks the caller to name a day.
+next_available_days -- which of the next 3 days have bookable slots.
+
+2026-06-11 naturalness pass (findings.md P1): formerly returned a bare yes/no
+("never specific times or dates") and told the agent to ask the caller to
+name a day — a blind guessing game. It now returns the actual day labels
+with availability so the agent can offer them ("Thursday and Friday both
+have openings — any preference?"). Times still come from check_day /
+check_slot; the anti-hallucination invariant (every spoken day/time comes
+from a tool return) is unchanged.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from ._availability_lib import (
     calc_slots_for_dates,
     ensure_tenant,
     fetch_scheduling_data,
+    format_date_label,
     log_tool_call,
     next_n_local_dates,
 )
@@ -25,11 +32,13 @@ logger = logging.getLogger(__name__)
 _SCHEMA = {
     "name": "next_available_days",
     "description": (
-        "Check whether the business has any availability in the next 3 days. "
-        "Use only when the caller is vague about when ('whenever works', "
-        "'anytime'). Returns yes/no — never specific times or dates. Speak a "
-        "short filler phrase first ('Let me see what's coming up'), then invoke "
-        "in the same turn. This tool's return is a state+directive string — do not read it aloud."
+        "Find which of the next 3 days have appointment availability. Use "
+        "only when the caller is vague about when ('whenever works', "
+        "'anytime'). Returns the open days — offer them and let the caller "
+        "pick; then call check_day for the chosen day. Never invent times "
+        "yourself. Speak a short filler phrase first ('Let me see what's "
+        "coming up'), then invoke in the same turn. This tool's return is a "
+        "state+directive string — do not read it aloud."
     ),
     "parameters": {
         "type": "object",
@@ -81,13 +90,24 @@ async def _impl(deps: dict) -> str:
         return state
 
     dates = next_n_local_dates(3, tenant_timezone)
-    all_slots = calc_slots_for_dates(tenant, dates, sched, tenant_timezone)
+    open_days = []
+    for d in dates:
+        day_slots = calc_slots_for_dates(tenant, [d], sched, tenant_timezone)
+        if day_slots:
+            open_days.append(f"{format_date_label(d, tenant_timezone)} ({len(day_slots)} open)")
 
-    if all_slots:
-        log_tool_call(deps, {"name": "next_available_days", "success": True, "result": "has_slots"})
+    if open_days:
+        log_tool_call(deps, {
+            "name": "next_available_days",
+            "success": True,
+            "result": "has_slots",
+            "open_days": len(open_days),
+        })
         state = (
-            "STATE:has_near_availability"
-            " | DIRECTIVE:tell the caller we have openings soon; ask them to name a specific day; do not mention times."
+            f"STATE:has_near_availability days={'; '.join(open_days)}"
+            " | DIRECTIVE:offer these days naturally — never recite slot counts;"
+            " once the caller picks a day, call check_day for it and offer its"
+            " times; do not invent times yourself."
         )
         deps["_last_tool_state"] = state
         return state

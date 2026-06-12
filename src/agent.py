@@ -99,6 +99,27 @@ LLM_MODEL = "gpt-4.1-mini"
 # cascaded pipeline (GeminiTTS's ~1.3s first-byte is what killed Phase 64).
 ELEVENLABS_TTS_MODEL = "eleven_flash_v2_5"
 
+# 2026-06-11 naturalness pass (findings.md P8.1): preemptive generation starts
+# the LLM + TTS on interim STT transcripts and discards the speculative turn if
+# the final transcript differs — shaves perceived response latency (production
+# calls showed callers repeating "Yes." into the gap). Verified present in the
+# installed livekit-agents 1.5.7 AgentSession signature. Env-gated for instant
+# rollback: set VOCO_PREEMPTIVE_GENERATION=false to disable.
+PREEMPTIVE_GENERATION = (
+    os.environ.get("VOCO_PREEMPTIVE_GENERATION", "true").strip().lower() != "false"
+)
+
+# 2026-06-11 naturalness pass (findings.md P8.2): Deepgram nova-3 keyterm
+# prompting (business name + active service names) to cut the address/name
+# mis-hearing class ("Canberra" -> "Kenberg", call eef9f785). DEFAULT OFF:
+# the plugin accepts keyterm with nova-3, but Deepgram's API behavior for
+# keyterm + language="multi" is unverified — an unsupported combo could fail
+# the STT websocket and break every call. Flip VOCO_STT_KEYTERMS=true on a
+# UAT deploy first; keep it off in prod until a live call confirms it.
+STT_KEYTERMS_ENABLED = (
+    os.environ.get("VOCO_STT_KEYTERMS", "false").strip().lower() == "true"
+)
+
 # Voice mapping: tone_preset/ai_voice LABEL -> ElevenLabs voice_id.
 # The DB stores a stable LABEL (professional / friendly / local_expert) in
 # tenants.ai_voice (main repo migration 068), NOT a raw voice_id — so swapping an
@@ -142,8 +163,9 @@ def _resolve_voice(ai_voice, tone_preset):
     return ELEVENLABS_VOICE_MAP["professional"]
 
 
-# Subscription statuses that block inbound calls
-BLOCKED_STATUSES = ["canceled", "paused", "incomplete"]
+# Subscription gate — shared module (2026-06-12 audit H1): canceled/paused/
+# incomplete always block; past_due blocks after the 3-day grace period.
+from .lib.subscription_gate import is_subscription_blocked  # noqa: E402
 
 # Timeout for SIP participant to join the room (seconds)
 PARTICIPANT_TIMEOUT_S = 30
@@ -380,17 +402,21 @@ async def entrypoint(ctx: JobContext):
         # mid-session. Extra ~100-200ms pre-start latency is acceptable —
         # correctness wins.
         intake_questions_text = ""
+        service_names: list[str] = []  # P8.2: STT keyterm source (with business name)
         if tenant_id:
             try:
                 _intake_res = await asyncio.to_thread(
                     lambda: supabase.table("services")
-                        .select("intake_questions")
+                        .select("name, intake_questions")
                         .eq("tenant_id", tenant_id)
                         .eq("is_active", True)
                         .execute()
                 )
                 all_q: list[str] = []
                 for s in (_intake_res.data or []):
+                    _svc_name = (s.get("name") or "").strip()
+                    if _svc_name and _svc_name not in service_names:
+                        service_names.append(_svc_name)
                     for q in (s.get("intake_questions") or []):
                         if q and q not in all_q:
                             all_q.append(q)
@@ -528,7 +554,17 @@ async def entrypoint(ctx: JobContext):
         # My Prompts/Migration.md §D1). MultilingualModel() supplies semantic
         # end-of-turn detection (more robust to brief SIP echo than raw Silero
         # endpointing) and needs the model files the Dockerfile pre-downloads.
-        stt = deepgram.STT(model="nova-3", language="multi")
+        # P8.2: optional keyterm prompting (env-gated, default off — see the
+        # STT_KEYTERMS_ENABLED constant for the language="multi" caveat).
+        _stt_kwargs = {}
+        if STT_KEYTERMS_ENABLED:
+            _keyterms = [t for t in ([business_name] + service_names) if t][:20]
+            if _keyterms:
+                _stt_kwargs["keyterm"] = _keyterms
+                logger.info(
+                    "[agent] STT keyterm prompting enabled count=%d", len(_keyterms)
+                )
+        stt = deepgram.STT(model="nova-3", language="multi", **_stt_kwargs)
         turn_detection = MultilingualModel()
 
         # LLM: non-reasoning gpt-4.1-mini for low TTFT + strong tool calling.
@@ -567,6 +603,10 @@ async def entrypoint(ctx: JobContext):
             # Callers must be able to barge in (emergencies). Echo defense for the
             # OPENING line is the input-mute below, not disabling interruptions.
             allow_interruptions=True,
+            # P8.1: speculative LLM+TTS on interim transcripts (discarded if the
+            # final transcript differs) — cuts perceived response latency.
+            # VOCO_PREEMPTIVE_GENERATION=false reverts to the old behavior.
+            preemptive_generation=PREEMPTIVE_GENERATION,
         )
         deps["session"] = session
 
@@ -798,7 +838,7 @@ async def entrypoint(ctx: JobContext):
             _db_t0 = time.perf_counter()
             sub_task = asyncio.to_thread(
                 lambda: supabase.table("subscriptions")
-                .select("status")
+                .select("status, current_period_end")
                 .eq("tenant_id", tenant_id)
                 .eq("is_current", True)
                 .limit(1)
@@ -898,11 +938,12 @@ async def entrypoint(ctx: JobContext):
                 len(deps["_slot_cache"]["calendar_blocks"]),
             )
 
-            # Subscription check — disconnect if blocked
+            # Subscription check — disconnect if blocked (incl. past_due
+            # beyond the 3-day grace; see lib/subscription_gate.py)
             if not isinstance(sub_res, Exception):
                 sub_data = sub_res.data
                 sub = sub_data[0] if sub_data else None
-                if sub and sub.get("status") in BLOCKED_STATUSES:
+                if sub and is_subscription_blocked(sub.get("status"), sub.get("current_period_end")):
                     logger.info(f"[agent] Subscription blocked: tenant={tenant_id} status={sub['status']} — disconnecting caller")
                     try:
                         lk = api.LiveKitAPI()
@@ -1146,6 +1187,20 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
+    # Boot preflight (2026-06-12 audit S4): the STT/LLM/TTS plugins are
+    # constructed PER CALL inside entrypoint(), so a missing key fails at call
+    # time — every inbound call connects and dies silently with no audio while
+    # the liveness healthcheck stays green. Fail the deploy visibly instead.
+    _missing_keys = [
+        k for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ELEVEN_API_KEY")
+        if not os.environ.get(k)
+    ]
+    if _missing_keys:
+        raise RuntimeError(
+            f"Missing required env vars: {', '.join(_missing_keys)} — refusing to "
+            "start: every call would connect and then hard-fail with no audio."
+        )
+
     start_webhook_server()
     cli.run_app(
         WorkerOptions(

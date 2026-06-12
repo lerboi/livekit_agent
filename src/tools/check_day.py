@@ -1,9 +1,13 @@
 """
-check_day -- yes/no whether a specific day has any bookable slots.
+check_day -- list bookable windows for a specific day.
 
-Never returns specific times (by design) — the caller must name a concrete
-hour, then check_slot verifies it. Splits out of the former check_availability
-`date-only` branch. Short return (~120 chars) keeps Gemini Live audio-gen lag low.
+2026-06-11 naturalness pass (findings.md P1): formerly returned yes/no only
+("never specific times" was a Gemini-era anti-fabrication guard). That forced
+callers into a blind guessing game — name a time, get rejected, guess again
+(Call A 31559053 hung up inside that loop). The tool now returns up to 3
+representative windows (each with a registered slot_token), and the prompt
+licenses offering ONLY tool-returned times — the anti-hallucination invariant
+("every spoken time comes from a tool return") is unchanged.
 """
 
 from __future__ import annotations
@@ -13,12 +17,15 @@ import time as _time
 
 from livekit.agents import function_tool, RunContext
 
+from ..utils import format_slot_for_speech
 from ._availability_lib import (
     calc_slots_for_dates,
     ensure_tenant,
     fetch_scheduling_data,
     format_date_label,
     log_tool_call,
+    pick_spread as _pick_spread,
+    register_slot_token,
     tenant_today,
 )
 
@@ -28,11 +35,13 @@ logger = logging.getLogger(__name__)
 _SCHEMA = {
     "name": "check_day",
     "description": (
-        "Check whether a specific day has any appointment slots available. "
-        "Use when the caller names a date but not a time yet. Returns yes/no "
-        "only — never specific times. Speak a short filler phrase first "
-        "('Let me see what that day looks like'), then invoke in the same turn. "
-        "This tool's return is a state+directive string — do not read it aloud."
+        "Check a specific day's availability. Use when the caller names a "
+        "date but not a time yet. Returns up to 3 open windows for the day, "
+        "each with a slot_token — offer two or three of them naturally; a "
+        "time the caller picks can be booked directly with its token. Speak "
+        "a short filler phrase first ('Let me see what that day looks like'), "
+        "then invoke in the same turn. This tool's return is a "
+        "state+directive string — do not read it aloud."
     ),
     "parameters": {
         "type": "object",
@@ -111,10 +120,28 @@ async def _impl(deps: dict, date: str) -> str:
     date_label = format_date_label(date, tenant_timezone)
 
     if all_slots:
-        log_tool_call(deps, {"name": "check_day", "success": True, "result": "has_slots", "date": date})
+        options = _pick_spread(all_slots, 3)
+        opt_parts = []
+        opt_tokens = []
+        for i, slot in enumerate(options, 1):
+            speech = format_slot_for_speech(slot["start"], tenant_timezone)
+            token = register_slot_token(deps, slot["start"], slot["end"])
+            opt_tokens.append(token)
+            opt_parts.append(f"{i}.{speech} token={token}")
+        log_tool_call(deps, {
+            "name": "check_day",
+            "success": True,
+            "result": "has_slots",
+            "date": date,
+            "slot_tokens": opt_tokens,
+        })
         state = (
             f"STATE:day_has_slots date_label={date_label} count={len(all_slots)}"
-            " | DIRECTIVE:confirm the day is open; ask for a concrete hour; do not mention times."
+            f" | OPTIONS: {'; '.join(opt_parts)}"
+            " | DIRECTIVE:offer two or three of these times naturally — never recite"
+            " a list; the caller may also name their own time (verify it with"
+            " check_slot). A time the caller picks from these options books directly"
+            " with its token."
         )
         deps["_last_tool_state"] = state
         return state

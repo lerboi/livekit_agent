@@ -335,9 +335,16 @@ async def _refresh_token_locked(cred: dict) -> Optional[dict]:
 
     Acquire the lock before the wire refresh. The winner refreshes + persists +
     releases; a loser polls the DB for the winner's freshly-persisted token and
-    reuses it. On poll timeout the loser refreshes itself (logged). Critical for
-    Jobber's single-use refresh-token rotation: two concurrent refreshers would
-    otherwise orphan one caller's rotated token.
+    reuses it. On poll timeout the loser GIVES UP (returns None) — exactly like
+    adapter.js, which throws here. Critical for Jobber's SINGLE-USE refresh
+    token rotation: the old refresh-anyway fallback re-fired the wire refresh
+    with a token the winner had usually already consumed (the poll window is 3s
+    but the winner's token POST can take up to its 10s read timeout), got a
+    400, persisted error_state='token_refresh_failed', and bricked the
+    connection behind a false Reconnect banner — the keep-fresh cron then
+    skipped the row, so a transient slow refresh became permanent until the
+    owner manually re-authed (2026-06-12 audit H7). The 30s lease TTL releases
+    a genuinely stuck slot on its own; the next caller refreshes cleanly.
     """
     tenant_id = cred.get("tenant_id")
     holder_id = None
@@ -354,9 +361,11 @@ async def _refresh_token_locked(cred: dict) -> Optional[dict]:
             if fresh:
                 return fresh
             logger.warning(
-                "jobber: refresh lock contested for tenant=%s; poll timed out, "
-                "refreshing anyway", tenant_id,
+                "jobber: refresh lock contested for tenant=%s; poll timed out — "
+                "giving up rather than double-rotating the single-use refresh "
+                "token", tenant_id,
             )
+            return None
 
     try:
         return await _do_wire_refresh(cred)

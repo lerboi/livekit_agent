@@ -193,8 +193,9 @@ _BOOK_APPOINTMENT_SCHEMA = {
         "check_slot has confirmed the slot is open and the address has been "
         "validated with validate_address (call validate_address the moment "
         "the caller gives their address; if it was never called, this tool "
-        "performs the same validation itself as a fallback). Pass "
-        "slot_token from the most recent check_slot result verbatim — "
+        "performs the same validation itself as a fallback). Pass the "
+        "slot_token of the slot the caller chose, exactly as an availability "
+        "tool (check_slot or check_day) returned it — "
         "never invent or reconstruct it. Pass the address pieces exactly "
         "as confirmed with the caller. The tool return will indicate "
         "whether the address was confirmed, corrected, or could not be "
@@ -211,8 +212,9 @@ _BOOK_APPOINTMENT_SCHEMA = {
             "slot_token": {
                 "type": "string",
                 "description": (
-                    "The opaque slot_token string from the most recent check_slot "
-                    "STATE line. Only exact strings previously returned by check_slot "
+                    "The opaque slot_token string of the slot the caller chose, "
+                    "from an availability tool's STATE/OPTIONS line. Only exact "
+                    "strings previously returned by check_slot or check_day "
                     "in this call are valid."
                 ),
             },
@@ -648,11 +650,19 @@ def create_book_appointment_tool(deps: dict):
                     f"ask if anything else is needed"
                 )
             else:
+                # 2026-06-11 (findings.md P2): the fallback-validated path no
+                # longer re-reads the address. When validation happened here
+                # (not mid-call), the prompt's BEFORE BOOKING readback already
+                # made the caller hear and acknowledge the address seconds ago
+                # — re-reading the normalized form was a repetition failure
+                # (Call B spoke one address ~5 times). confirmed_with_changes
+                # below still reads its corrected form: Google materially
+                # changed something the caller has not heard.
                 return_msg = (
                     f"BOOKED [verdict=validated]: confirm day and time "
-                    f"[{slot_speech}] and normalized address "
-                    f"[{formatted_address_for_return}] once, briefly; "
-                    f"ask if anything else is needed"
+                    f"[{slot_speech}] in ONE short sentence; do not re-read "
+                    f"the address — the caller already heard it in the "
+                    f"readback; ask if anything else is needed"
                 )
         elif validation_verdict == "confirmed_with_changes":
             if used_cached_validation:

@@ -8,6 +8,12 @@ guarantee is what moved Phase 63.1-08/09/10 bug-classes out of prose.
 
 Returns a short STATE+DIRECTIVE string (≤150 chars in the common path) so
 Gemini 3.1 Flash Live can begin audio generation with minimal ingestion lag.
+
+2026-06-11 naturalness pass (findings.md P1): the too_soon and day_empty
+branches now pair the rejection with the nearest bookable alternative
+(earliest-viable-today, else the first opening in the next 2 days), each
+carrying a registered slot_token — every "no" arrives with a tool-licensed
+"but I could do X" so callers are never sent back to blind guessing.
 """
 
 from __future__ import annotations
@@ -98,6 +104,42 @@ def create_check_slot_tool(deps: dict):
     return check_slot
 
 
+def _slot_start_dt(slot: dict) -> datetime:
+    """Parse a slot's start ISO (Z- or offset-suffixed) to an aware datetime."""
+    s_iso = slot["start"]
+    if s_iso.endswith("Z"):
+        s_iso = s_iso[:-1] + "+00:00"
+    return datetime.fromisoformat(s_iso)
+
+
+def _find_next_opening(
+    deps: dict,
+    tenant: dict,
+    sched: dict,
+    tenant_timezone: str,
+    after_date: str,
+    days_ahead: int = 2,
+) -> tuple[str, str] | None:
+    """First open slot in the `days_ahead` days after `after_date`.
+    Returns (speech, slot_token) — the token is registered and stashed as
+    _last_offered_token — or None if nothing is open. Powers the
+    rejection-paired-with-alternative returns (findings.md P1)."""
+    try:
+        base = datetime.strptime(after_date, "%Y-%m-%d")
+    except ValueError:
+        return None
+    for offset in range(1, days_ahead + 1):
+        next_date = (base + timedelta(days=offset)).strftime("%Y-%m-%d")
+        next_slots = calc_slots_for_dates(tenant, [next_date], sched, tenant_timezone)
+        if next_slots:
+            alt = sorted(next_slots, key=lambda s: s.get("start") or "")[0]
+            speech = format_slot_for_speech(alt["start"], tenant_timezone)
+            token = register_slot_token(deps, alt["start"], alt["end"])
+            deps["_last_offered_token"] = token
+            return speech, token
+    return None
+
+
 async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
     tenant_id = deps.get("tenant_id")
     if not tenant_id:
@@ -135,14 +177,7 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
         return state
 
     now_utc = datetime.now(timezone.utc)
-    if requested_utc < now_utc + timedelta(hours=1) and date == today_local:
-        speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
-        state = (
-            f"STATE:too_soon requested={speech} min_notice=1h"
-            " | DIRECTIVE:tell the caller that time is too soon (one hour minimum); ask for later today or another day."
-        )
-        deps["_last_tool_state"] = state
-        return state
+    too_soon = requested_utc < now_utc + timedelta(hours=1) and date == today_local
 
     sched = await fetch_scheduling_data(deps)
     if sched is None:
@@ -151,6 +186,79 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
         return state
 
     all_slots = calc_slots_for_dates(tenant, [date], sched, tenant_timezone)
+
+    # 2026-06-11 naturalness pass (findings.md P1): the too_soon branch used
+    # to return BEFORE the schedule fetch, with no alternative — the agent
+    # could only say "that's too soon, pick another time", a blind guessing
+    # game that lost Call A (31559053: 4 PM too soon → caller asked twice for
+    # guidance → hung up). It now pairs the rejection with the earliest
+    # bookable option (today, else the next opening tomorrow) so every "no"
+    # arrives with a tool-licensed "but I could do X".
+    if too_soon:
+        requested_speech = format_slot_for_speech(requested_utc.isoformat(), tenant_timezone)
+        viable_today = [
+            s for s in all_slots
+            if _slot_start_dt(s) >= now_utc + timedelta(hours=1)
+        ]
+        if viable_today:
+            alt = viable_today[0]
+            alt_speech = format_slot_for_speech(alt["start"], tenant_timezone)
+            token = register_slot_token(deps, alt["start"], alt["end"])
+            deps["_last_offered_token"] = token
+            log_tool_call(deps, {
+                "name": "check_slot",
+                "success": True,
+                "result": "too_soon_with_alternative",
+                "date": date,
+                "time": time_str,
+                "slot_token": token,
+            })
+            state = (
+                f"STATE:too_soon requested={requested_speech} min_notice=1h"
+                f" earliest_today={alt_speech} token={token}"
+                " | DIRECTIVE:say that time is too soon (one hour minimum) and in"
+                " the same breath offer the earliest-today time above or another"
+                " day; pass this token to book_appointment if the caller takes it."
+            )
+            deps["_last_tool_state"] = state
+            return state
+
+        next_open = _find_next_opening(deps, tenant, sched, tenant_timezone, date)
+        if next_open is not None:
+            alt_speech, token = next_open
+            log_tool_call(deps, {
+                "name": "check_slot",
+                "success": True,
+                "result": "too_soon_day_done_next_opening",
+                "date": date,
+                "time": time_str,
+                "slot_token": token,
+            })
+            state = (
+                f"STATE:too_soon requested={requested_speech} min_notice=1h"
+                f" nothing_left_today=true next_open={alt_speech} token={token}"
+                " | DIRECTIVE:say today can no longer be booked and in the same"
+                " breath offer the next opening above or another day; pass this"
+                " token to book_appointment if the caller takes it."
+            )
+            deps["_last_tool_state"] = state
+            return state
+
+        log_tool_call(deps, {
+            "name": "check_slot",
+            "success": True,
+            "result": "too_soon_no_alternative",
+            "date": date,
+            "time": time_str,
+        })
+        state = (
+            f"STATE:too_soon requested={requested_speech} min_notice=1h"
+            " nothing_left_today=true"
+            " | DIRECTIVE:say today can no longer be booked and ask which other"
+            " day works; do not fabricate times."
+        )
+        deps["_last_tool_state"] = state
+        return state
     requested_end = requested_utc + timedelta(minutes=slot_duration)
     del requested_end  # reserved for a future exact-end check; kept for readability
 
@@ -198,6 +306,28 @@ async def _impl(deps: dict, date: str, time_str: str, urgency: str) -> str:
 
     if not closest:
         biz = tenant.get("business_name") or "the team"
+        # P1: pair the "nothing that day" rejection with the next opening so
+        # the caller is never sent back to blind guessing.
+        next_open = _find_next_opening(deps, tenant, sched, tenant_timezone, date)
+        if next_open is not None:
+            alt_speech, token = next_open
+            log_tool_call(deps, {
+                "name": "check_slot",
+                "success": True,
+                "result": "day_empty_next_opening",
+                "date": date,
+                "time": time_str,
+                "slot_token": token,
+            })
+            state = (
+                f"STATE:day_empty requested={requested_speech} date_label={date_label}"
+                f" business_name={biz} next_open={alt_speech} token={token}"
+                " | DIRECTIVE:tell the caller nothing is open that day and in the"
+                " same breath offer the next opening above or another day; pass"
+                " this token to book_appointment if the caller takes it."
+            )
+            deps["_last_tool_state"] = state
+            return state
         log_tool_call(deps, {
             "name": "check_slot",
             "success": True,

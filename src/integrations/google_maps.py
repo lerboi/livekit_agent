@@ -610,6 +610,61 @@ def _safe_region(value) -> str:
         return ""
 
 
+def _apply_country_guard(result: dict, trusted_region: str) -> dict:
+    """Downgrade a confirmed/confirmed_with_changes result whose country
+    contradicts the trusted region. Returns the result unchanged when there
+    is no mismatch (or nothing to compare).
+
+    2026-06-11 (findings.md P2): incident call eef9f785 / inyP2SSmvfos —
+    tenant.country was misconfigured 'US' for a Singapore business, so the
+    booking-time validation ran region=US and Google "corrected"
+    '40 Canberra Drive' (Singapore) into '40 East Canberra Drive, Lindon,
+    Utah, USA' with verdict=confirmed_with_changes. The agent read the Utah
+    address out as settled and it was stored on the appointment.
+
+    Trusted region = the caller-ID-derived region when it is one Voco
+    operates in (caller-ID is network-attested evidence of where the caller
+    is; tenant.country is once-typed config and was the corrupted datum in
+    the incident), else the tenant's country. A result country that
+    contradicts it is downgraded to 'unconfirmed' with every Google-derived
+    field stripped — so the formatted address is never adopted, never spoken,
+    and (because 'unconfirmed' is in _RETRY_VERDICTS) the caller-region
+    second attempt fires, which self-heals the misconfigured-tenant case.
+
+    Cost asymmetry: a false-positive downgrade just means the booking
+    proceeds with the caller's spoken address and no Google enrichment; a
+    false negative is cross-country data corruption. Downgrade is the cheap
+    side. 'unconfirmed' is also already in the DB CHECK constraint for
+    address_validation_verdict — no schema change needed.
+    """
+    try:
+        if not isinstance(result, dict) or not trusted_region:
+            return result
+        if result.get("verdict") not in ("confirmed", "confirmed_with_changes"):
+            return result
+        components = result.get("address_components") or {}
+        country_code = _safe_region(components.get("country_code"))
+        if not country_code or country_code == trusted_region:
+            return result
+        logger.warning(
+            "[gmaps-guard] validated address country=%s contradicts trusted "
+            "region=%s — downgrading verdict=%s to unconfirmed and discarding "
+            "the formatted address",
+            country_code, trusted_region, result.get("verdict"),
+        )
+        guarded = dict(result)
+        guarded["verdict"] = "unconfirmed"
+        guarded["formatted_address"] = None
+        guarded["place_id"] = None
+        guarded["latitude"] = None
+        guarded["longitude"] = None
+        guarded["address_components"] = _empty_components()
+        return guarded
+    except Exception as exc:  # noqa: BLE001 — guard must never break the call path
+        logger.warning("[gmaps-guard] country guard failed open: %s", exc)
+        return result
+
+
 async def validate_address_with_region_fallback(
     tenant_id: Optional[str],
     call_id: Optional[str],
@@ -641,6 +696,14 @@ async def validate_address_with_region_fallback(
       3. The better verdict wins (confirmed > confirmed_with_changes >
          unconfirmed > unsupported_region > skipped > error); ties go to
          attempt 1, so "both unconfirmed" returns the primary result.
+      4. Country guard (2026-06-11, findings.md P2): each attempt's result
+         passes through _apply_country_guard — a confirmed* result whose
+         country contradicts the trusted region (caller region when
+         supported, else tenant country) is downgraded to 'unconfirmed'
+         with Google-derived fields stripped, BEFORE the retry decision /
+         ranking. A wrong-country attempt-1 "confirmed" therefore triggers
+         the caller-region retry instead of shipping a cross-country
+         address (the Utah-booking incident, call eef9f785).
 
     Latency: the second attempt adds up to `timeout_seconds` (1.5s default)
     — but only on the rare unconfirmed/unsupported path, where the call was
@@ -664,6 +727,11 @@ async def validate_address_with_region_fallback(
     if primary not in SUPPORTED_REGION_CODES and caller in SUPPORTED_REGION_CODES:
         first_region = caller
 
+    # Country-mismatch guard (2026-06-11, findings.md P2): the trusted region
+    # is the caller-ID-derived region when Voco operates there, else the
+    # tenant's country. See _apply_country_guard for the incident rationale.
+    trusted_region = caller if caller in SUPPORTED_REGION_CODES else primary
+
     # validate_address_bounded is contractually never-raising; the guard here
     # keeps THIS function never-raising even if that contract ever breaks.
     try:
@@ -683,6 +751,11 @@ async def validate_address_with_region_fallback(
         )
         result = _voco_result(verdict="error", latency_ms=0, raw_status=None)
     region_used = first_region
+
+    # Guard attempt 1 BEFORE the retry decision: a wrong-country "confirmed"
+    # becomes 'unconfirmed', which is in _RETRY_VERDICTS — so the caller-region
+    # second attempt fires and can recover the correct-country address.
+    result = _apply_country_guard(result, trusted_region)
 
     # Everything past attempt 1 is best-effort selection logic — a bug here
     # must degrade to "return attempt 1's result", never to an exception.
@@ -705,6 +778,9 @@ async def validate_address_with_region_fallback(
                 supabase=supabase,
                 timeout_seconds=timeout_seconds,
             )
+            # Same guard on attempt 2 — Google can return a cross-region match
+            # even when the request was biased to the caller's region.
+            second = _apply_country_guard(second, trusted_region)
             first_rank = _VERDICT_RANK.get(result.get("verdict"), 99)
             second_rank = _VERDICT_RANK.get(
                 (second or {}).get("verdict"), 99

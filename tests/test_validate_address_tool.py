@@ -52,7 +52,17 @@ def _make_deps(**overrides) -> dict:
     return deps
 
 
-def _bounded_result(verdict: str, formatted: str | None = None) -> dict:
+def _bounded_result(
+    verdict: str,
+    formatted: str | None = None,
+    country_code: str = "US",
+    country: str = "United States",
+    postal: str | None = "94043",
+) -> dict:
+    # country_code/country are parametrized since the 2026-06-11 country
+    # guard (findings.md P2): a confirmed* result whose country contradicts
+    # the trusted region (caller region when supported, else tenant region)
+    # is downgraded — fixtures must carry the country the scenario implies.
     return {
         "verdict": verdict,
         "formatted_address": formatted,
@@ -66,9 +76,9 @@ def _bounded_result(verdict: str, formatted: str | None = None) -> dict:
             "locality": "Mountain View",
             "admin_area_level_1": "CA",
             "admin_area_level_2": None,
-            "postal_code": "94043",
-            "country": "United States",
-            "country_code": "US",
+            "postal_code": postal,
+            "country": country,
+            "country_code": country_code,
         } if formatted else {
             "street_number": None,
             "route": None,
@@ -372,9 +382,12 @@ async def test_book_appointment_falls_back_to_live_validation_on_mismatch(patche
     result = await tool.__wrapped__(_book_args(), MagicMock())
 
     assert patched_book["validate"].await_count == 1
-    # Fallback (non-cached) directive still relays the normalized address.
+    # 2026-06-11 (findings.md P2): the fallback directive no longer re-reads
+    # the normalized address — the caller already heard the address in the
+    # mandatory pre-booking readback.
     assert result.startswith("BOOKED [verdict=validated]:")
-    assert FORMATTED in result
+    assert FORMATTED not in result
+    assert "do not re-read" in result
 
 
 @pytest.mark.asyncio
@@ -461,8 +474,11 @@ async def test_capture_lead_falls_back_to_live_validation_on_mismatch(patched_le
     )
 
     assert patched_lead["validate"].await_count == 1
+    # 2026-06-11 (findings.md P2): fallback directive no longer re-reads the
+    # normalized address (mirrors book_appointment).
     assert result.startswith("LEAD CAPTURED [verdict=validated]:")
-    assert FORMATTED in result
+    assert FORMATTED not in result
+    assert "do not re-read" in result
 
 
 # ── Caller-region derivation (src/lib/phone.py) ─────────────────────────────
@@ -537,10 +553,11 @@ def _regions_called(mock_bounded) -> list:
 @pytest.mark.asyncio
 async def test_fallback_primary_unconfirmed_caller_ca_wins(patched_bounded):
     """Primary (US) unconfirmed + caller CA → second attempt with CA runs
-    and its confirmed result wins."""
+    and its confirmed result wins. (Country guard: the second attempt's
+    result is in the caller's country, so it passes the guard.)"""
     patched_bounded.side_effect = [
         _bounded_result("unconfirmed", None),
-        _bounded_result("confirmed", FORMATTED),
+        _bounded_result("confirmed", FORMATTED, country_code="CA", country="Canada"),
     ]
 
     result, region_used = await _run_fallback(
@@ -555,7 +572,14 @@ async def test_fallback_primary_unconfirmed_caller_ca_wins(patched_bounded):
 
 @pytest.mark.asyncio
 async def test_fallback_no_second_attempt_when_primary_confirmed(patched_bounded):
-    patched_bounded.return_value = _bounded_result("confirmed", FORMATTED)
+    # Country guard note (2026-06-11): with caller CA present, CA is the
+    # trusted region — the confirmed result must be in CA for the guard to
+    # pass it (the primary US-region request found an address in the
+    # caller's country). A US-country result here would now be downgraded
+    # and retried — covered by test_country_guard_downgrades_and_retries.
+    patched_bounded.return_value = _bounded_result(
+        "confirmed", FORMATTED, country_code="CA", country="Canada"
+    )
 
     result, region_used = await _run_fallback(
         patched_bounded, region_code="US", caller_region="CA"
@@ -617,7 +641,10 @@ async def test_fallback_unsupported_region_verdict_triggers_second_attempt(
 ):
     patched_bounded.side_effect = [
         _bounded_result("unsupported_region", None),
-        _bounded_result("confirmed_with_changes", FORMATTED),
+        _bounded_result(
+            "confirmed_with_changes", FORMATTED,
+            country_code="SG", country="Singapore",
+        ),
     ]
 
     result, region_used = await _run_fallback(
@@ -633,7 +660,9 @@ async def test_fallback_unsupported_region_verdict_triggers_second_attempt(
 async def test_fallback_unsupported_primary_uses_caller_region_first(patched_bounded):
     """Tenant region GB (not in SUPPORTED_REGION_CODES) + caller SG → SG is
     used for attempt 1 (don't waste a known-'skipped' attempt on GB)."""
-    patched_bounded.return_value = _bounded_result("confirmed", FORMATTED)
+    patched_bounded.return_value = _bounded_result(
+        "confirmed", FORMATTED, country_code="SG", country="Singapore"
+    )
 
     result, region_used = await _run_fallback(
         patched_bounded, region_code="GB", caller_region="SG"
@@ -642,6 +671,7 @@ async def test_fallback_unsupported_primary_uses_caller_region_first(patched_bou
     assert _regions_called(patched_bounded) == ["SG"]
     assert patched_bounded.await_count == 1
     assert region_used == "SG"
+    assert result["verdict"] == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -730,6 +760,171 @@ async def test_fallback_passes_supabase_to_both_attempts(patched_bounded):
     assert patched_bounded.await_count == 2
     for c in patched_bounded.await_args_list:
         assert c.kwargs["supabase"] is sb
+
+
+# ── Country guard (2026-06-11, findings.md P2) ──────────────────────────────
+#
+# Incident: call eef9f785 (2026-06-09) — tenant.country misconfigured 'US'
+# for a Singapore business; booking-time validation region=US let Google
+# "correct" '40 Canberra Drive' (SG) into '40 East Canberra Drive, Lindon,
+# Utah, USA' (confirmed_with_changes), which was adopted, spoken, and stored.
+# The guard downgrades any confirmed* result whose country contradicts the
+# trusted region (caller-ID region when supported, else tenant region) to
+# 'unconfirmed' with Google fields stripped — and because 'unconfirmed' is a
+# retry verdict, the caller-region second attempt fires and can recover the
+# correct-country address.
+
+
+@pytest.mark.asyncio
+async def test_country_guard_downgrades_and_retries(patched_bounded):
+    """The Utah incident shape, self-healing: primary (US, misconfigured
+    tenant) returns a wrong-country confirmed_with_changes; the guard
+    downgrades it, the caller-region (SG) retry fires and its SG-country
+    confirmed result wins."""
+    patched_bounded.side_effect = [
+        _bounded_result("confirmed_with_changes", "40 East Canberra Drive, Lindon, UT 84042, USA"),
+        _bounded_result(
+            "confirmed", "40 Canberra Drive, Singapore 768433",
+            country_code="SG", country="Singapore", postal="768433",
+        ),
+    ]
+
+    result, region_used = await _run_fallback(
+        patched_bounded, region_code="US", caller_region="SG"
+    )
+
+    assert _regions_called(patched_bounded) == ["US", "SG"]
+    assert result["verdict"] == "confirmed"
+    assert result["formatted_address"] == "40 Canberra Drive, Singapore 768433"
+    assert region_used == "SG"
+
+
+@pytest.mark.asyncio
+async def test_country_guard_strips_google_fields_when_both_attempts_mismatch(patched_bounded):
+    """Both attempts return wrong-country confirmations → final result is
+    unconfirmed with every Google-derived field stripped, so a cross-country
+    formatted address can never be adopted, spoken, or stored."""
+    patched_bounded.side_effect = [
+        _bounded_result("confirmed", FORMATTED),
+        _bounded_result("confirmed", FORMATTED),
+    ]
+
+    result, region_used = await _run_fallback(
+        patched_bounded, region_code="US", caller_region="SG"
+    )
+
+    assert patched_bounded.await_count == 2
+    assert result["verdict"] == "unconfirmed"
+    assert result["formatted_address"] is None
+    assert result["place_id"] is None
+    assert result["latitude"] is None
+    assert result["longitude"] is None
+    assert result["address_components"]["country_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_country_guard_uses_tenant_region_when_no_caller_region(patched_bounded):
+    """No caller-ID region → the tenant region is the trusted region. An
+    SG tenant getting a US-country confirmation is downgraded (no retry
+    possible without a caller region)."""
+    patched_bounded.return_value = _bounded_result("confirmed", FORMATTED)
+
+    result, region_used = await _run_fallback(
+        patched_bounded, region_code="SG", caller_region=None
+    )
+
+    assert patched_bounded.await_count == 1
+    assert result["verdict"] == "unconfirmed"
+    assert result["formatted_address"] is None
+
+
+@pytest.mark.asyncio
+async def test_country_guard_passes_matching_country(patched_bounded):
+    """Country matches the trusted region → result flows through untouched."""
+    patched_bounded.return_value = _bounded_result(
+        "confirmed", "40 Canberra Drive, Singapore 768433",
+        country_code="SG", country="Singapore", postal="768433",
+    )
+
+    result, region_used = await _run_fallback(
+        patched_bounded, region_code="SG", caller_region="SG"
+    )
+
+    assert patched_bounded.await_count == 1
+    assert result["verdict"] == "confirmed"
+    assert result["formatted_address"] == "40 Canberra Drive, Singapore 768433"
+
+
+# ── Lookup-supplied postal confirmation (2026-06-11, findings.md P2) ────────
+#
+# Incident: call 31559053 (2026-06-11) — caller gave street + building, NO
+# postal; the confirmed result carried a Google-inferred postal the agent
+# asserted as fact, then defended against the caller's correction. When the
+# caller never spoke a postal, the tool now returns a dedicated STATE that
+# directs the agent to ask the postal as a question.
+
+
+@pytest.mark.asyncio
+async def test_confirmed_without_caller_postal_asks_postal_as_question(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+
+    assert result.startswith("STATE:address_ok_confirm_postal")
+    assert "postal=94043" in result
+    assert "QUESTION" in result
+    assert "theirs is correct" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmed_with_caller_postal_stays_plain_address_ok(patched_validate):
+    """Caller spoke the postal themselves → no extra confirmation question."""
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_ok ")
+    assert "address_ok_confirm_postal" not in result
+
+
+@pytest.mark.asyncio
+async def test_confirmed_without_postal_anywhere_stays_plain_address_ok(patched_validate):
+    """No caller postal AND no postal in the result → nothing to confirm."""
+    patched_validate.return_value = (
+        _bounded_result("confirmed", FORMATTED, postal=None),
+        "US",
+    )
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+
+    assert result.startswith("STATE:address_ok ")
+    assert "address_ok_confirm_postal" not in result
+
+
+# ── Cache postal tolerance (2026-06-11, findings.md P2) ─────────────────────
+
+
+def test_cache_match_when_cached_postal_empty_and_request_matches_result_postal():
+    """address_ok_confirm_postal flow: validation ran with no caller postal,
+    the caller then confirmed the looked-up postal, and booking passes it —
+    the cache must still match (no second Google call)."""
+    deps = {"_validated_address": _cache_entry(postal="")}
+    hit = get_cached_validation(deps, "1600 Amphitheatre Pkwy", "94043")
+    assert hit is not None
+    assert hit["verdict"] == "confirmed"
+
+
+def test_cache_miss_when_cached_postal_empty_and_request_differs_from_result_postal():
+    """Caller rejected the looked-up postal and gave a different one →
+    booking-time validation must run fresh."""
+    deps = {"_validated_address": _cache_entry(postal="")}
+    assert get_cached_validation(deps, "1600 Amphitheatre Pkwy", "10001") is None
 
 
 # ── Registry ────────────────────────────────────────────────────────────────

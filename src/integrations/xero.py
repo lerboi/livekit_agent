@@ -259,8 +259,15 @@ async def _refresh_locked(cred: dict) -> Optional[dict]:
     Concurrency guard (mirrors adapter.js refreshTokenIfNeeded): acquire the
     per-(tenant, provider) lease lock before the wire refresh. The winner
     refreshes + persists + releases; a loser polls the DB for the winner's
-    freshly-persisted token and reuses it. On poll timeout the loser falls back
-    to refreshing itself (logged) — availability beats perfect dedup.
+    freshly-persisted token and reuses it. On poll timeout the loser GIVES UP
+    (returns None) — exactly like adapter.js, which throws here. The old
+    refresh-anyway fallback re-fired the wire refresh with a single-use
+    refresh token the winner had usually already consumed (the poll window is
+    3s but the winner's token POST can legitimately take up to its 10s read
+    timeout), got a 400, persisted error_state='token_refresh_failed', and
+    bricked the connection behind a false Reconnect banner until the owner
+    manually re-authed (2026-06-12 audit H7). The 30s lease TTL releases a
+    genuinely stuck slot on its own; the next caller refreshes cleanly.
     """
     tenant_id = cred.get("tenant_id")
     holder_id = None
@@ -277,9 +284,11 @@ async def _refresh_locked(cred: dict) -> Optional[dict]:
             if fresh:
                 return fresh
             logger.warning(
-                "xero: refresh lock contested for tenant=%s; poll timed out, "
-                "refreshing anyway", tenant_id,
+                "xero: refresh lock contested for tenant=%s; poll timed out — "
+                "giving up rather than double-rotating the refresh token",
+                tenant_id,
             )
+            return None
 
     try:
         return await _do_wire_refresh(cred)

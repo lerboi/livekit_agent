@@ -153,6 +153,7 @@ async def run_post_call_pipeline(params: dict):
                 print(f"[post-call] usage: tenant={tenant_id} success={success} used={calls_used}/{calls_limit} exceeded={limit_exceeded}")
 
                 if success and limit_exceeded:
+                    customer_id = None
                     try:
                         sub_resp = await asyncio.to_thread(
                             lambda: supabase.table("subscriptions")
@@ -169,18 +170,50 @@ async def run_post_call_pipeline(params: dict):
                             client = stripe.StripeClient(os.environ.get("STRIPE_SECRET_KEY"))
                             # DEPLOY-CHECK: requires a Stripe Billing Meter named "voco_calls"
                             # with customer_mapping key "stripe_customer_id" and value key "value".
-                            await asyncio.to_thread(
-                                lambda: client.billing.meter_events.create(
-                                    params={
-                                        "event_name": "voco_calls",
-                                        "payload": {"value": "1", "stripe_customer_id": customer_id},
-                                        "identifier": f"overage_{call_id}",
-                                    }
-                                )
+                            # 3s cap (2026-06-12 audit H8): stripe-python's default read
+                            # timeout is ~80s — inside the pipeline's 8s envelope a slow
+                            # Stripe call would starve record_outcome + owner notifications.
+                            await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    lambda: client.billing.meter_events.create(
+                                        params={
+                                            "event_name": "voco_calls",
+                                            "payload": {"value": "1", "stripe_customer_id": customer_id},
+                                            "identifier": f"overage_{call_id}",
+                                        }
+                                    )
+                                ),
+                                timeout=3.0,
                             )
                             print(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
                     except Exception as overage_err:
-                        print(f"[post-call] Stripe overage report failed (non-fatal): {overage_err}")
+                        # Durable outbox (2026-06-12 audit H4): this used to be a
+                        # print-and-drop, and replay was structurally impossible
+                        # (increment_calls_used already consumed the call_id), so every
+                        # transient failure here was permanently unbilled overage.
+                        # The main repo's /api/cron/retry-meter-events re-posts with the
+                        # same identifier (Stripe dedupes meter events by identifier, so
+                        # a retry can never double-bill) and deletes the row on success.
+                        print(f"[post-call] Stripe overage report failed — writing outbox row: {overage_err}")
+                        if not customer_id:
+                            # Failed before the customer was even resolved (sub query
+                            # error) — there is no customer to retry against.
+                            print(f"[post-call] No stripe_customer_id resolved; cannot outbox overage for {call_id}")
+                        else:
+                            try:
+                                await asyncio.to_thread(
+                                    lambda: supabase.table("stripe_meter_failures").upsert(
+                                        {
+                                            "tenant_id": tenant_id,
+                                            "call_id": call_id,
+                                            "stripe_customer_id": customer_id,
+                                            "failure_reason": str(overage_err)[:500],
+                                        },
+                                        on_conflict="call_id",
+                                    ).execute()
+                                )
+                            except Exception as outbox_err:
+                                print(f"[post-call] Meter outbox write failed (overage for {call_id} is lost): {outbox_err}")
         except Exception as e:
             print(f"[post-call] Usage tracking error (non-fatal): {e}")
 

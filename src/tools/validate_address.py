@@ -39,9 +39,11 @@ _SCHEMA = {
         "it — do not wait for booking. Pass the pieces exactly as the caller "
         "said them. The return tells you whether the address came back "
         "confirmed, corrected, or unclear, and exactly what to say next. "
-        "Speak a one-sentence filler first ('Let me just check that "
-        "address…'), then invoke in the same turn. This tool's return is a "
-        "state+directive string — data for you, not to be read aloud."
+        "The caller's word always beats the validated form — if they correct "
+        "any part of it, call this tool again with their correction. Speak a "
+        "one-sentence filler first ('Let me just check that address…'), then "
+        "invoke in the same turn. This tool's return is a state+directive "
+        "string — data for you, not to be read aloud."
     ),
     "parameters": {
         "type": "object",
@@ -94,6 +96,14 @@ def get_cached_validation(deps: dict, street: str, postal_code: str) -> dict | N
     unit between the early validation and the booking commit; the unit does
     not change the Google verdict for the building).
 
+    Postal tolerance (2026-06-11, findings.md P2): when the cached validation
+    ran WITHOUT a caller-supplied postal code (the address_ok_confirm_postal
+    flow — the lookup supplied one and the caller then confirmed it), a
+    booking that passes that confirmed postal still matches: an empty cached
+    postal matches when the requested postal equals the postal the lookup
+    returned. Without this, confirming the suggested postal forced a second
+    Google call at booking time.
+
     A cached verdict of 'error' is never reused — that was a transient
     timeout/HTTP failure, and the booking-time fallback validation deserves a
     fresh attempt rather than inheriting the failure.
@@ -107,8 +117,18 @@ def get_cached_validation(deps: dict, street: str, postal_code: str) -> dict | N
     cached_input = cached.get("input") or {}
     if _norm(cached_input.get("street")) != _norm(street):
         return None
-    if _norm(cached_input.get("postal_code")) != _norm(postal_code):
-        return None
+    cached_postal = _norm(cached_input.get("postal_code"))
+    requested_postal = _norm(postal_code)
+    if cached_postal != requested_postal:
+        if cached_postal:
+            return None
+        # Cached validation had no caller postal — accept when the requested
+        # postal is exactly the one the lookup returned (caller confirmed it).
+        result_postal = _norm(
+            (result.get("address_components") or {}).get("postal_code")
+        )
+        if not result_postal or result_postal != requested_postal:
+            return None
     return result
 
 
@@ -185,8 +205,23 @@ def create_validate_address_tool(deps: dict):
 
         verdict = result.get("verdict", "error")
         formatted = result.get("formatted_address")
+        # 2026-06-11 (findings.md P2): a postal code in the result that the
+        # caller never spoke is a LOOKUP-SUPPLIED value (incident call
+        # 31559053: Google inferred postal 752106, the agent asserted it and
+        # then argued with the caller's correction). Surface it as its own
+        # STATE so the prompt's confirm-as-a-question rule applies.
+        looked_up_postal = (result.get("address_components") or {}).get("postal_code")
 
-        if verdict == "confirmed" and formatted:
+        if verdict == "confirmed" and formatted and not postal_code and looked_up_postal:
+            state = (
+                f"STATE:address_ok_confirm_postal speech={formatted}"
+                f" postal={looked_up_postal}"
+                " | DIRECTIVE:confirm the address in ONE short sentence and ask"
+                " whether the postal code is right as a QUESTION, digit by digit"
+                " — never state it as a fact. If the caller gives a different"
+                " one, theirs is correct: call validate_address again with it."
+            )
+        elif verdict == "confirmed" and formatted:
             state = (
                 f"STATE:address_ok speech={formatted}"
                 " | DIRECTIVE:confirm the address back in ONE short sentence"

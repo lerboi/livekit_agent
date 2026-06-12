@@ -16,7 +16,15 @@ SYSTEM_PROMPT = (
     "Routine: future scheduling, quote requests, non-urgent repairs."
 )
 
-TIMEOUT_S = 5.0
+# 2.5s, not 5.0 (2026-06-12 audit H8): the whole post-call pipeline runs under
+# an 8s wait_for (itself capped by the SDK's 10s shutdown budget). A 5s Layer-2
+# call plus normal DB latency starved §6.5 record_outcome and §7 owner
+# notifications — on slow calls the inquiry row was never created and EMERGENCY
+# alerts never sent (the 2026-04-21 incident class). Layer 1 already
+# short-circuits confident classifications, and a Layer-2 timeout falls back to
+# the Layer-1 verdict, so tightening this trades marginal triage precision on
+# slow calls for guaranteed delivery of the outcome + notification writes.
+TIMEOUT_S = 2.5
 
 
 def _get_client() -> AsyncOpenAI:

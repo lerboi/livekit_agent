@@ -102,8 +102,10 @@ def test_missing_signature_header_returns_403(signed_client):
 
 
 def test_allow_unsigned_env_var_bypasses_verification(monkeypatch):
-    """ALLOW_UNSIGNED_WEBHOOKS=true -> 200 with no signature at all."""
+    """ALLOW_UNSIGNED_WEBHOOKS=true -> 200 with no signature, but only outside
+    production (unset PYTHON_ENV defaults to production = fail closed)."""
     monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
+    monkeypatch.setenv("PYTHON_ENV", "development")
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "unused_in_bypass")
     from src.webhook.app import app
     app.dependency_overrides.clear()
@@ -115,3 +117,35 @@ def test_allow_unsigned_env_var_bypasses_verification(monkeypatch):
         )
     assert resp.status_code == 200
     assert "<Dial>" in resp.text
+
+
+def test_allow_unsigned_ignored_in_production(monkeypatch):
+    """ALLOW_UNSIGNED_WEBHOOKS must NOT bypass verification in production —
+    and unset PYTHON_ENV counts as production (fail closed)."""
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
+    monkeypatch.delenv("PYTHON_ENV", raising=False)
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "some_real_token")
+    from src.webhook.app import app
+    app.dependency_overrides.clear()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/twilio/incoming-call",
+            data={"To": "+15551234567", "From": "+15559876543"},
+            # No X-Twilio-Signature header -> must be rejected
+        )
+    assert resp.status_code == 403
+
+
+def test_missing_auth_token_fails_closed(monkeypatch):
+    """Empty TWILIO_AUTH_TOKEN -> 503, never validate with an empty HMAC key."""
+    monkeypatch.delenv("ALLOW_UNSIGNED_WEBHOOKS", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    from src.webhook.app import app
+    app.dependency_overrides.clear()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/twilio/incoming-call",
+            data={"To": "+15551234567", "From": "+15559876543"},
+            headers={"X-Twilio-Signature": "forged-with-empty-key"},
+        )
+    assert resp.status_code == 503

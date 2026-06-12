@@ -232,7 +232,12 @@ async def test_confirmed_return_shape(patched_handler):
     result = await tool.__wrapped__(_raw_args(), ctx)
 
     assert result.startswith("BOOKED [verdict=validated]:")
-    assert "1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA" in result
+    # 2026-06-11 naturalness pass (findings.md P2): the fallback-validated
+    # directive no longer re-reads the normalized address — the caller already
+    # heard the address in the mandatory pre-booking readback (Call B
+    # 40b13227 spoke one address ~5 times under the old directive).
+    assert "1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA" not in result
+    assert "do not re-read" in result
     assert "ask if anything else is needed" in result
 
 
