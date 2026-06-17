@@ -360,23 +360,21 @@ async def _get_contacts_by_phone(
     if len(target_ten) < 7:
         return None
 
-    # Diagnostic: sample the first few contacts so we can see what Xero stores.
-    sample = []
-    for c in contacts[:5]:
-        name = c.get("Name", "?")
-        phone_shapes = []
-        for p in (c.get("Phones") or []):
-            phone_shapes.append({
-                "type": p.get("PhoneType"),
-                "cc": p.get("PhoneCountryCode"),
-                "ac": p.get("PhoneAreaCode"),
-                "num": p.get("PhoneNumber"),
-            })
-        sample.append({"name": name, "phones": phone_shapes})
-    logger.info(
-        "xero: getContacts returned %d contacts; target_seven=%s; sample=%s",
-        len(contacts), target_seven, sample,
-    )
+    # Count only at INFO — never log customer names, phone fragments, or the
+    # caller's digits (2026-06-12 audit M22; the rest of the system hashes
+    # phones). A PII-free phone-shape breakdown is available at DEBUG only.
+    logger.info("xero: getContacts returned %d contacts", len(contacts))
+    if logger.isEnabledFor(logging.DEBUG):
+        shapes = []
+        for c in contacts[:5]:
+            for p in (c.get("Phones") or []):
+                shapes.append({
+                    "type": p.get("PhoneType"),
+                    "has_cc": bool(p.get("PhoneCountryCode")),
+                    "has_ac": bool(p.get("PhoneAreaCode")),
+                    "num_len": len(re.sub(r"\D", "", p.get("PhoneNumber") or "")),
+                })
+        logger.debug("xero: contact phone shapes (no PII): %s", shapes)
 
     for c in contacts:
         for p in (c.get("Phones") or []):
@@ -594,8 +592,9 @@ async def fetch_xero_context_bounded(
             )
         else:
             logger.info(
-                "xero_context: fetched (contact=%s outstanding=%s invoices=%d)",
-                (result.get("contact") or {}).get("name"),
+                "xero_context: fetched (tenant=%s phone_hash=%s outstanding=%s invoices=%d)",
+                tenant_id,
+                hashlib.sha256((phone_e164 or "").encode()).hexdigest()[:8],
                 result.get("outstanding_balance"),
                 len(result.get("last_invoices") or []),
             )

@@ -419,9 +419,24 @@ async def _post_graphql(
         return None
 
 
+def _region_from_e164(e164: str) -> str:
+    """Derive the dialing region from the caller's E.164 so Jobber's stored
+    LOCAL-format numbers parse in the caller's country instead of a hardcoded
+    US (2026-06-12 audit M21 — SG/UK tenants previously never matched)."""
+    try:
+        import phonenumbers
+
+        return phonenumbers.region_code_for_number(
+            phonenumbers.parse(e164, None)
+        ) or DEFAULT_PHONE_REGION
+    except Exception:  # noqa: BLE001
+        return DEFAULT_PHONE_REGION
+
+
 def _match_phone(phones: list, target_e164: str) -> bool:
+    region = _region_from_e164(target_e164)
     for p in phones or []:
-        normalized = _normalize_free_form(p.get("number", ""))
+        normalized = _normalize_free_form(p.get("number", ""), region)
         if normalized and normalized == target_e164:
             return True
     return False

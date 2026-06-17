@@ -374,14 +374,35 @@ async def entrypoint(ctx: JobContext):
                     )
                     return None
 
+            async def _timed(coro):
+                _t = time.perf_counter()
+                _r = await coro
+                return _r, int((time.perf_counter() - _t) * 1000)
+
             _ctx_t0 = time.perf_counter()
-            customer_context, caller_history = await asyncio.gather(
-                fetch_merged_customer_context_bounded(
+            (customer_context, _ctx_ms), (caller_history, _hist_ms) = await asyncio.gather(
+                _timed(fetch_merged_customer_context_bounded(
                     tenant_id, from_number, timeout_seconds=2.5
-                ),
-                _fetch_caller_history_bounded(),
+                )),
+                _timed(_fetch_caller_history_bounded()),
             )
             _ctx_elapsed = time.perf_counter() - _ctx_t0
+            # Pre-session fanout telemetry (2026-06-12 audit M11): the gather
+            # boundary row was defined but never emitted. Fire-and-forget (held by
+            # this entrypoint-scoped local ref so it isn't GC'd) — the call path
+            # never waits on the insert.
+            try:
+                from .lib.telemetry import emit_integration_fetch_fanout
+
+                _fanout_task = asyncio.create_task(emit_integration_fetch_fanout(
+                    supabase,
+                    tenant_id,
+                    duration_ms=int(_ctx_elapsed * 1000),
+                    per_task_ms={"merged_context": _ctx_ms, "caller_history": _hist_ms},
+                    call_id=None,
+                ))
+            except Exception as _fanout_exc:  # noqa: BLE001
+                logger.debug("[agent] fanout telemetry skipped: %s", _fanout_exc)
             _sources = (customer_context or {}).get("_sources") or {}
             _unique_providers = sorted(set(_sources.values()))
             _history_state = (
