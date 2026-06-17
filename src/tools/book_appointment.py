@@ -7,7 +7,7 @@ All side effects (calendar sync, SMS, recovery SMS) run in-process.
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from livekit.agents import function_tool, RunContext
@@ -536,6 +536,9 @@ def create_book_appointment_tool(deps: dict):
 
             # Slot was taken -- recalculate next available
             now_iso = datetime.now(timezone.utc).isoformat()
+            # Widen the all-day floor 24h so today's UTC-midnight-encoded all-day
+            # rows survive the prefilter in west-of-UTC evenings (2026-06-12 audit M12).
+            all_day_floor_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
             current_bookings, current_events, current_zones, current_buffers = await asyncio.gather(
                 asyncio.to_thread(
@@ -550,7 +553,7 @@ def create_book_appointment_tool(deps: dict):
                     lambda: supabase.table("calendar_events")
                     .select("start_time, end_time, is_all_day")
                     .eq("tenant_id", tenant_id)
-                    .gte("end_time", now_iso)
+                    .gte("end_time", all_day_floor_iso)
                     .execute()
                 ),
                 asyncio.to_thread(

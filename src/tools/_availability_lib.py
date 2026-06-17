@@ -186,6 +186,12 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
         }
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    # All-day rows are UTC-midnight date encodings, so an all-day row for the
+    # tenant's CURRENT local day (end = next UTC midnight) is filtered out by
+    # `end_time >= now` during the tenant's evening in west-of-UTC zones, dropping
+    # a fully-blocked day from the busy set (2026-06-12 audit M12). Widen the floor
+    # 24h; expansion/overlap downstream still rejects genuinely-past intervals.
+    all_day_floor_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     try:
         appts_r, events_r, zones_r, buffers_r, blocks_r = await asyncio.gather(
             asyncio.to_thread(
@@ -201,7 +207,7 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
                 lambda: supabase.table("calendar_events")
                 .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
-                .gte("end_time", now_iso)
+                .gte("end_time", all_day_floor_iso)
                 .execute()
             ),
             asyncio.to_thread(
@@ -220,7 +226,7 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
                 lambda: supabase.table("calendar_blocks")
                 .select("start_time, end_time, is_all_day")
                 .eq("tenant_id", tenant_id)
-                .gte("end_time", now_iso)
+                .gte("end_time", all_day_floor_iso)
                 .execute()
             ),
         )
