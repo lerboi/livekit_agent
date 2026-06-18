@@ -445,7 +445,8 @@ def test_dial_status_updates_calls_row(client_no_auth, monkeypatch):
 
 
 def test_dial_status_no_answer(client_no_auth, monkeypatch):
-    """POST /twilio/dial-status with no-answer -> routing_mode=fallback_to_ai, no duration."""
+    """POST /twilio/dial-status with no-answer -> routing_mode=fallback_to_ai and
+    the caller is handed to the AI (AI SIP TwiML), NOT hung up with empty TwiML."""
     mock_sb = _make_update_mock()
     monkeypatch.setattr(
         "src.supabase_client.get_supabase_admin",
@@ -459,7 +460,11 @@ def test_dial_status_no_answer(client_no_auth, monkeypatch):
         },
     )
     assert resp.status_code == 200
-    assert "<Response/>" in resp.text
+    # Owner didn't answer -> fall back to the AI instead of dropping the caller.
+    body = resp.text
+    assert "<Dial>" in body
+    assert "<Sip>" in body
+    assert "<Response/>" not in body
 
     update_data = mock_sb.table.return_value.update.call_args[0][0]
     assert update_data["routing_mode"] == "fallback_to_ai"
@@ -481,6 +486,9 @@ def test_dial_status_busy(client_no_auth, monkeypatch):
         },
     )
     assert resp.status_code == 200
+    # busy -> fall back to the AI, not a hang-up.
+    assert "<Sip>" in resp.text
+    assert "<Response/>" not in resp.text
 
     update_data = mock_sb.table.return_value.update.call_args[0][0]
     assert update_data["routing_mode"] == "fallback_to_ai"

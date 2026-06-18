@@ -288,7 +288,21 @@ async def incoming_call(request: Request) -> Response:
 
 @router.post("/dial-status")
 async def dial_status(request: Request) -> Response:
-    """Twilio dial-status callback — write duration and detect fallback."""
+    """Twilio <Dial action> callback fired when the owner-pickup parallel-ring ends.
+
+    Records the routing outcome (owner_pickup vs fallback_to_ai) and the
+    owner-pickup dial duration, then returns the TwiML that controls the
+    still-connected caller leg. Per Twilio <Dial action> semantics the action
+    URL is requested after EVERY Dial completion and its TwiML takes full
+    control of the original inbound call (any verbs after the <Dial> are
+    unreachable). So:
+      - owner answered (DialCallStatus completed/answered): the bridged
+        conversation already happened -> empty TwiML ends the call cleanly.
+      - owner did NOT answer (no-answer/busy/failed): return the AI SIP TwiML so
+        the caller reaches the AI receptionist. Returning empty TwiML here
+        previously hung the caller up despite routing_mode being recorded as
+        'fallback_to_ai' -- a lost-job bug (the AI fallback never executed).
+    """
     form_data = request.state.form_data
     call_sid = form_data.get("CallSid", "")
     dial_status_val = form_data.get("DialCallStatus", "")
@@ -318,6 +332,14 @@ async def dial_status(request: Request) -> Response:
     except Exception as e:
         logger.warning("[webhook] dial_status update failed: %s", e)
 
+    # Owner didn't pick up -> hand the still-connected caller to the AI instead
+    # of dropping them. This is the fallback the 'fallback_to_ai' routing_mode
+    # has always claimed; returning empty TwiML here was the lost-job bug. Any
+    # other status (owner answered, or the call is already over) ends the call
+    # cleanly. final_mode is computed above before the DB write, so this still
+    # routes correctly even if the calls-row update failed.
+    if final_mode == "fallback_to_ai":
+        return _xml_response(_ai_sip_twiml())
     return _xml_response(_empty_twiml())
 
 
