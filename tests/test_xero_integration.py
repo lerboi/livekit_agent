@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.integrations import xero as xero_mod
+from src.lib.fetch_sentinel import FETCH_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -127,7 +128,7 @@ async def test_refresh_persists_new_tokens_on_expired():
 
 
 @pytest.mark.asyncio
-async def test_refresh_failure_persists_error_state_and_returns_none():
+async def test_refresh_failure_persists_error_state_and_returns_unavailable():
     expired_cred = {
         "id": "cred-1",
         "tenant_id": "tenant-1",
@@ -149,5 +150,7 @@ async def test_refresh_failure_persists_error_state_and_returns_none():
          patch("httpx.AsyncClient.post", AsyncMock(return_value=bad_resp)):
         result = await xero_mod.fetch_xero_customer_by_phone("tenant-1", "+15551234567")
 
-    assert result is None
+    # LOW-14: refresh failure on a CONNECTED provider is "unavailable", not a
+    # clean no-match.
+    assert result is FETCH_UNAVAILABLE
     persist_failure_mock.assert_awaited_once_with("cred-1")

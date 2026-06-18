@@ -13,6 +13,6 @@ RUN pip install --no-cache-dir --retries 5 --timeout 120 .
 # Pre-download ML models (turn detector, VAD)
 RUN python -m src.agent download-files || true
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -f http://localhost:8080/health/db || exit 1
 
 CMD ["python", "-m", "src.agent", "start"]

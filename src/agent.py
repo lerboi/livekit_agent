@@ -43,7 +43,7 @@ from .supabase_client import get_supabase_admin
 from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
 from .integrations.xero import fetch_xero_context_bounded
-from .lib.customer_context import fetch_merged_customer_context_bounded
+from .lib.customer_context import fetch_merged_customer_context_bounded, FETCH_UNAVAILABLE
 from .lib.phone import _normalize_phone, derive_caller_region
 
 logger = logging.getLogger("voco-agent")
@@ -349,6 +349,7 @@ async def entrypoint(ctx: JobContext):
         # 2.5s budget — completion happens during greeting playout (~5-7s)
         # so caller-perceived latency is zero.
         customer_context = None
+        _ctx_unavailable = False
         caller_history = None
         if tenant_id:
             from .tools.check_caller_history import fetch_caller_history
@@ -387,6 +388,13 @@ async def entrypoint(ctx: JobContext):
                 _timed(_fetch_caller_history_bounded()),
             )
             _ctx_elapsed = time.perf_counter() - _ctx_t0
+            # LOW-14: distinguish a FAILED context fetch from a genuine no-match.
+            # The sentinel must not flow into the prompt builder, _sources, or
+            # deps["customer_context"] (all expect dict|None) — coerce it to None
+            # and carry the failure as a separate boolean for the tool.
+            _ctx_unavailable = customer_context is FETCH_UNAVAILABLE
+            if _ctx_unavailable:
+                customer_context = None
             # Pre-session fanout telemetry (2026-06-12 audit M11): the gather
             # boundary row was defined but never emitted. Fire-and-forget (held by
             # this entrypoint-scoped local ref so it isn't GC'd) — the call path
@@ -532,9 +540,14 @@ async def entrypoint(ctx: JobContext):
             "_diag_record": diag_record,
             # P56: merged Jobber+Xero caller-context (pre-fetched above,
             # concurrent per-provider 2.5s budget). None means BOTH providers
-            # missed / timed out — check_customer_account tool returns the
-            # locked no_customer_match_for_phone string in that case.
+            # genuinely missed / aren't connected — check_customer_account
+            # returns the locked no_customer_match_for_phone string then.
             "customer_context": customer_context,
+            # LOW-14: True when a CONNECTED provider's fetch FAILED (timeout /
+            # HTTP / auth), as opposed to a clean no-match. The tool serves
+            # "records temporarily unavailable" so a known caller is never
+            # wrongly told they're a new/walk-in customer.
+            "customer_context_unavailable": _ctx_unavailable,
             # Phase 62: pre-fetched caller history from Voco's own
             # customers/jobs/inquiries/appointments tables. Same 2.5s budget,
             # parallel with customer_context. None means fetch failed/empty.

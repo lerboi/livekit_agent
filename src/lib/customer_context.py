@@ -32,6 +32,7 @@ import sentry_sdk
 
 from src.integrations.jobber import fetch_jobber_customer_by_phone
 from src.integrations.xero import fetch_xero_customer_by_phone
+from src.lib.fetch_sentinel import FETCH_UNAVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +130,13 @@ async def _fetch_with_bounds(
     phone_e164: str,
     timeout_seconds: float,
 ) -> Optional[dict]:
-    """Race a provider fetch against the timeout; silent-skip on failure.
+    """Race a provider fetch against the timeout.
 
-    Returns the provider result OR None if timed out / raised. Emits Sentry
-    with {tenant_id, provider, phone_hash} tags (no raw PII). Sentry
-    failures are swallowed to prevent telemetry outage from breaking calls.
+    Returns the provider result (dict on a hit, None on a genuine no-match /
+    not-connected), or the FETCH_UNAVAILABLE sentinel when the fetch timed out
+    or raised (2026-06-12 audit LOW-14). Emits Sentry with {tenant_id,
+    provider, phone_hash} tags (no raw PII). Sentry failures are swallowed to
+    prevent a telemetry outage from breaking calls.
     """
     phash = _phone_hash(phone_e164)
     try:
@@ -156,7 +159,7 @@ async def _fetch_with_bounds(
             "%s_context: timeout (tenant=%s phone_hash=%s)",
             provider_name, tenant_id, phash,
         )
-        return None
+        return FETCH_UNAVAILABLE
     except Exception as exc:  # noqa: BLE001
         try:
             sentry_sdk.capture_exception(
@@ -175,7 +178,7 @@ async def _fetch_with_bounds(
             "%s_context: exception (tenant=%s phone_hash=%s): %s",
             provider_name, tenant_id, phash, type(exc).__name__,
         )
-        return None
+        return FETCH_UNAVAILABLE
 
 
 async def fetch_merged_customer_context_bounded(
@@ -188,7 +191,13 @@ async def fetch_merged_customer_context_bounded(
     Both providers race in parallel — adding Jobber does NOT extend the
     total budget beyond what Xero alone took in P55 (CONTEXT D-06). Any
     provider that times out or raises is silent-skipped; the other half
-    still populates the merged dict. When BOTH miss, returns None.
+    still populates the merged dict.
+
+    Returns: the merged dict when either provider returned data; None when
+    both genuinely missed (or aren't connected); the FETCH_UNAVAILABLE
+    sentinel when there was NO data AND at least one connected provider's
+    fetch failed (2026-06-12 audit LOW-14 — lets the tool say "records
+    temporarily unavailable" instead of falsely "new caller").
 
     Never raises — a crash here would break the entire call path.
     """
@@ -228,6 +237,24 @@ async def fetch_merged_customer_context_bounded(
             )
         except Exception:
             pass
-        return None
+        return FETCH_UNAVAILABLE
 
-    return merge_customer_context(jobber=jobber_result, xero=xero_result)
+    # LOW-14: a provider that FAILED (timeout / HTTP / auth / exception) yields
+    # the FETCH_UNAVAILABLE sentinel; a genuine no-match (or not-connected)
+    # yields None. The merge expects dict|None, so coerce sentinels out first.
+    jobber_errored = jobber_result is FETCH_UNAVAILABLE
+    xero_errored = xero_result is FETCH_UNAVAILABLE
+    jobber = jobber_result if isinstance(jobber_result, dict) else None
+    xero = xero_result if isinstance(xero_result, dict) else None
+
+    merged = merge_customer_context(jobber=jobber, xero=xero)
+    if merged is not None:
+        # At least one provider returned usable data — serve it even if the
+        # other half errored.
+        return merged
+    # No data from either provider. If a connected provider errored, the caller
+    # may well be on file, so surface "temporarily unavailable" rather than
+    # falsely treating them as a brand-new caller.
+    if jobber_errored or xero_errored:
+        return FETCH_UNAVAILABLE
+    return None

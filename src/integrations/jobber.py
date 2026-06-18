@@ -36,6 +36,7 @@ import httpx
 # admin client at call time AND tests can patch `jobber_mod.get_supabase_admin`.
 from ..supabase_client import get_supabase_admin
 from ..lib.telemetry import emit_integration_fetch
+from ..lib.fetch_sentinel import FETCH_UNAVAILABLE
 from ._refresh_lock import (
     acquire_refresh_lock,
     poll_for_fresh_credential,
@@ -519,8 +520,11 @@ async def fetch_jobber_customer_by_phone(
 
     Returns:
         dict with keys {client, recentJobs, outstandingInvoices,
-        outstandingBalance, lastVisitDate} or None on no-match /
-        disconnected / timeout / any error. Never raises.
+        outstandingBalance, lastVisitDate} on a hit; None on a genuine
+        no-match or when Jobber is not connected for the tenant; or the
+        FETCH_UNAVAILABLE sentinel when the fetch FAILED (refresh/HTTP/
+        GraphQL error). This lets callers tell "new caller" from "records
+        temporarily unavailable" (2026-06-12 audit LOW-14). Never raises.
     """
     try:
         if not isinstance(tenant_id, str) or not tenant_id:
@@ -553,7 +557,7 @@ async def fetch_jobber_customer_by_phone(
             if expiry_epoch and expiry_epoch <= datetime.now(timezone.utc).timestamp():
                 refreshed = await _refresh_token(cred)
                 if not refreshed:
-                    return None
+                    return FETCH_UNAVAILABLE  # connected but refresh failed
                 cred = refreshed
 
             resp = await _post_graphql(client, cred["access_token"], phone_e164)
@@ -562,20 +566,20 @@ async def fetch_jobber_customer_by_phone(
             if resp is not None and getattr(resp, "status_code", 500) == 401:
                 refreshed = await _refresh_token(cred)
                 if not refreshed:
-                    return None
+                    return FETCH_UNAVAILABLE  # connected but refresh failed
                 cred = refreshed
                 resp = await _post_graphql(client, cred["access_token"], phone_e164)
 
             if resp is None or getattr(resp, "status_code", 500) != 200:
-                return None
+                return FETCH_UNAVAILABLE  # transport / HTTP error
 
             try:
                 body = resp.json()
             except Exception:  # noqa: BLE001
-                return None
+                return FETCH_UNAVAILABLE  # malformed response
 
             if body.get("errors"):
-                return None
+                return FETCH_UNAVAILABLE  # GraphQL error
 
             nodes = ((body.get("data") or {}).get("clients") or {}).get("nodes") or []
             matched = next(

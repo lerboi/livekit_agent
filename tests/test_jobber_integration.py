@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.integrations import jobber as jobber_mod
+from src.lib.fetch_sentinel import FETCH_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -170,7 +171,9 @@ async def test_refresh_rotation_persists_new_refresh_token():
 
 
 @pytest.mark.asyncio
-async def test_never_raises_on_network_error():
+async def test_network_error_returns_unavailable_sentinel():
+    """Never RAISES on a network error; LOW-14 — a connected provider whose
+    fetch fails now returns FETCH_UNAVAILABLE (vs None for a clean no-match)."""
     cred = {
         "id": "cred-1",
         "tenant_id": "tenant-1",
@@ -182,4 +185,4 @@ async def test_never_raises_on_network_error():
     with patch.object(jobber_mod, "_load_credentials", AsyncMock(return_value=cred)), \
          patch("httpx.AsyncClient.post", AsyncMock(side_effect=Exception("connection reset"))):
         result = await jobber_mod.fetch_jobber_customer_by_phone("tenant-1", "+15551234567")
-    assert result is None
+    assert result is FETCH_UNAVAILABLE

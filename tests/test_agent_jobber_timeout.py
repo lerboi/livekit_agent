@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from src.lib import customer_context as cc_mod
+from src.lib.fetch_sentinel import FETCH_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -94,6 +95,43 @@ async def test_T3_both_providers_miss_yields_none_context():
             "t1", "+15551234567", timeout_seconds=0.8
         )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_LOW14_errored_provider_plus_miss_yields_unavailable():
+    """Jobber errors (no data) and Xero cleanly misses → FETCH_UNAVAILABLE.
+
+    The caller may be on file in the provider that failed, so we must signal
+    "temporarily unavailable" rather than None (which the tool reads as a
+    brand-new caller)."""
+    async def raising_jobber(*a, **kw):
+        raise RuntimeError("api down")
+
+    async def clean_miss_xero(*a, **kw):
+        return None
+
+    with patch.object(cc_mod, "fetch_jobber_customer_by_phone", side_effect=raising_jobber), \
+         patch.object(cc_mod, "fetch_xero_customer_by_phone", side_effect=clean_miss_xero), \
+         patch("sentry_sdk.capture_exception"):
+        result = await cc_mod.fetch_merged_customer_context_bounded(
+            "t1", "+15551234567", timeout_seconds=0.8
+        )
+    assert result is FETCH_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_LOW14_both_providers_error_yields_unavailable():
+    """Both providers error (timeout/exception) with no data → FETCH_UNAVAILABLE."""
+    async def raising(*a, **kw):
+        raise RuntimeError("down")
+
+    with patch.object(cc_mod, "fetch_jobber_customer_by_phone", side_effect=raising), \
+         patch.object(cc_mod, "fetch_xero_customer_by_phone", side_effect=raising), \
+         patch("sentry_sdk.capture_exception"):
+        result = await cc_mod.fetch_merged_customer_context_bounded(
+            "t1", "+15551234567", timeout_seconds=0.8
+        )
+    assert result is FETCH_UNAVAILABLE
 
 
 @pytest.mark.asyncio

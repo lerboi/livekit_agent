@@ -73,7 +73,7 @@ async def run_post_call_pipeline(params: dict):
         )
         updated_call = call_fetch.data
     except Exception as e:
-        print(f"[post-call] Call record update error: {e}")
+        logger.error(f"[post-call] Call record update error: {e}", exc_info=True)
         updated_call = None
 
     call_uuid = (updated_call.get("id") if updated_call else None) or call_uuid
@@ -106,7 +106,7 @@ async def run_post_call_pipeline(params: dict):
                     .execute()
                 )
         except Exception as e:
-            print(f"[post-call] Booking reconciliation error: {e}")
+            logger.error(f"[post-call] Booking reconciliation error: {e}", exc_info=True)
 
     # ── 3. Test call auto-cancel ──
     if is_test_call and tenant_id:
@@ -131,7 +131,7 @@ async def run_post_call_pipeline(params: dict):
                     lambda: supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
                 )
         except Exception as e:
-            print(f"[post-call] Test call auto-cancel error: {e}")
+            logger.error(f"[post-call] Test call auto-cancel error: {e}", exc_info=True)
 
     # ── 4. Usage tracking ──
     if not is_test_call and tenant_id and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
@@ -150,7 +150,7 @@ async def run_post_call_pipeline(params: dict):
                 calls_used = row.get("calls_used")
                 calls_limit = row.get("calls_limit")
                 limit_exceeded = row.get("limit_exceeded")
-                print(f"[post-call] usage: tenant={tenant_id} success={success} used={calls_used}/{calls_limit} exceeded={limit_exceeded}")
+                logger.info(f"[post-call] usage: tenant={tenant_id} success={success} used={calls_used}/{calls_limit} exceeded={limit_exceeded}")
 
                 if success and limit_exceeded:
                     customer_id = None
@@ -185,7 +185,7 @@ async def run_post_call_pipeline(params: dict):
                                 ),
                                 timeout=3.0,
                             )
-                            print(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
+                            logger.info(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
                     except Exception as overage_err:
                         # Durable outbox (2026-06-12 audit H4): this used to be a
                         # print-and-drop, and replay was structurally impossible
@@ -194,11 +194,11 @@ async def run_post_call_pipeline(params: dict):
                         # The main repo's /api/cron/retry-meter-events re-posts with the
                         # same identifier (Stripe dedupes meter events by identifier, so
                         # a retry can never double-bill) and deletes the row on success.
-                        print(f"[post-call] Stripe overage report failed — writing outbox row: {overage_err}")
+                        logger.error(f"[post-call] Stripe overage report failed — writing outbox row: {overage_err}", exc_info=True)
                         if not customer_id:
                             # Failed before the customer was even resolved (sub query
                             # error) — there is no customer to retry against.
-                            print(f"[post-call] No stripe_customer_id resolved; cannot outbox overage for {call_id}")
+                            logger.error(f"[post-call] No stripe_customer_id resolved; cannot outbox overage for {call_id}")
                         else:
                             try:
                                 await asyncio.to_thread(
@@ -213,13 +213,13 @@ async def run_post_call_pipeline(params: dict):
                                     ).execute()
                                 )
                             except Exception as outbox_err:
-                                print(f"[post-call] Meter outbox write failed (overage for {call_id} is lost): {outbox_err}")
+                                logger.error(f"[post-call] Meter outbox write failed (overage for {call_id} is lost): {outbox_err}", exc_info=True)
         except Exception as e:
-            print(f"[post-call] Usage tracking error (non-fatal): {e}")
+            logger.error(f"[post-call] Usage tracking error (non-fatal): {e}", exc_info=True)
 
     # Skip remaining pipeline if no tenant
     if not tenant_id:
-        print(f"[post-call] No tenant for {to_number} — skipping triage/lead/notification")
+        logger.info(f"[post-call] No tenant for {to_number} — skipping triage/lead/notification")
         return
 
     # ── 5. Language barrier detection ──
@@ -231,7 +231,7 @@ async def run_post_call_pipeline(params: dict):
     try:
         triage_result = await classify_call(supabase, transcript=transcript_text, tenant_id=tenant_id)
     except Exception as e:
-        print(f"[post-call] Triage classification failed: {e}")
+        logger.error(f"[post-call] Triage classification failed: {e}", exc_info=True)
 
     # If booking_succeeded, the reconciliation above wrote "booked"; use that
     # value here so the suggested_slots gate and the appointment lookup below
@@ -309,9 +309,9 @@ async def run_post_call_pipeline(params: dict):
             }
         except RecordOutcomeError as e:
             # T-59-05-04: only log call_id + tenant_id; never the raw phone or name.
-            print(f"[post-call] record_outcome failed: call_id={call_id} tenant_id={tenant_id}: {e}")
+            logger.error(f"[post-call] record_outcome failed: call_id={call_id} tenant_id={tenant_id}: {e}", exc_info=True)
         except Exception as e:
-            print(f"[post-call] record_outcome unexpected error (call_id={call_id}): {e}")
+            logger.error(f"[post-call] record_outcome unexpected error (call_id={call_id}): {e}", exc_info=True)
 
     # ── 7. Send owner notifications ──
     # Runs IMMEDIATELY after triage + the record_outcome attempt, BEFORE the
@@ -398,12 +398,12 @@ async def run_post_call_pipeline(params: dict):
                         f"{'first' if i == 0 else 'second'}={'fulfilled' if not isinstance(r, Exception) else 'rejected'}"
                         for i, r in enumerate(results)
                     )
-                    print(
+                    logger.info(
                         f"[post-call] Owner notify: tenant={tenant_id} outcome={final_outcome} "
                         f"emergency={is_emergency} degraded={lead is None} {statuses}"
                     )
         except Exception as e:
-            print(f"[post-call] Notification error: {e}")
+            logger.error(f"[post-call] Notification error: {e}", exc_info=True)
 
     # ── 8. Calculate suggested slots for unbooked calls ──
     suggested_slots = None
@@ -413,7 +413,7 @@ async def run_post_call_pipeline(params: dict):
                 lambda: _calculate_suggested_slots(supabase, tenant)
             )
         except Exception as e:
-            print(f"[post-call] Suggested slots calculation failed: {e}")
+            logger.error(f"[post-call] Suggested slots calculation failed: {e}", exc_info=True)
 
     # ── 9. Update call with triage + language data ──
     notification_priority = (
@@ -437,7 +437,7 @@ async def run_post_call_pipeline(params: dict):
             }).eq("call_id", call_id).execute()
         )
     except Exception as e:
-        print(f"[post-call] Triage update error (non-fatal): {e}")
+        logger.error(f"[post-call] Triage update error (non-fatal): {e}", exc_info=True)
 
     # Set booking_outcome to not_attempted if still null
     try:
@@ -445,7 +445,7 @@ async def run_post_call_pipeline(params: dict):
             lambda: supabase.table("calls").update({"booking_outcome": "not_attempted"}).eq("call_id", call_id).is_("booking_outcome", "null").execute()
         )
     except Exception as e:
-        print(f"[post-call] booking_outcome NULL fallback error (non-fatal): {e}")
+        logger.error(f"[post-call] booking_outcome NULL fallback error (non-fatal): {e}", exc_info=True)
 
     # ── 9b. Silent hallucination detection (observability only) ──
     # If the agent verbally confirmed a booking but book_appointment never returned
@@ -496,7 +496,7 @@ async def run_post_call_pipeline(params: dict):
                         .execute()
                     )
                 except Exception as meta_err:
-                    print(f"[post-call] Hallucination flag write error (non-fatal): {meta_err}")
+                    logger.error(f"[post-call] Hallucination flag write error (non-fatal): {meta_err}", exc_info=True)
 
                 # Sentry: engineering-side monitoring, not customer-facing.
                 try:
@@ -510,20 +510,20 @@ async def run_post_call_pipeline(params: dict):
                 except Exception:
                     pass
 
-                print(
+                logger.info(
                     f"[post-call] HALLUCINATION DETECTED: call_id={call_id} "
                     f"phrases={hallucinated_phrases[:3]} "
                     f"tool_calls={[e.get('name') for e in tool_call_log]}"
                 )
     except Exception as halluc_err:
         # Detection must never break the post-call pipeline.
-        print(f"[post-call] Hallucination detector error (non-fatal): {halluc_err}")
+        logger.error(f"[post-call] Hallucination detector error (non-fatal): {halluc_err}", exc_info=True)
 
     # ── (owner notifications moved to Section 7 — they now run before the
     #     optional suggested-slots / hallucination steps and no longer depend
     #     on the record_call_outcome RPC having succeeded.)
 
-    print(
+    logger.info(
         f"[post-call] Complete: callId={call_id} duration={duration_seconds}s "
         f"urgency={triage_result['urgency']} outcome={booking_outcome or 'not_attempted'} "
         f"language={detected_language or 'unknown'}"

@@ -26,6 +26,17 @@ NO_MATCH_RESPONSE = (
     "DIRECTIVE: Treat as new or walk-in customer. Do not claim to have any records on file."
 )
 
+# LOW-14: served when a CONNECTED integration's lookup FAILED (timeout / HTTP /
+# auth) rather than cleanly missing. Distinct from no-match so a known caller is
+# never wrongly told they're new.
+RECORDS_UNAVAILABLE_RESPONSE = (
+    "STATE: customer_records_temporarily_unavailable.\n"
+    "DIRECTIVE: Account lookup is temporarily unavailable. If the caller asks about their "
+    "balance, bill, or past work, say you can't pull up account details right now and offer "
+    "to take a message or have someone follow up. Do NOT say they are a new customer and do "
+    "NOT claim there are no records on file."
+)
+
 
 def format_customer_context_state(ctx: Optional[dict]) -> str:
     """Render merged customer_context as STATE+DIRECTIVE (D-10).
@@ -100,6 +111,20 @@ def format_customer_context_state(ctx: Optional[dict]) -> str:
     )
 
 
+def resolve_account_state(ctx: Optional[dict], unavailable: bool = False) -> str:
+    """Pick the STATE+DIRECTIVE the tool serves (LOW-14).
+
+    - unavailable=True (a CONNECTED provider's fetch failed) -> RECORDS_UNAVAILABLE_RESPONSE
+    - ctx falsy (clean no-match / not connected)            -> NO_MATCH_RESPONSE
+    - ctx populated                                          -> rendered context
+
+    Pure function so the branch is unit-testable without a RunContext.
+    """
+    if unavailable:
+        return RECORDS_UNAVAILABLE_RESPONSE
+    return format_customer_context_state(ctx)
+
+
 def create_check_customer_account_tool(deps: dict):
     """Factory: returns @function_tool closing over deps['customer_context']."""
 
@@ -115,10 +140,18 @@ def create_check_customer_account_tool(deps: dict):
     async def check_customer_account(context: RunContext) -> str:
 
         ctx = deps.get("customer_context") if isinstance(deps, dict) else getattr(deps, "customer_context", None)
-        result = format_customer_context_state(ctx)
+        unavailable = (
+            deps.get("customer_context_unavailable", False)
+            if isinstance(deps, dict)
+            else getattr(deps, "customer_context_unavailable", False)
+        )
+        # LOW-14: a failed fetch serves the "temporarily unavailable" state; a
+        # clean no-match (ctx is None) still serves NO_MATCH_RESPONSE.
+        result = resolve_account_state(ctx, unavailable)
         logger.info(
-            "check_customer_account: served (has_ctx=%s sources=%s)",
+            "check_customer_account: served (has_ctx=%s unavailable=%s sources=%s)",
             bool(ctx),
+            unavailable,
             list((ctx or {}).get("_sources", {}).values()) if ctx else [],
         )
         # Phase 61.3 D-05: capture STATE+DIRECTIVE for cascade-recovery replay.

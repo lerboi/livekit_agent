@@ -37,6 +37,7 @@ import httpx
 # admin client at call time AND tests can patch `xero_mod.get_supabase_admin`.
 from ..supabase_client import get_supabase_admin
 from ..lib.telemetry import emit_integration_fetch
+from ..lib.fetch_sentinel import FETCH_UNAVAILABLE
 from ._refresh_lock import (
     acquire_refresh_lock,
     poll_for_fresh_credential,
@@ -442,7 +443,14 @@ async def fetch_xero_customer_by_phone(
     tenant_id: str,
     phone_e164: str,
 ) -> Optional[dict]:
-    """Top-level entry. Returns dict or None on any failure / no-match.
+    """Top-level entry.
+
+    Returns the shaped dict on a hit; None on a genuine no-match or when Xero
+    is not connected for the tenant; or the FETCH_UNAVAILABLE sentinel when the
+    fetch FAILED (refresh error). This lets callers tell "new caller" from
+    "records temporarily unavailable" (2026-06-12 audit LOW-14). Transport/HTTP
+    errors raised by the helpers propagate to the bounded wrapper, which maps
+    them to FETCH_UNAVAILABLE.
 
     Shape:
       {
@@ -476,7 +484,7 @@ async def fetch_xero_customer_by_phone(
         cred = await _refresh_if_needed(cred)
         if not cred:
             logger.info("xero: refresh returned None (failure) for tenant=%s", tenant_id)
-            return None
+            return FETCH_UNAVAILABLE  # connected but refresh failed
 
         contact = await _get_contacts_by_phone(client, cred, phone_e164)
         if not contact:
@@ -584,6 +592,10 @@ async def fetch_xero_context_bounded(
             fetch_xero_customer_by_phone(tenant_id, phone_e164),
             timeout=timeout_seconds,
         )
+        # This legacy single-provider wrapper has no FETCH_UNAVAILABLE channel;
+        # collapse the sentinel back to None (no-match) for its callers.
+        if result is FETCH_UNAVAILABLE:
+            result = None
         if result is None:
             logger.info(
                 "xero_context: no match for caller (tenant=%s phone_hash=%s)",

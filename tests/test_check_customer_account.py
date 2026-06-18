@@ -11,7 +11,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.tools.check_customer_account import format_customer_context_state
+from src.tools.check_customer_account import (
+    format_customer_context_state,
+    resolve_account_state,
+)
 
 
 # ---- AC1: no-match locked string ------------------------------------------
@@ -121,3 +124,30 @@ async def test_AC5_tool_factory_does_not_refetch():
     mock_j.assert_not_called()
     mock_x.assert_not_called()
     assert "no_customer_match_for_phone" in result
+
+
+# ---- LOW-14: failed fetch vs clean no-match -------------------------------
+
+
+def test_LOW14_unavailable_serves_records_temporarily_unavailable():
+    """A failed connected-provider fetch must NOT be served as a new caller."""
+    s = resolve_account_state(None, unavailable=True)
+    assert "customer_records_temporarily_unavailable" in s
+    assert "temporarily unavailable" in s.lower()
+    assert "DIRECTIVE:" in s
+    # Must not assert the caller has no records on file.
+    assert "no records on file" not in s.lower().split("directive:")[0]
+
+
+def test_LOW14_clean_no_match_still_serves_no_match():
+    """unavailable=False with no ctx is a genuine no-match (unchanged)."""
+    s = resolve_account_state(None, unavailable=False)
+    assert "no_customer_match_for_phone" in s
+
+
+def test_LOW14_unavailable_takes_precedence_over_context():
+    """Defensive: the unavailable flag wins even if a ctx dict is present."""
+    ctx = {"client": {"name": "John"}, "_sources": {"client": "Jobber"}}
+    s = resolve_account_state(ctx, unavailable=True)
+    assert "customer_records_temporarily_unavailable" in s
+    assert "John" not in s
