@@ -99,6 +99,29 @@ LLM_MODEL = "gpt-4.1-mini"
 # cascaded pipeline (GeminiTTS's ~1.3s first-byte is what killed Phase 64).
 ELEVENLABS_TTS_MODEL = "eleven_flash_v2_5"
 
+# LK-B1: OpenAI TTS used as the ElevenLabs FALLBACK (FallbackAdapter below) so a
+# single ElevenLabs outage doesn't dead-air every call fleet-wide. OPENAI_API_KEY
+# is already a boot-preflight requirement (it powers the LLM). Env-overridable;
+# a wrong model/voice only fails the FALLBACK leg at use-time (primary still works),
+# and the adapter construction itself is wrapped so we degrade to ElevenLabs-only.
+OPENAI_TTS_MODEL = os.environ.get("VOCO_OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.environ.get("VOCO_OPENAI_TTS_VOICE", "alloy")
+
+# LK-B1: no-input / "are you still there?" recovery. The session emits user_state
+# 'away' after ~15s of caller silence (livekit default user_away_timeout). We
+# prompt up to NO_INPUT_MAX_STRIKES times, waiting NO_INPUT_RESPONSE_WINDOW_S for
+# a reply between prompts; if all go unanswered we gracefully end + capture so the
+# owner still gets the lead instead of the line dying in silence (one-way audio,
+# dead STT, caller stepped away — none of which raise a session error).
+NO_INPUT_MAX_STRIKES = int(os.environ.get("VOCO_NO_INPUT_MAX_STRIKES", "2"))
+NO_INPUT_RESPONSE_WINDOW_S = float(os.environ.get("VOCO_NO_INPUT_RESPONSE_WINDOW_S", "8"))
+
+# LK-B1: drive the on_error spoken-recovery after this many session errors even
+# if each is individually flagged recoverable — a provider stuck retrying is
+# effectively dead air to the caller. An explicitly UNRECOVERABLE error triggers
+# recovery immediately regardless of this threshold.
+ERROR_RECOVERY_THRESHOLD = int(os.environ.get("VOCO_ERROR_RECOVERY_THRESHOLD", "3"))
+
 # 2026-06-11 naturalness pass (findings.md P8.1): preemptive generation starts
 # the LLM + TTS on interim STT transcripts and discards the speculative turn if
 # the final transcript differs — shaves perceived response latency (production
@@ -620,7 +643,24 @@ async def entrypoint(ctx: JobContext):
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
-        tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+        _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+        # LK-B1: wrap ElevenLabs in a FallbackAdapter that fails over to OpenAI TTS
+        # mid-call if ElevenLabs errors/times out, so one vendor outage doesn't
+        # leave the caller in silence on every call. Construction is wrapped: if
+        # the adapter or OpenAI TTS can't be built (plugin/version mismatch) we
+        # degrade to ElevenLabs-only — never WORSE than today (fail-open).
+        try:
+            from livekit.agents import tts as _agents_tts
+            tts = _agents_tts.FallbackAdapter([
+                _eleven_tts,
+                openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE),
+            ])
+            logger.info("[agent] TTS FallbackAdapter active (ElevenLabs -> OpenAI)")
+        except Exception as e:
+            logger.warning(
+                "[agent] TTS FallbackAdapter unavailable (%s); using ElevenLabs only", e
+            )
+            tts = _eleven_tts
 
         # VAD: Silero defaults for barge-in. DO NOT port the realtime model's
         # 2.5s silence value here — Phase 64 did exactly that and added ~2s/turn.
@@ -687,12 +727,126 @@ async def entrypoint(ctx: JobContext):
             except Exception:
                 pass
 
-        # ── Session error handler ──
+        # ── LK-B1: mid-call failure recovery state ─────────────────────────
+        # Single-element-list closures (same pattern as call_end_reason) so the
+        # sync @session.on(...) handlers can mutate them.
+        _greeting_done = [False]      # set True once the opening greeting unmutes
+        _recovery_started = [False]   # idempotency latch: only the first teardown wins
+        _last_user_state = ["listening"]
+        _no_input_seq_active = [False]
+        _error_count = [0]
+
+        async def _speak_and_end(reason: str, message_key: str):
+            """Speak a short caller-facing line, then drive end_call's graceful
+            capture path (_delayed_disconnect -> ctx.shutdown -> post-call pipeline
+            -> transcript/lead/owner-notify). Wrapped end-to-end so a recovery can
+            NEVER throw or make the call worse than today (fail-open)."""
+            try:
+                call_end_reason[0] = reason
+                try:
+                    handle = session.say(_msg(locale, message_key), allow_interruptions=False)
+                    if handle is not None:
+                        await asyncio.wait_for(handle.wait_for_playout(), timeout=15)
+                except Exception as e:
+                    # TTS may itself be the thing that's down — end gracefully
+                    # anyway so the owner still gets the lead.
+                    logger.warning("[agent] recovery say failed (%s); ending anyway", e)
+                await _delayed_disconnect(deps)
+            except Exception as e:
+                logger.error("[agent] recovery path error (%s); forcing shutdown", e)
+                try:
+                    ctx.shutdown()
+                except Exception:
+                    pass
+
+        def _begin_recovery(reason: str, message_key: str) -> None:
+            """Idempotent trigger for the spoken-fallback teardown. Skips if a
+            teardown is already in flight or was initiated elsewhere (end_call /
+            transfer / duration watchdog)."""
+            if _recovery_started[0]:
+                return
+            if call_end_reason[0] in ("agent_ended", "transferred", "max_duration"):
+                return
+            _recovery_started[0] = True
+            asyncio.create_task(_speak_and_end(reason, message_key))
+
+        async def _no_input_sequence():
+            """Caller went silent (user_state 'away'). Prompt up to
+            NO_INPUT_MAX_STRIKES times; end + capture if all go unanswered."""
+            try:
+                for strike in range(1, NO_INPUT_MAX_STRIKES + 1):
+                    if _recovery_started[0]:
+                        return
+                    logger.info(
+                        "[agent] no-input: prompting 'are you still there?' strike=%d room=%s",
+                        strike, call_id,
+                    )
+                    try:
+                        h = session.say(
+                            _msg(locale, "agent.no_input_prompt"), allow_interruptions=True
+                        )
+                        if h is not None:
+                            await asyncio.wait_for(h.wait_for_playout(), timeout=10)
+                    except Exception as e:
+                        logger.warning("[agent] no-input prompt say failed: %s", e)
+                    # Window for the caller to answer before the next strike.
+                    await asyncio.sleep(NO_INPUT_RESPONSE_WINDOW_S)
+                    if _last_user_state[0] != "away":
+                        logger.info("[agent] no-input: caller responded — resuming room=%s", call_id)
+                        return
+                if not _recovery_started[0]:
+                    logger.warning(
+                        "[agent] no-input: %d prompts unanswered — ending call room=%s",
+                        NO_INPUT_MAX_STRIKES, call_id,
+                    )
+                    _begin_recovery("no_input", "agent.no_input_goodbye")
+            except Exception as e:
+                logger.warning("[agent] no-input sequence error: %s", e)
+            finally:
+                _no_input_seq_active[0] = False
+
+        # ── Session error handler (LK-B1: + caller-facing recovery) ──
         @session.on("error")
         def on_error(event):
             logger.error(f"[agent] Session error: room={call_id} tenant={tenant_id} error={event.error}")
             actual_error = getattr(event.error, "error", event.error)
             sentry_sdk.capture_exception(actual_error)
+            # LK-B1: a fatal STT/TTS/LLM failure (or a one-way-audio SIP call) must
+            # not leave the caller in silence until the 10-min watchdog. Act on an
+            # UNRECOVERABLE error immediately, or after repeated errors (a provider
+            # stuck retrying = effectively dead). Default recoverable=True when the
+            # SDK doesn't say, so we never tear down a call the SDK could self-heal;
+            # the no-input net (below) still backstops persistent silence.
+            try:
+                recoverable = getattr(event, "recoverable", None)
+                if recoverable is None:
+                    recoverable = getattr(event.error, "recoverable", True)
+                _error_count[0] += 1
+                if (recoverable is False) or (_error_count[0] >= ERROR_RECOVERY_THRESHOLD):
+                    _begin_recovery("error_recovery", "agent.recovery_error")
+            except Exception as e:
+                logger.warning("[agent] on_error recovery dispatch failed: %s", e)
+
+        # ── LK-B1: no-input / "are you still there?" handler ──
+        # Separate from the [63.1-DIAG] user_state logger below (multiple handlers
+        # per event are supported). Gated on _greeting_done so it never fires while
+        # the greeting is playing with input muted (LK-C2).
+        @session.on("user_state_changed")
+        def _on_no_input(event):
+            try:
+                new_state = getattr(event, "new_state", None)
+                if new_state:
+                    _last_user_state[0] = new_state
+                if new_state != "away":
+                    return
+                if not _greeting_done[0] or _recovery_started[0] or _no_input_seq_active[0]:
+                    return
+                if call_end_reason[0] in ("agent_ended", "transferred", "max_duration"):
+                    return
+                _no_input_seq_active[0] = True
+                asyncio.create_task(_no_input_sequence())
+            except Exception as e:
+                logger.warning("[agent] no-input handler error: %s", e)
 
         # [63.1-DIAG] Session state diagnostics — instrument every relevant
         # event so a stall after a tool call can be traced through the cascaded
@@ -830,6 +984,11 @@ async def entrypoint(ctx: JobContext):
                         "booking_succeeded": deps.get("_booking_succeeded", False),
                         "booked_appointment_id": deps.get("_booked_appointment_id"),
                         "booked_caller_name": deps.get("_booked_caller_name"),
+                        # M16 P1 (Capability A): last service-area classification
+                        # from validate_address/capture_lead — drives the owner
+                        # notification's out-of-area note (covers all 3 modes,
+                        # including trip_fee bookings that create a job not an inquiry).
+                        "service_area": deps.get("_service_area"),
                         # Tool-execution audit trail for silent hallucination detection.
                         "tool_call_log": deps.get("_tool_call_log", []),
                     }),
@@ -921,7 +1080,10 @@ async def entrypoint(ctx: JobContext):
             )
             slot_zones_task = asyncio.to_thread(
                 lambda: supabase.table("service_zones")
-                .select("id, name, postal_codes")
+                # cities[] added for the M16 Service-Area gate (Capability A);
+                # postal_codes[] + cities[] are the tenant's coverage list,
+                # read by validate_address via deps["_slot_cache"].
+                .select("id, name, postal_codes, cities")
                 .eq("tenant_id", tenant_id)
                 .execute()
             )
@@ -1101,6 +1263,9 @@ async def entrypoint(ctx: JobContext):
                     logger.info("[agent] input unmuted after greeting")
                 except Exception as e:
                     logger.warning(f"[agent] could not unmute input after greeting: {e}")
+                # LK-B1: arm the no-input ("are you still there?") watchdog only
+                # AFTER the greeting window, so it never fires while input is muted.
+                _greeting_done[0] = True
 
         _greeting_unmute_task = asyncio.create_task(_unmute_after_greeting())
 

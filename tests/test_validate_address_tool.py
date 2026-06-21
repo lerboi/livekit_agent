@@ -201,6 +201,128 @@ async def test_never_raises_when_bounded_wrapper_raises(patched_validate):
     assert deps["_validated_address"]["result"]["verdict"] == "error"
 
 
+# ── Service-Area gate (M16 P1, Capability A) ────────────────────────────────
+#
+# At validate_address time the tool classifies the Google-normalized postal +
+# town against the tenant's coverage list (deps["_slot_cache"]["service_zones"],
+# union of postal_codes[] + cities[]) and, when clearly outside, overrides the
+# directive per the owner's out_of_area_action. Fixture address resolves to
+# postal 94043 / locality "Mountain View".
+
+
+def _deps_with_area(zones, *, out_of_area_action=None, referral_note=None) -> dict:
+    tenant = {}
+    if out_of_area_action is not None:
+        tenant["out_of_area_action"] = out_of_area_action
+    if referral_note is not None:
+        tenant["out_of_area_referral_note"] = referral_note
+    return _make_deps(
+        _slot_cache={"service_zones": zones},
+        tenant=tenant,
+    )
+
+
+OUT_ZONES = [{"postal_codes": ["90210"], "cities": ["Beverly Hills"]}]
+IN_ZONES = [{"postal_codes": ["94043"], "cities": ["Mountain View"]}]
+
+
+@pytest.mark.asyncio
+async def test_gate_out_of_area_defaults_to_callback(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area(OUT_ZONES)  # no out_of_area_action → callback default
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_out_of_area action=callback")
+    assert "call back" in result.lower()
+    assert "Do NOT offer or book" in result
+    # Prohibited-phrase guard (decision e).
+    assert '"zone"' in result and '"travel time"' in result
+    assert deps["_service_area"]["verdict"] == "out_of_area"
+
+
+@pytest.mark.asyncio
+async def test_gate_out_of_area_decline_referral_includes_note(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area(
+        OUT_ZONES,
+        out_of_area_action="decline_referral",
+        referral_note="try ABC Plumbing 555-1234",
+    )
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_out_of_area action=decline_referral")
+    assert "try ABC Plumbing 555-1234" in result
+    assert "Do NOT offer or book" in result
+
+
+@pytest.mark.asyncio
+async def test_gate_out_of_area_trip_fee_still_books(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area(OUT_ZONES, out_of_area_action="trip_fee")
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_out_of_area action=trip_fee")
+    assert "travel charge" in result.lower()
+    assert "book as normal" in result
+
+
+@pytest.mark.asyncio
+async def test_gate_in_area_keeps_normal_directive(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area(IN_ZONES)
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_ok")
+    assert "address_out_of_area" not in result
+    assert deps["_service_area"]["verdict"] == "in_area"
+
+
+@pytest.mark.asyncio
+async def test_gate_skips_confirm_postal_branch(patched_validate):
+    """When the postal is an unconfirmed lookup (caller gave none), defer the
+    gate to the re-validate — don't decline on an unconfirmed postal."""
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area(OUT_ZONES)
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+
+    assert result.startswith("STATE:address_ok_confirm_postal")
+    assert deps["_service_area"]["verdict"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_gate_does_not_fire_on_unconfirmed(patched_validate):
+    patched_validate.return_value = (_bounded_result("unconfirmed", None), "US")
+    deps = _deps_with_area(OUT_ZONES)
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+
+    assert result.startswith("STATE:address_unclear")
+    assert deps["_service_area"]["verdict"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_gate_unconfigured_when_no_zones(patched_validate):
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    deps = _deps_with_area([])  # empty coverage → gate off
+    tool = create_validate_address_tool(deps)
+
+    result = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert result.startswith("STATE:address_ok")
+    assert deps["_service_area"]["verdict"] == "unconfigured"
+
+
 # ── Cache write ─────────────────────────────────────────────────────────────
 
 

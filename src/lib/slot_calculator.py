@@ -44,23 +44,29 @@ def _get_travel_buffer_mins(
     candidate_zone_id: str | None,
     zones: list[dict],
     zone_pair_buffers: list[dict],
+    default_buffer_mins: int = 30,
 ) -> int:
     """
     Resolve the travel buffer in minutes between the last booking and a candidate slot.
 
     Logic:
-    - If zones list is empty (no zones configured): flat 30-min buffer
-    - If last booking has no zone_id or candidate has no zone: 30-min buffer
+    - If zones list is empty (no zones configured): the tenant's default buffer
+    - If last booking has no zone_id or candidate has no zone: the default buffer
     - If same zone: 0-min buffer
-    - If different zones: look up zone_pair_buffers; default 30-min if no entry
-    """
-    # No zones configured at all -- flat 30-min buffer
-    if not zones or len(zones) == 0:
-        return 30
+    - If different zones: look up zone_pair_buffers; default buffer if no entry
 
-    # No zone info on one or both sides -- treat as cross-zone (30min default)
+    `default_buffer_mins` is the owner-adjustable tenant-wide buffer
+    (tenants.travel_buffer_mins, M16 P2; DEFAULT 30 = pre-P2 behavior). The
+    zone-differentiated branches stay dormant — zone_id is always NULL today —
+    so in practice this returns `default_buffer_mins`.
+    """
+    # No zones configured at all -- flat default buffer
+    if not zones or len(zones) == 0:
+        return default_buffer_mins
+
+    # No zone info on one or both sides -- treat as cross-zone (default buffer)
     if not last_booking_zone_id or not candidate_zone_id:
-        return 30
+        return default_buffer_mins
 
     # Same zone -- no buffer
     if last_booking_zone_id == candidate_zone_id:
@@ -87,7 +93,7 @@ def _get_travel_buffer_mins(
             return pair["buffer_mins"]
 
     # Default cross-zone buffer
-    return 30
+    return default_buffer_mins
 
 
 def _parse_iso(s: str) -> datetime:
@@ -137,6 +143,7 @@ def calculate_available_slots(
     tenant_timezone: str,
     max_slots: int = 10,
     candidate_zone_id: str | None = None,
+    travel_buffer_mins: int = 30,
 ) -> list[dict]:
     """
     Calculate available booking slots for a given date.
@@ -152,6 +159,9 @@ def calculate_available_slots(
         tenant_timezone: IANA timezone (e.g. 'America/Chicago').
         max_slots: Maximum slots to return.
         candidate_zone_id: Zone ID for the candidate booking (for buffer calc).
+        travel_buffer_mins: Owner-adjustable tenant-wide travel buffer in minutes
+            (tenants.travel_buffer_mins, M16 P2; DEFAULT 30 = pre-P2 behavior).
+            Enforced on BOTH sides of every existing booking (forward + backward).
 
     Returns:
         List of {start: str, end: str} available slots as ISO strings.
@@ -278,7 +288,8 @@ def calculate_available_slots(
             cursor = cursor + timedelta(minutes=slot_duration_mins)
             continue
 
-        # Travel buffer check: find the last booking that ends before this slot starts
+        # Travel buffer check (BACKWARD): find the last booking that ends before
+        # this slot starts; require travel time after it before this slot may begin.
         bookings_before = [b for b in parsed_bookings if b["end"] <= slot_start]
         if len(bookings_before) > 0:
             # Find the one that ends latest
@@ -289,11 +300,35 @@ def calculate_available_slots(
                 candidate_zone_id,
                 zones,
                 zone_pair_buffers,
+                default_buffer_mins=travel_buffer_mins,
             )
 
             if buffer_mins > 0:
                 earliest_start = last_booking["end"] + timedelta(minutes=buffer_mins)
                 if slot_start < earliest_start:
+                    cursor = cursor + timedelta(minutes=slot_duration_mins)
+                    continue
+
+        # Travel buffer check (FORWARD, M16 P2): find the earliest booking that
+        # starts at/after this slot ends; require travel time after this slot
+        # before that booking begins. Mirrors the backward case so the buffer is
+        # symmetric on both sides of every booking (coordinate-free datetime math).
+        bookings_after = [b for b in parsed_bookings if b["start"] >= slot_end]
+        if len(bookings_after) > 0:
+            # Find the one that starts earliest
+            next_booking = min(bookings_after, key=lambda b: b["start"])
+
+            buffer_mins = _get_travel_buffer_mins(
+                next_booking["zone_id"],
+                candidate_zone_id,
+                zones,
+                zone_pair_buffers,
+                default_buffer_mins=travel_buffer_mins,
+            )
+
+            if buffer_mins > 0:
+                latest_end = next_booking["start"] - timedelta(minutes=buffer_mins)
+                if slot_end > latest_end:
                     cursor = cursor + timedelta(minutes=slot_duration_mins)
                     continue
 

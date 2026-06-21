@@ -10,6 +10,7 @@ import time
 from livekit.agents import function_tool, RunContext
 
 from ..lib.write_outcome import record_outcome, RecordOutcomeError
+from ..lib.service_area import classify_service_area
 from ..integrations.google_maps import validate_address_with_region_fallback
 from ..integrations.jobber import _normalize_free_form
 from .validate_address import get_cached_validation
@@ -155,7 +156,7 @@ def create_capture_lead_tool(deps: dict):
             # Phase 59 D-10 inquiry path: appointment_id=None → record_call_outcome
             # upserts the customer and creates an inquiry row (not a job). No direct
             # writes to legacy leads/lead_calls (D-02a).
-            await record_outcome(
+            outcome = await record_outcome(
                 supabase,
                 tenant_id=tenant_id,
                 raw_phone=raw_phone,
@@ -173,6 +174,34 @@ def create_capture_lead_tool(deps: dict):
                 address_components=validation_result.get("address_components"),
                 address_validation_verdict=validation_verdict,
             )
+
+            # M16 P1 (Capability A): persist the out-of-area flag on the inquiry
+            # for CRM visibility. Re-classify from THIS tool's validation_result
+            # (the address actually recorded) rather than trusting a possibly-
+            # stale deps["_service_area"], and stamp via a follow-up service-role
+            # UPDATE — the hardened record_call_outcome RPC (069) stays untouched.
+            # Only trust a confirmed* verdict; unconfirmed/error carry no usable
+            # postal/town, so classify_service_area returns 'unknown' anyway.
+            # Best-effort: a failure here never breaks lead capture.
+            if validation_verdict in ("confirmed", "confirmed_with_changes"):
+                try:
+                    _components = validation_result.get("address_components") or {}
+                    _sa = classify_service_area(
+                        zones=(deps.get("_slot_cache") or {}).get("service_zones") or [],
+                        postal_code=_components.get("postal_code"),
+                        locality=_components.get("locality"),
+                    )
+                    deps["_service_area"] = _sa
+                    _inquiry_id = outcome.get("inquiry_id") if isinstance(outcome, dict) else None
+                    if _sa["verdict"] == "out_of_area" and _inquiry_id:
+                        await asyncio.to_thread(
+                            lambda: supabase.table("inquiries")
+                            .update({"out_of_area": True})
+                            .eq("id", _inquiry_id)
+                            .execute()
+                        )
+                except Exception as _sa_exc:  # noqa: BLE001 — flag is best-effort
+                    logger.warning("[capture_lead] out-of-area stamp failed: %s", _sa_exc)
 
             # Write booking_outcome: 'declined' (conditional -- don't overwrite 'booked')
             await asyncio.to_thread(

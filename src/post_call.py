@@ -15,7 +15,12 @@ logger = logging.getLogger(__name__)
 
 from .lib.triage.classifier import classify_call
 from .lib.write_outcome import record_outcome, RecordOutcomeError
-from .lib.notifications import send_owner_sms, send_owner_email
+from .lib.notifications import (
+    build_owner_sms_body,
+    build_owner_email_content,
+    send_owner_sms_body,
+    send_owner_email_content,
+)
 from .lib.slot_calculator import calculate_available_slots
 from .utils import to_local_date_string, format_zone_pair_buffers
 
@@ -24,6 +29,49 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 SUPPORTED_LANGUAGES = {"en", "es", "zh", "ms", "ta", "vi"}
 
 MIN_BILLABLE_DURATION_SEC = 15
+
+# LK-B2: hard per-send cap on each owner notification. The Twilio/Resend SDK
+# default HTTP timeouts (tens of seconds) could eat the whole 8s post-call budget
+# and silently drop the owner alert. asyncio.to_thread can't be cancelled, so this
+# wait_for returns control after the cap even if the underlying thread lingers —
+# we then write a durable outbox row and let the retry cron re-send.
+OWNER_NOTIFY_TIMEOUT_S = 3.0
+
+
+async def _enqueue_owner_notification_failure(
+    supabase, tenant_id: str, call_id: str, channel: str,
+    recipient: str, payload: dict, reason: str,
+) -> None:
+    """LK-B2: durable outbox for a failed/timed-out owner notification — mirrors the
+    stripe_meter_failures pattern (migration 071). The main repo's
+    /api/cron/retry-owner-notifications re-sends from the stored payload and deletes
+    the row on success. Keyed on `{call_id}:{channel}` so SMS and email retry
+    independently and duplicate failures for the same call+channel collapse to one
+    row. Best-effort: if the table doesn't exist yet (migration 076 not applied) or
+    the write fails, log and move on — the in-band send was already attempted."""
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("owner_notification_failures").upsert(
+                {
+                    "tenant_id": tenant_id,
+                    "notification_key": f"{call_id}:{channel}",
+                    "channel": channel,
+                    "recipient": recipient,
+                    "payload": payload,
+                    "failure_reason": str(reason)[:500],
+                },
+                on_conflict="notification_key",
+            ).execute()
+        )
+        logger.info(
+            "[post-call] Owner %s failure queued to outbox: call=%s", channel, call_id
+        )
+    except Exception as outbox_err:
+        logger.error(
+            "[post-call] Owner-notification outbox write failed "
+            "(call=%s channel=%s — alert NOT durably queued): %s",
+            call_id, channel, outbox_err, exc_info=True,
+        )
 
 
 async def run_post_call_pipeline(params: dict):
@@ -85,6 +133,10 @@ async def run_post_call_pipeline(params: dict):
     booking_succeeded = params.get("booking_succeeded", False)
     booked_appointment_id = params.get("booked_appointment_id")
     booked_caller_name = params.get("booked_caller_name")
+    # M16 P1 (Capability A): the caller's confirmed address was outside the
+    # tenant's Service Area. Drives the out-of-area note on the owner alert.
+    _service_area = params.get("service_area")
+    is_out_of_area = bool(_service_area and _service_area.get("verdict") == "out_of_area")
 
     if booking_succeeded:
         try:
@@ -134,6 +186,12 @@ async def run_post_call_pipeline(params: dict):
             logger.error(f"[post-call] Test call auto-cancel error: {e}", exc_info=True)
 
     # ── 4. Usage tracking ──
+    # LK-B2: the emergency OWNER ALERT must always win the 8s budget over billing.
+    # We still increment the usage counter here (fast local RPC) and resolve the
+    # Stripe customer (fast DB read), but DEFER the slow Stripe meter POST (capped
+    # network call) to AFTER owner notifications (§7.5). overage_customer_id carries
+    # the intent forward; None means "nothing to bill".
+    overage_customer_id = None
     if not is_test_call and tenant_id and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
         try:
             usage_resp = await asyncio.to_thread(
@@ -153,7 +211,6 @@ async def run_post_call_pipeline(params: dict):
                 logger.info(f"[post-call] usage: tenant={tenant_id} success={success} used={calls_used}/{calls_limit} exceeded={limit_exceeded}")
 
                 if success and limit_exceeded:
-                    customer_id = None
                     try:
                         sub_resp = await asyncio.to_thread(
                             lambda: supabase.table("subscriptions")
@@ -164,56 +221,13 @@ async def run_post_call_pipeline(params: dict):
                             .execute()
                         )
                         sub = sub_resp.data[0] if sub_resp.data else None
-
                         if sub and sub.get("stripe_customer_id"):
-                            customer_id = sub["stripe_customer_id"]
-                            client = stripe.StripeClient(os.environ.get("STRIPE_SECRET_KEY"))
-                            # DEPLOY-CHECK: requires a Stripe Billing Meter named "voco_calls"
-                            # with customer_mapping key "stripe_customer_id" and value key "value".
-                            # 3s cap (2026-06-12 audit H8): stripe-python's default read
-                            # timeout is ~80s — inside the pipeline's 8s envelope a slow
-                            # Stripe call would starve record_outcome + owner notifications.
-                            await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    lambda: client.billing.meter_events.create(
-                                        params={
-                                            "event_name": "voco_calls",
-                                            "payload": {"value": "1", "stripe_customer_id": customer_id},
-                                            "identifier": f"overage_{call_id}",
-                                        }
-                                    )
-                                ),
-                                timeout=3.0,
-                            )
-                            logger.info(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
-                    except Exception as overage_err:
-                        # Durable outbox (2026-06-12 audit H4): this used to be a
-                        # print-and-drop, and replay was structurally impossible
-                        # (increment_calls_used already consumed the call_id), so every
-                        # transient failure here was permanently unbilled overage.
-                        # The main repo's /api/cron/retry-meter-events re-posts with the
-                        # same identifier (Stripe dedupes meter events by identifier, so
-                        # a retry can never double-bill) and deletes the row on success.
-                        logger.error(f"[post-call] Stripe overage report failed — writing outbox row: {overage_err}", exc_info=True)
-                        if not customer_id:
-                            # Failed before the customer was even resolved (sub query
-                            # error) — there is no customer to retry against.
-                            logger.error(f"[post-call] No stripe_customer_id resolved; cannot outbox overage for {call_id}")
+                            # Defer the actual meter POST to §7.5 (after notifications).
+                            overage_customer_id = sub["stripe_customer_id"]
                         else:
-                            try:
-                                await asyncio.to_thread(
-                                    lambda: supabase.table("stripe_meter_failures").upsert(
-                                        {
-                                            "tenant_id": tenant_id,
-                                            "call_id": call_id,
-                                            "stripe_customer_id": customer_id,
-                                            "failure_reason": str(overage_err)[:500],
-                                        },
-                                        on_conflict="call_id",
-                                    ).execute()
-                                )
-                            except Exception as outbox_err:
-                                logger.error(f"[post-call] Meter outbox write failed (overage for {call_id} is lost): {outbox_err}", exc_info=True)
+                            logger.error(f"[post-call] No stripe_customer_id resolved; cannot bill overage for {call_id}")
+                    except Exception as sub_err:
+                        logger.error(f"[post-call] Subscription lookup for overage failed (non-fatal): {sub_err}", exc_info=True)
         except Exception as e:
             logger.error(f"[post-call] Usage tracking error (non-fatal): {e}", exc_info=True)
 
@@ -349,6 +363,8 @@ async def run_post_call_pipeline(params: dict):
                 }
                 # send_owner_email reads urgency off the lead dict.
                 notify_lead["urgency"] = triage_result["urgency"]
+                # M16 P1 (Capability A): out-of-area flag for both senders.
+                notify_lead["out_of_area"] = is_out_of_area
 
                 prefs = tenant_info.get("notification_preferences") or {}
                 if is_emergency:
@@ -365,13 +381,16 @@ async def run_post_call_pipeline(params: dict):
                 dashboard_link = f"{os.environ.get('NEXT_PUBLIC_APP_URL', 'https://localhost:3000')}{dashboard_path}"
                 business_name = tenant_info.get("business_name", "Your Business")
 
-                tasks = []
+                # LK-B2: render bodies FIRST (pure), so the durable outbox row we
+                # write on failure carries the EXACT message we tried to send — the
+                # retry cron re-sends it verbatim. Each send is hard-capped at
+                # OWNER_NOTIFY_TIMEOUT_S; a timeout or error enqueues an outbox row
+                # rather than silently dropping the owner's missed-job alert.
+                send_tasks = []
 
                 if outcome_prefs.get("sms") and tenant_info.get("owner_phone"):
-                    tasks.append(asyncio.to_thread(
-                        send_owner_sms,
-                        to=tenant_info["owner_phone"],
-                        from_number=to_number,  # tenant's own Twilio number
+                    sms_to = tenant_info["owner_phone"]
+                    sms_body = build_owner_sms_body(
                         business_name=business_name,
                         caller_name=notify_lead.get("caller_name"),
                         job_type=notify_lead.get("job_type"),
@@ -380,23 +399,65 @@ async def run_post_call_pipeline(params: dict):
                         callback_link=callback_link,
                         dashboard_link=dashboard_link,
                         is_booked=is_booked,
-                    ))
+                        out_of_area=is_out_of_area,
+                    )
+
+                    async def _send_sms():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    send_owner_sms_body,
+                                    to=sms_to, from_number=to_number, body=sms_body,
+                                ),
+                                timeout=OWNER_NOTIFY_TIMEOUT_S,
+                            )
+                            return "sms:ok"
+                        except Exception as send_err:
+                            await _enqueue_owner_notification_failure(
+                                supabase, tenant_id, call_id, "sms",
+                                recipient=sms_to,
+                                payload={"from_number": to_number, "body": sms_body},
+                                reason=f"{type(send_err).__name__}: {send_err}",
+                            )
+                            return "sms:queued"
+
+                    send_tasks.append(_send_sms())
 
                 if outcome_prefs.get("email") and tenant_info.get("owner_email"):
-                    tasks.append(asyncio.to_thread(
-                        send_owner_email,
-                        to=tenant_info["owner_email"],
+                    email_to = tenant_info["owner_email"]
+                    email_subject, email_html = build_owner_email_content(
                         lead=notify_lead,
                         is_booked=is_booked,
                         business_name=business_name,
                         dashboard_url=dashboard_link,
-                    ))
+                    )
 
-                if tasks:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    async def _send_email():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    send_owner_email_content,
+                                    to=email_to, subject=email_subject, html=email_html,
+                                ),
+                                timeout=OWNER_NOTIFY_TIMEOUT_S,
+                            )
+                            return "email:ok"
+                        except Exception as send_err:
+                            await _enqueue_owner_notification_failure(
+                                supabase, tenant_id, call_id, "email",
+                                recipient=email_to,
+                                payload={"subject": email_subject, "html": email_html},
+                                reason=f"{type(send_err).__name__}: {send_err}",
+                            )
+                            return "email:queued"
+
+                    send_tasks.append(_send_email())
+
+                if send_tasks:
+                    results = await asyncio.gather(*send_tasks, return_exceptions=True)
                     statuses = ", ".join(
-                        f"{'first' if i == 0 else 'second'}={'fulfilled' if not isinstance(r, Exception) else 'rejected'}"
-                        for i, r in enumerate(results)
+                        str(r) if not isinstance(r, Exception) else f"error:{r}"
+                        for r in results
                     )
                     logger.info(
                         f"[post-call] Owner notify: tenant={tenant_id} outcome={final_outcome} "
@@ -404,6 +465,49 @@ async def run_post_call_pipeline(params: dict):
                     )
         except Exception as e:
             logger.error(f"[post-call] Notification error: {e}", exc_info=True)
+
+    # ── 7.5. Deferred Stripe overage meter POST (LK-B2) ──
+    # Billing runs AFTER the owner alert so a slow Stripe call can never starve the
+    # emergency notification's 8s budget. Same 3s cap + same stripe_meter_failures
+    # outbox as before (migration 071); the retry cron re-posts with the same
+    # identifier (Stripe dedupes by identifier, so a retry can never double-bill).
+    if overage_customer_id:
+        try:
+            client = stripe.StripeClient(os.environ.get("STRIPE_SECRET_KEY"))
+            # DEPLOY-CHECK: requires a Stripe Billing Meter named "voco_calls" with
+            # customer_mapping key "stripe_customer_id" and value key "value".
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.billing.meter_events.create(
+                        params={
+                            "event_name": "voco_calls",
+                            "payload": {"value": "1", "stripe_customer_id": overage_customer_id},
+                            "identifier": f"overage_{call_id}",
+                        }
+                    )
+                ),
+                timeout=3.0,
+            )
+            logger.info(f"[post-call] Overage reported to Stripe meter: tenant={tenant_id}")
+        except Exception as overage_err:
+            # Durable outbox (2026-06-12 audit H4): replay is otherwise impossible
+            # (increment_calls_used already consumed the call_id), so a transient
+            # failure here would be permanently unbilled overage without this row.
+            logger.error(f"[post-call] Stripe overage report failed — writing outbox row: {overage_err}", exc_info=True)
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("stripe_meter_failures").upsert(
+                        {
+                            "tenant_id": tenant_id,
+                            "call_id": call_id,
+                            "stripe_customer_id": overage_customer_id,
+                            "failure_reason": str(overage_err)[:500],
+                        },
+                        on_conflict="call_id",
+                    ).execute()
+                )
+            except Exception as outbox_err:
+                logger.error(f"[post-call] Meter outbox write failed (overage for {call_id} is lost): {outbox_err}", exc_info=True)
 
     # ── 8. Calculate suggested slots for unbooked calls ──
     suggested_slots = None
@@ -722,6 +826,7 @@ def _calculate_suggested_slots(supabase, tenant):
             target_date=target_date_str,
             tenant_timezone=tenant_timezone,
             max_slots=3 - len(collected_slots),
+            travel_buffer_mins=tenant.get("travel_buffer_mins", 30),
         )
         collected_slots.extend(day_slots)
 

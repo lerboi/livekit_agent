@@ -16,6 +16,70 @@ import pytest
 from src.webhook.schedule import ScheduleDecision
 
 
+# ---------- LK-B3: _ai_sip_twiml templates the dialed number ----------
+
+
+def test_ai_sip_twiml_templates_dialed_number(monkeypatch):
+    """The dialed (To) number becomes the SIP user-part so the agent resolves the tenant."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:voco@myproj.sip.livekit.cloud")
+    out = _ai_sip_twiml("+14155550100")
+    assert "<Sip>sip:+14155550100@myproj.sip.livekit.cloud</Sip>" in out
+    assert "voco@" not in out  # static user-part replaced
+
+
+def test_ai_sip_twiml_failopen_to_static_without_number(monkeypatch):
+    """No dialed number -> emit the static LIVEKIT_SIP_URI unchanged (never worse than before)."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:voco@myproj.sip.livekit.cloud")
+    assert "<Sip>sip:voco@myproj.sip.livekit.cloud</Sip>" in _ai_sip_twiml(None)
+    assert "<Sip>sip:voco@myproj.sip.livekit.cloud</Sip>" in _ai_sip_twiml("")
+
+
+def test_ai_sip_twiml_default_uri_templated(monkeypatch):
+    """With no env var, the default host is used and the user-part is still templated."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.delenv("LIVEKIT_SIP_URI", raising=False)
+    out = _ai_sip_twiml("+6512345678")
+    assert "<Sip>sip:+6512345678@sip.livekit.cloud</Sip>" in out
+
+
+def test_ai_sip_twiml_bare_host_base_preserves_host(monkeypatch):
+    """LIVEKIT_SIP_URI with NO user-part (bare host) must keep the configured host,
+    not substitute a hardcoded one (regression guard for the host-discard bug)."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:myproj.sip.livekit.cloud")
+    out = _ai_sip_twiml("+14155550100")
+    assert "<Sip>sip:+14155550100@myproj.sip.livekit.cloud</Sip>" in out
+
+
+def test_ai_sip_twiml_schemeless_base_gets_scheme(monkeypatch):
+    """A scheme-less base still yields a valid sip: URI with the real host."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "myproj.sip.livekit.cloud")
+    out = _ai_sip_twiml("+14155550100")
+    assert "<Sip>sip:+14155550100@myproj.sip.livekit.cloud</Sip>" in out
+
+
+def test_ai_sip_twiml_non_e164_fails_open(monkeypatch):
+    """A non-E.164 dialed value (garbage / non-PSTN To) fails open to the static base."""
+    from src.webhook.twilio_routes import _ai_sip_twiml
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:voco@myproj.sip.livekit.cloud")
+    assert "<Sip>sip:voco@myproj.sip.livekit.cloud</Sip>" in _ai_sip_twiml("voco")
+    assert "<Sip>sip:voco@myproj.sip.livekit.cloud</Sip>" in _ai_sip_twiml("client:agent")
+
+
+def test_dial_fallback_templates_dialed_number_when_to_present(client_no_auth, monkeypatch):
+    """dial-fallback WITH a To posts the dialed number into the SIP user-part (end-to-end)."""
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:test@sip.livekit.cloud")
+    resp = client_no_auth.post(
+        "/twilio/dial-fallback",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-FB"},
+    )
+    assert resp.status_code == 200
+    assert "sip:+15551234567@sip.livekit.cloud" in resp.text
+
+
 # ---------- Four Twilio endpoints ----------
 
 
@@ -206,7 +270,74 @@ def test_incoming_call_ai_mode(client_no_auth, monkeypatch):
     assert resp.status_code == 200
     body = resp.text
     assert "<Sip>" in body
-    assert "sip:test@sip.livekit.cloud" in body
+    # LK-B3: the SIP URI user-part is templated with the DIALED number (the To),
+    # not the static 'test' user-part, so the agent can resolve the tenant.
+    assert "sip:+15551234567@sip.livekit.cloud" in body
+    assert "sip:test@sip.livekit.cloud" not in body
+
+
+def test_incoming_call_corrupt_timezone_failopen(client_no_auth, monkeypatch):
+    """LK-B4 (belt): a corrupt tenant_timezone must NOT 500 — fall open to AI TwiML.
+
+    No schedule_decision is patched, so the REAL evaluate_schedule runs and raises
+    ZoneInfo on the bad tz; the per-step try/except in incoming_call must catch it
+    and default to mode='ai'.
+    """
+    tenant = {
+        "id": "t-badtz",
+        "call_forwarding_schedule": {
+            "enabled": True, "days": {"mon": [{"start": "08:00", "end": "17:00"}]},
+        },
+        "tenant_timezone": "Not/AZone",  # invalid IANA key -> ZoneInfo raises
+        "country": "US",
+        "pickup_numbers": [{"number": "+1111"}],
+        "dial_timeout_seconds": 15,
+    }
+    _patch_routing(monkeypatch, tenant_data=tenant)  # real evaluate_schedule
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-BADTZ"},
+    )
+    assert resp.status_code == 200
+    assert "<Sip>" in resp.text  # AI fail-open, never a non-TwiML 500
+
+
+def test_incoming_call_unhandled_error_failopen_global_handler(monkeypatch):
+    """LK-B4 (suspenders): an unhandled error in the voice front door returns AI
+    TwiML via the global exception handler — never a non-TwiML 500.
+
+    Forces a RuntimeError at the very top of the handler (before any per-step
+    try/except) by patching _normalize_phone, and asserts the global handler in
+    app.py converts it to AI SIP TwiML. raise_server_exceptions=False so the
+    TestClient surfaces the handler's response instead of re-raising.
+    """
+    from fastapi import Request
+    from fastapi.testclient import TestClient
+    from src.webhook.app import app
+    from src.webhook.security import verify_twilio_signature
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("src.webhook.twilio_routes._normalize_phone", _boom)
+    monkeypatch.setenv("LIVEKIT_SIP_URI", "sip:test@sip.livekit.cloud")
+
+    async def _override(request: Request) -> None:
+        form_data = await request.form()
+        request.state.form_data = dict(form_data)
+
+    app.dependency_overrides[verify_twilio_signature] = _override
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        resp = client.post(
+            "/twilio/incoming-call",
+            data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-BOOM"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "<Sip>" in resp.text
+    assert resp.headers["content-type"].startswith("application/xml")
 
 
 def test_incoming_call_owner_pickup(client_no_auth, monkeypatch):

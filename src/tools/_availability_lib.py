@@ -269,6 +269,7 @@ def calc_slots_for_dates(
             target_date=date_str,
             tenant_timezone=tenant_timezone,
             max_slots=50,
+            travel_buffer_mins=tenant.get("travel_buffer_mins", 30),
         )
         all_slots.extend(day_slots)
     return all_slots

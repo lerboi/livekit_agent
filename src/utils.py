@@ -139,6 +139,7 @@ def calculate_initial_slots(supabase, tenant: dict) -> str:
             target_date=target_date_str,
             tenant_timezone=tenant_timezone,
             max_slots=6 - len(all_slots),
+            travel_buffer_mins=tenant.get("travel_buffer_mins", 30),
         )
         all_slots.extend(day_slots)
 

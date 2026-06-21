@@ -448,9 +448,14 @@ def create_book_appointment_tool(deps: dict):
             return cached_response
 
         # Fetch tenant timezone and config
+        # select("*") (parity with agent.py) instead of a named list so the live
+        # booking path stays fail-open if travel_buffer_mins (migration 075) isn't
+        # applied yet — a named column would make PostgREST 400 the whole query
+        # pre-migration, breaking booking; the value is read via the None-safe
+        # tenant.get("travel_buffer_mins", 30) below.
         tenant_result = await asyncio.to_thread(
             lambda: supabase.table("tenants")
-            .select("tenant_timezone, working_hours, slot_duration_mins, business_name, default_locale")
+            .select("*")
             .eq("id", tenant_id)
             .single()
             .execute()
@@ -581,6 +586,7 @@ def create_book_appointment_tool(deps: dict):
                 target_date=end_date_str,
                 tenant_timezone=tenant_timezone,
                 max_slots=1,
+                travel_buffer_mins=(tenant or {}).get("travel_buffer_mins", 30),
             )
 
             if len(next_slots) > 0:

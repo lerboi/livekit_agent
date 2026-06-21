@@ -28,8 +28,64 @@ import time
 from livekit.agents import function_tool, RunContext
 
 from ..integrations.google_maps import validate_address_with_region_fallback
+from ..lib.service_area import classify_service_area
 
 logger = logging.getLogger(__name__)
+
+
+# M16 P1 (Capability A) — caller-facing wording guard for the out-of-area
+# paths. Decision (e): the gate's internals stay silent — the caller hears only
+# "a bit outside the area we usually cover", never any implementation jargon.
+_OOA_PROHIBITED = (
+    ' Never say "zone", "service area", "coverage", "buffer", or "travel time"'
+    ' — say only that it is "a bit outside the area we usually cover".'
+)
+
+
+def _out_of_area_state(
+    action: str, formatted: str | None, referral_note: str | None
+) -> str:
+    """Build the STATE+DIRECTIVE for a confirmed out-of-area address, branched
+    on the owner's out_of_area_action. All three branches keep the lead (the
+    owner's #1 fear is a lost lead); they differ only in what the AI offers.
+
+    callback (default) — do not book; take a message + promise a call-back.
+    decline_referral   — do not book; politely decline + optional referral.
+    trip_fee           — proceed to book; warn an extra travel charge may apply.
+    """
+    speech = formatted or ""
+    if action == "decline_referral":
+        directive = (
+            "the address is confirmed but outside the area the team can get to."
+            " Do NOT offer or book a time. In ONE polite sentence, let the caller"
+            " know it's outside the area the team usually covers"
+        )
+        if referral_note:
+            directive += f', and suggest they try: "{referral_note}"'
+        directive += (
+            ". Still collect the caller's name, a callback number, and the job,"
+            " then call capture_lead so the owner keeps the lead."
+        )
+    elif action == "trip_fee":
+        directive = (
+            "the address is confirmed but a little outside the usual area. You can"
+            " still book it. In ONE sentence, gently mention it's a bit outside the"
+            " usual area so there may be an extra travel charge the owner will"
+            " confirm, then continue to check availability and book as normal."
+        )
+    else:  # callback (default) — also the fallback for any unexpected value
+        directive = (
+            "the address is confirmed but a little outside the area the team usually"
+            " covers. Do NOT offer or book a time. In ONE warm sentence, let the"
+            " caller know it's a bit outside the usual area, so you'll take their"
+            " details and have the team call back to confirm they can get out there."
+            " Then collect the caller's name, a callback number, and the job, and"
+            " call capture_lead."
+        )
+    return (
+        f"STATE:address_out_of_area action={action} speech={speech}"
+        f" | DIRECTIVE:{directive}{_OOA_PROHIBITED}"
+    )
 
 
 _SCHEMA = {
@@ -251,6 +307,47 @@ def create_validate_address_tool(deps: dict):
                 " | DIRECTIVE:read it back once and continue. Never mention"
                 " validation."
             )
+
+        # ── Service-Area gate (M16 P1, Capability A) ────────────────────────
+        # Does the tenant serve this address at all? Classify ONLY on a solidly
+        # confirmed address (the Google-normalized postal + town are trusted),
+        # and skip the confirm-postal branch where the postal is an unconfirmed
+        # lookup — defer to the re-validate once the caller confirms it. The
+        # classification is stashed on deps for capture_lead + the post-call
+        # owner notification; an 'out_of_area' verdict overrides the directive
+        # per the owner's chosen action. Bias is to false-ACCEPT — see
+        # service_area.classify_service_area. Never blocks the call path.
+        deps["_service_area"] = {"verdict": "unknown", "matched_on": None}
+        _confirm_postal_branch = (
+            verdict == "confirmed" and not postal_code and looked_up_postal
+        )
+        if (
+            verdict in ("confirmed", "confirmed_with_changes")
+            and formatted
+            and not _confirm_postal_branch
+        ):
+            try:
+                _components = result.get("address_components") or {}
+                _sa = classify_service_area(
+                    zones=(deps.get("_slot_cache") or {}).get("service_zones") or [],
+                    postal_code=_components.get("postal_code"),
+                    locality=_components.get("locality"),
+                )
+                deps["_service_area"] = _sa
+                if _sa["verdict"] == "out_of_area":
+                    _tenant = deps.get("tenant") or {}
+                    state = _out_of_area_state(
+                        _tenant.get("out_of_area_action") or "callback",
+                        formatted,
+                        _tenant.get("out_of_area_referral_note"),
+                    )
+                    logger.info(
+                        "[validate_address] out-of-area (action=%s) call=%s",
+                        _tenant.get("out_of_area_action") or "callback",
+                        deps.get("call_id"),
+                    )
+            except Exception as exc:  # noqa: BLE001 — gate must never break the call
+                logger.warning("[validate_address] service-area gate failed open: %s", exc)
 
         deps["_last_tool_state"] = state
         return state

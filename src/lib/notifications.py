@@ -62,6 +62,60 @@ def _interpolate(template: str | None, vars: dict) -> str:
 # --- Owner SMS alert ----------------------------------------------------------
 
 
+def build_owner_sms_body(
+    *,
+    business_name: str,
+    caller_name: str | None = None,
+    job_type: str | None = None,
+    urgency: str | None = None,
+    address: str | None = None,
+    callback_link: str | None = None,
+    dashboard_link: str | None = None,
+    is_booked: bool = False,
+    out_of_area: bool = False,
+) -> str:
+    """Render the owner-alert SMS body. Pure (no I/O) so the EXACT bytes that get
+    sent are also what we persist to the owner-notification outbox on failure
+    (LK-B2) — one source of truth for the wording.
+    """
+    is_emergency = urgency == "emergency"
+    name = caller_name or "Unknown"
+    job = job_type or "General inquiry"
+    addr = address or "No address"
+    ooa = " (OUTSIDE your area — confirm reachability)" if out_of_area else ""
+
+    if is_emergency:
+        return (
+            f"EMERGENCY: {business_name} -- {name} needs urgent {job} at {addr}{ooa}. "
+            f"Call NOW: {callback_link} | Dashboard: {dashboard_link}"
+        )
+    if is_booked:
+        return (
+            f"{business_name}: New booking -- {name}, {job} at {addr}{ooa}. "
+            f"Callback: {callback_link} | Dashboard: {dashboard_link}"
+        )
+    return (
+        f"{business_name}: New inquiry -- {name}, {job} at {addr}{ooa}. "
+        f"Not booked — follow up. Callback: {callback_link} | Dashboard: {dashboard_link}"
+    )
+
+
+def send_owner_sms_body(*, to: str, from_number: str | None, body: str):
+    """Low-level owner SMS send for a PRE-RENDERED body. RAISES on failure so the
+    caller can persist a durable outbox row (LK-B2)."""
+    try:
+        result = _get_twilio_client().messages.create(
+            body=body,
+            from_=from_number or os.environ.get("TWILIO_FROM_NUMBER"),
+            to=to,
+        )
+        logger.info("[notifications] Owner SMS sent: %s", result.sid)
+        return result
+    except Exception as err:
+        logger.error("[notifications] Owner SMS failed: %s", str(err))
+        raise
+
+
 def send_owner_sms(
     *,
     to: str,
@@ -74,8 +128,15 @@ def send_owner_sms(
     callback_link: str | None = None,
     dashboard_link: str | None = None,
     is_booked: bool = False,
+    out_of_area: bool = False,
 ):
     """Send an SMS alert to the business owner about a new call/booking.
+
+    Convenience wrapper: renders the body (build_owner_sms_body) then sends it
+    (send_owner_sms_body). Preserves the legacy SWALLOW-on-failure contract
+    (returns None) for any external caller. The post-call pipeline calls the
+    builder + low-level sender directly so it can write a durable outbox row on
+    failure (LK-B2).
 
     `from_number` should be the tenant's own Twilio number (the one the caller
     dialed). Falls back to the `TWILIO_FROM_NUMBER` env var for backwards
@@ -86,52 +147,40 @@ def send_owner_sms(
     and "New inquiry" (caller did not book — owner follow-up needed). Emergency
     is a separate branch and always takes the urgent-callback wording regardless
     of booking outcome.
+
+    `out_of_area` (M16 P1, Capability A) appends a short flag when the caller's
+    confirmed address was outside the tenant's Service Area, so the owner knows
+    to confirm reachability before scheduling.
     """
-    is_emergency = urgency == "emergency"
-    name = caller_name or "Unknown"
-    job = job_type or "General inquiry"
-    addr = address or "No address"
-
-    if is_emergency:
-        body = (
-            f"EMERGENCY: {business_name} -- {name} needs urgent {job} at {addr}. "
-            f"Call NOW: {callback_link} | Dashboard: {dashboard_link}"
-        )
-    elif is_booked:
-        body = (
-            f"{business_name}: New booking -- {name}, {job} at {addr}. "
-            f"Callback: {callback_link} | Dashboard: {dashboard_link}"
-        )
-    else:
-        body = (
-            f"{business_name}: New inquiry -- {name}, {job} at {addr}. "
-            f"Not booked — follow up. Callback: {callback_link} | Dashboard: {dashboard_link}"
-        )
-
+    body = build_owner_sms_body(
+        business_name=business_name,
+        caller_name=caller_name,
+        job_type=job_type,
+        urgency=urgency,
+        address=address,
+        callback_link=callback_link,
+        dashboard_link=dashboard_link,
+        is_booked=is_booked,
+        out_of_area=out_of_area,
+    )
     try:
-        result = _get_twilio_client().messages.create(
-            body=body,
-            from_=from_number or os.environ.get("TWILIO_FROM_NUMBER"),
-            to=to,
-        )
-        logger.info("[notifications] Owner SMS sent: %s", result.sid)
-        return result
-    except Exception as err:
-        logger.error("[notifications] Owner SMS failed: %s", str(err))
+        return send_owner_sms_body(to=to, from_number=from_number, body=body)
+    except Exception:
+        return None  # legacy swallow contract preserved for external callers
 
 
 # --- Owner email alert --------------------------------------------------------
 
 
-def send_owner_email(
+def build_owner_email_content(
     *,
-    to: str,
     lead: dict | None = None,
     business_name: str,
     dashboard_url: str | None = None,
     is_booked: bool = False,
-):
-    """Send an email alert to the business owner about a new lead.
+) -> tuple[str, str]:
+    """Render (subject, html) for the owner-alert email. Pure (no I/O) so the
+    persisted outbox payload matches exactly what gets sent (LK-B2).
 
     `is_booked` flips the subject and heading between "New booking" (caller
     took an appointment) and "New inquiry" (caller did not book — follow-up
@@ -152,6 +201,16 @@ def send_owner_email(
         subject = f"New inquiry -- {caller_name}"
         heading_label = "New inquiry (not booked — follow up)"
 
+    # M16 P1 (Capability A): highlight an out-of-area lead so the owner confirms
+    # reachability before scheduling. The flag is set on the lead dict upstream.
+    ooa_html = (
+        '<p style="color:#b91c1c;font-weight:bold;">'
+        "⚠ OUTSIDE your service area — confirm you can reach this address "
+        "before scheduling.</p>"
+        if lead.get("out_of_area")
+        else ""
+    )
+
     # Plain HTML email (no React Email dependency in the agent)
     html = f"""
     <h2>{heading_label}: {caller_name}</h2>
@@ -160,9 +219,15 @@ def send_owner_email(
     <p><strong>Address:</strong> {lead.get("service_address") or "Not provided"}</p>
     <p><strong>Phone:</strong> {lead.get("from_number") or "Unknown"}</p>
     <p><strong>Urgency:</strong> {urgency}</p>
+    {ooa_html}
     <p><a href="{dashboard_url}">View in Dashboard</a></p>
     """
+    return subject, html
 
+
+def send_owner_email_content(*, to: str, subject: str, html: str):
+    """Low-level owner email send for PRE-RENDERED subject/html. RAISES on failure
+    so the caller can persist a durable outbox row (LK-B2)."""
     try:
         _init_resend()
         result = resend.Emails.send(
@@ -173,13 +238,39 @@ def send_owner_email(
                 "html": html,
             }
         )
-        result_id = None
-        if isinstance(result, dict):
-            result_id = result.get("id")
+        result_id = result.get("id") if isinstance(result, dict) else None
         logger.info("[notifications] Owner email sent: %s", result_id)
         return result
     except Exception as err:
         logger.error("[notifications] Owner email failed: %s", str(err))
+        raise
+
+
+def send_owner_email(
+    *,
+    to: str,
+    lead: dict | None = None,
+    business_name: str,
+    dashboard_url: str | None = None,
+    is_booked: bool = False,
+):
+    """Send an email alert to the business owner about a new lead.
+
+    Convenience wrapper: renders (subject, html) then sends. Preserves the legacy
+    SWALLOW-on-failure contract (returns None); the post-call pipeline uses
+    build_owner_email_content + send_owner_email_content directly so it can write
+    a durable outbox row on failure (LK-B2).
+    """
+    subject, html = build_owner_email_content(
+        lead=lead,
+        business_name=business_name,
+        dashboard_url=dashboard_url,
+        is_booked=is_booked,
+    )
+    try:
+        return send_owner_email_content(to=to, subject=subject, html=html)
+    except Exception:
+        return None  # legacy swallow contract preserved for external callers
 
 
 # --- Caller recovery SMS -----------------------------------------------------

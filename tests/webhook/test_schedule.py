@@ -229,3 +229,33 @@ def test_multi_range_day_second_range():
         now_utc=datetime(2026, 4, 6, 19, 0, tzinfo=timezone.utc),
     )
     assert result == ScheduleDecision(mode="owner_pickup", reason="inside_window")
+
+
+# ---------- LK-B4: corrupt timezone is the precondition the route belt guards ----------
+
+
+def test_corrupt_timezone_raises():
+    """A corrupt/typo'd tenant_timezone makes evaluate_schedule RAISE at ZoneInfo().
+
+    evaluate_schedule itself does NOT swallow this (it reaches ZoneInfo only after
+    the enabled+days early-returns). LK-B4 guards it at the call site: the
+    /twilio/incoming-call handler wraps this in try/except defaulting to mode='ai',
+    and app.py adds a global fail-open handler — so Twilio never gets a non-TwiML
+    500 that would hang up every inbound call for the tenant.
+    """
+    with pytest.raises(Exception):
+        evaluate_schedule(
+            schedule={"enabled": True, "days": {"mon": [{"start": "09:00", "end": "17:00"}]}},
+            tenant_timezone="Not/AZone",  # invalid IANA key
+            now_utc=datetime(2026, 4, 6, 14, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_empty_string_timezone_raises():
+    """An empty-string tenant_timezone also raises (malformed) — same belt covers it."""
+    with pytest.raises(Exception):
+        evaluate_schedule(
+            schedule={"enabled": True, "days": {"mon": [{"start": "09:00", "end": "17:00"}]}},
+            tenant_timezone="",
+            now_utc=datetime(2026, 4, 6, 14, 0, tzinfo=timezone.utc),
+        )

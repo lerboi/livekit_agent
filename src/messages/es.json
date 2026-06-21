@@ -13,7 +13,10 @@
     "language_barrier_escalation": "Voy a asegurarme de que alguien que hable {language} se comunique con usted de inmediato.",
     "greeting_onboarding": "Hola, gracias por llamar a {business_name}. Esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
     "greeting_default": "Hola, esta llamada puede ser grabada por motivos de calidad. Como puedo ayudarle hoy?",
-    "max_duration_goodbye": "Lo siento, hemos alcanzado la duracion maxima de la llamada. Alguien del equipo le contactara en breve. Gracias por llamar — adios."
+    "max_duration_goodbye": "Lo siento, hemos alcanzado la duracion maxima de la llamada. Alguien del equipo le contactara en breve. Gracias por llamar — adios.",
+    "recovery_error": "Lo siento, estoy teniendo problemas con la conexion. Permitame tomar sus datos para que alguien le devuelva la llamada enseguida.",
+    "no_input_prompt": "Disculpe, sigue ahi?",
+    "no_input_goodbye": "Estoy teniendo problemas para escucharle. Hare que alguien del equipo le devuelva la llamada en breve. Adios."
   },
   "notifications": {
     "booking_confirmation": "Su cita con {business_name} esta confirmada para el {date} a las {time}. Direccion: {address}",

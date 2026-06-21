@@ -38,14 +38,42 @@ router = APIRouter(
 # --- TwiML helpers -----------------------------------------------------------
 
 
-def _ai_sip_twiml() -> str:
-    """Build the hardcoded AI TwiML response.
+def _ai_sip_twiml(to_number: str | None = None) -> str:
+    """Build the AI SIP TwiML response.
 
-    Dials the existing LiveKit SIP URI from env var LIVEKIT_SIP_URI. In Phase
-    39 this value is not critical because no production Twilio number is
-    reconfigured to call this webhook — the default is a placeholder.
+    LK-B3: template the SIP URI's USER-PART with the DIALED number (Twilio `To`)
+    so the LiveKit agent can resolve the tenant. The agent identifies the tenant
+    by the dialed number it reads off the SIP leg (`sip.trunkPhoneNumber`/`sip.to`
+    → `tenants.phone_number`). A STATIC user-part carries no per-tenant DNIS, so
+    every webhook-routed AI call would resolve to NO tenant → a generic, tenant-
+    less receptionist (book/capture/notify all no-op, no CRM row, no owner alert).
+
+    The host comes from `LIVEKIT_SIP_URI` (the LiveKit inbound SIP address the
+    Twilio trunk's Origination URI already uses); only the user-part is swapped.
+
+    Fail-open: with no `to_number` (or an unparseable one) we emit the static
+    `LIVEKIT_SIP_URI` exactly as before — never worse than the prior behavior.
+    Callers pass the already-normalized dialed number (E.164, e.g. +14155550100);
+    `+` is a valid SIP user-part char (RFC 3261), and the agent re-normalizes it.
     """
-    sip_uri = os.environ.get("LIVEKIT_SIP_URI", "sip:voco@sip.livekit.cloud")
+    base = os.environ.get("LIVEKIT_SIP_URI", "sip:voco@sip.livekit.cloud")
+    sip_uri = base
+    # Only template a clean E.164 dialed number ("+" then digits). Anything else
+    # (empty, garbage, or a non-PSTN To like "client:agent") fails open to the
+    # static base, so we never emit a malformed SIP user-part.
+    if to_number and to_number.startswith("+") and to_number[1:].isdigit():
+        # Parse the base as "[scheme:][user@]host" and keep ONLY the scheme + host;
+        # put the dialed number in the user-part. Preserve the configured host
+        # whether or not the base has a user-part — NEVER substitute a hardcoded
+        # host (that would silently misroute, worse than the static fail-open).
+        scheme, rest = "sip:", base
+        low = base.lower()
+        if low.startswith("sips:"):
+            scheme, rest = "sips:", base[5:]
+        elif low.startswith("sip:"):
+            scheme, rest = "sip:", base[4:]
+        host = rest.split("@", 1)[1] if "@" in rest else rest
+        sip_uri = f"{scheme}{to_number}@{host}"
     return (
         f'<?xml version="1.0" encoding="UTF-8"?>\n'
         f"<Response><Dial><Sip>{sip_uri}</Sip></Dial></Response>"
@@ -184,9 +212,11 @@ async def incoming_call(request: Request) -> Response:
     except Exception as e:
         logger.warning("[webhook] Tenant lookup failed (fail-open): %s", e)
 
-    # No tenant found -> AI TwiML (fail-open)
+    # No tenant found -> AI TwiML (fail-open). Still template the dialed number;
+    # the agent will also find no tenant for it (genuinely unprovisioned), but
+    # this keeps the URI consistent and correct for any race where the row exists.
     if not tenant:
-        return _xml_response(_ai_sip_twiml())
+        return _xml_response(_ai_sip_twiml(to_number))
 
     # 2. Subscription check (fail-open: if parsing fails, continue).
     # Blocked tenants are routed to the AI SIP path, where agent.py's own gate
@@ -201,7 +231,7 @@ async def incoming_call(request: Request) -> Response:
                 "[webhook] Blocked subscription (%s) for tenant %s — AI TwiML",
                 status, tenant["id"],
             )
-            return _xml_response(_ai_sip_twiml())
+            return _xml_response(_ai_sip_twiml(to_number))
     except Exception as e:
         logger.warning("[webhook] Subscription check failed (fail-open): %s", e)
 
@@ -233,12 +263,20 @@ async def incoming_call(request: Request) -> Response:
     except Exception as e:
         logger.warning("[webhook] VIP check failed (fail-open): %s", e)
 
-    # 3. Evaluate schedule
-    decision = evaluate_schedule(
-        tenant.get("call_forwarding_schedule", {}),
-        tenant.get("tenant_timezone", "UTC"),
-        datetime.now(tz=timezone.utc),
-    )
+    # 3. Evaluate schedule (LK-B4 fail-open). evaluate_schedule was the ONLY step
+    # in this routing tree without a guard — a corrupt/typo'd tenant_timezone makes
+    # ZoneInfo() raise (schedule.py), which without this would 500 the webhook and
+    # hang up EVERY inbound call for the tenant. Default to AI, like every other
+    # step here. (A scoped global handler in app.py is the second line of defense.)
+    try:
+        decision = evaluate_schedule(
+            tenant.get("call_forwarding_schedule", {}),
+            tenant.get("tenant_timezone", "UTC"),
+            datetime.now(tz=timezone.utc),
+        )
+    except Exception as e:
+        logger.warning("[webhook] evaluate_schedule failed (fail-open -> AI): %s", e)
+        decision = ScheduleDecision(mode="ai", reason="schedule_error")
 
     # 4. Cap check for owner_pickup
     if decision.mode == "owner_pickup":
@@ -267,7 +305,7 @@ async def incoming_call(request: Request) -> Response:
                 "[webhook] No pickup numbers for tenant %s — AI TwiML",
                 tenant["id"],
             )
-            return _xml_response(_ai_sip_twiml())
+            return _xml_response(_ai_sip_twiml(to_number))
 
         # Insert calls row BEFORE returning TwiML
         try:
@@ -283,7 +321,7 @@ async def incoming_call(request: Request) -> Response:
         )
 
     # Default: AI TwiML
-    return _xml_response(_ai_sip_twiml())
+    return _xml_response(_ai_sip_twiml(to_number))
 
 
 @router.post("/dial-status")
@@ -339,14 +377,20 @@ async def dial_status(request: Request) -> Response:
     # cleanly. final_mode is computed above before the DB write, so this still
     # routes correctly even if the calls-row update failed.
     if final_mode == "fallback_to_ai":
-        return _xml_response(_ai_sip_twiml())
+        # LK-B3: template the dialed number so the AI fallback leg still resolves
+        # the tenant (the <Dial action> callback carries the original call's To).
+        return _xml_response(_ai_sip_twiml(_normalize_phone(form_data.get("To", ""))))
     return _xml_response(_empty_twiml())
 
 
 @router.post("/dial-fallback")
 async def dial_fallback(request: Request) -> Response:
     """Twilio dial-fallback — owner didn't answer, route to AI (D-05, D-06)."""
-    return _xml_response(_ai_sip_twiml())
+    # LK-B3: template the dialed number (Twilio includes the original To on the
+    # fallback request) so the AI leg resolves the tenant. Fail-open to static
+    # if To is absent (e.g. an error-only fallback ping).
+    form_data = request.state.form_data
+    return _xml_response(_ai_sip_twiml(_normalize_phone(form_data.get("To", ""))))
 
 
 _twilio_client = None
