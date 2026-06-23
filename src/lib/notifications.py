@@ -8,9 +8,16 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from twilio.rest import Client as TwilioClient
 import resend
+
+if TYPE_CHECKING:
+    # Type-only import: lets the annotations below resolve for type checkers
+    # without importing the Twilio SDK at module load (memory). The real import
+    # is deferred into _get_twilio_client(). resend stays a module-level import
+    # because the test suite patches `notifications.resend`.
+    from twilio.rest import Client as TwilioClient
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +30,15 @@ with open(_messages_dir / "es.json", "r", encoding="utf-8") as f:
 
 # --- Lazy-instantiated clients ------------------------------------------------
 
-_twilio_client: TwilioClient | None = None
+_twilio_client: "TwilioClient | None" = None
 
 
-def _get_twilio_client() -> TwilioClient:
+def _get_twilio_client() -> "TwilioClient":
     global _twilio_client
     if _twilio_client is None:
+        # Lazy import (memory): defer the Twilio SDK out of module-load RSS.
+        # Instantiation was already lazy (singleton); this makes the import lazy too.
+        from twilio.rest import Client as TwilioClient
         _twilio_client = TwilioClient(
             os.environ.get("TWILIO_ACCOUNT_SID"),
             os.environ.get("TWILIO_AUTH_TOKEN"),
