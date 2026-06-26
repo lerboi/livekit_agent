@@ -1386,21 +1386,37 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    # Boot preflight (2026-06-12 audit S4): the STT/LLM/TTS plugins are
-    # constructed PER CALL inside entrypoint(), so a missing key fails at call
-    # time — every inbound call connects and dies silently with no audio while
-    # the liveness healthcheck stays green. Fail the deploy visibly instead.
-    _missing_keys = [
-        k for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ELEVEN_API_KEY")
-        if not os.environ.get(k)
-    ]
-    if _missing_keys:
-        raise RuntimeError(
-            f"Missing required env vars: {', '.join(_missing_keys)} — refusing to "
-            "start: every call would connect and then hard-fail with no audio."
-        )
+    import sys
 
-    start_webhook_server()
+    # The LiveKit CLI subcommand is argv[1] (e.g. "start", "dev", "download-files").
+    # Only the worker-running modes need secrets + the Twilio webhook server.
+    # `download-files` runs at Docker BUILD time, BEFORE any secrets exist, and only
+    # fetches public HuggingFace models (turn detector, VAD) — it must reach
+    # cli.run_app() WITHOUT tripping the key preflight or starting the webhook.
+    # Gating this is load-bearing: previously the preflight raised during the build,
+    # cli.run_app() (and thus `download-files`) never ran, the image shipped with no
+    # turn-detector model files, and every call crashed at MultilingualModel() with
+    # 'Could not find file "languages.json"'.
+    _subcommand = sys.argv[1] if len(sys.argv) > 1 else ""
+    _needs_runtime = _subcommand in ("start", "dev")
+
+    if _needs_runtime:
+        # Boot preflight (2026-06-12 audit S4): the STT/LLM/TTS plugins are
+        # constructed PER CALL inside entrypoint(), so a missing key fails at call
+        # time — every inbound call connects and dies silently with no audio while
+        # the liveness healthcheck stays green. Fail the deploy visibly instead.
+        _missing_keys = [
+            k for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ELEVEN_API_KEY")
+            if not os.environ.get(k)
+        ]
+        if _missing_keys:
+            raise RuntimeError(
+                f"Missing required env vars: {', '.join(_missing_keys)} — refusing to "
+                "start: every call would connect and then hard-fail with no audio."
+            )
+
+        start_webhook_server()
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
