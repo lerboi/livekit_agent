@@ -21,6 +21,16 @@ from .phone import _normalize_phone
 
 logger = logging.getLogger(__name__)
 
+# PC-1: record_call_outcome runs inside the 8s post-call budget, immediately
+# BEFORE the owner alert (§7). It was previously uncapped, so a slow RPC could
+# exhaust the budget and abort the pipeline before the alert fired. Cap it — on
+# timeout we raise RecordOutcomeError (same as any RPC failure), which the caller
+# already catches and degrades `lead` to None (the alert still fires on call
+# metadata). Note: asyncio.to_thread can't be cancelled, so the underlying write
+# may still complete; record_call_outcome upserts by (tenant_id, phone_e164) so a
+# late completion is idempotent/safe.
+RECORD_OUTCOME_TIMEOUT_S = 2.0
+
 
 class RecordOutcomeError(Exception):
     """Raised when record_call_outcome RPC fails or returns an unexpected shape.
@@ -104,10 +114,15 @@ async def record_outcome(
         "p_address_validation_verdict": address_validation_verdict,
     }
     try:
-        result = await asyncio.to_thread(
-            lambda: supabase.rpc("record_call_outcome", params).execute()
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: supabase.rpc("record_call_outcome", params).execute()
+            ),
+            timeout=RECORD_OUTCOME_TIMEOUT_S,
         )
     except Exception as e:
+        # Includes asyncio.TimeoutError — treated as an RPC failure so the caller
+        # degrades to call metadata and the owner alert (§7) still fires.
         raise RecordOutcomeError(f"rpc_failed: {e}") from e
 
     # Step 3: Validate shape.

@@ -74,6 +74,24 @@ async def _enqueue_owner_notification_failure(
         )
 
 
+async def _delete_owner_notification_failure(supabase, call_id: str, channel: str) -> None:
+    """PC-1: remove a persist-first outbox row after a successful in-band send so the
+    retry cron doesn't re-send it. Best-effort — a failed delete just means the cron
+    re-sends once (at-least-once; a duplicate alert beats a dropped emergency)."""
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("owner_notification_failures")
+            .delete()
+            .eq("notification_key", f"{call_id}:{channel}")
+            .execute()
+        )
+    except Exception as del_err:
+        logger.error(
+            "[post-call] Failed to delete persist-first outbox row "
+            "(call=%s channel=%s): %s", call_id, channel, del_err,
+        )
+
+
 async def run_post_call_pipeline(params: dict):
     supabase = params["supabase"]
     call_id = params["call_id"]
@@ -352,6 +370,13 @@ async def run_post_call_pipeline(params: dict):
                 # saves a round-trip inside the 8s budget.
                 final_outcome = booking_outcome or "not_attempted"
                 is_emergency = triage_result["urgency"] == "emergency"
+                # PC-1: for high-priority alerts, PERSIST the durable outbox row
+                # BEFORE the in-band send (and delete on success) so a SIGKILL/timeout
+                # between here and the send's except can't silently drop the alert —
+                # the */5min retry cron re-sends the stored payload. Scoped to
+                # emergency/urgent so the (small) duplicate-send window and the extra
+                # DB round-trips don't apply to routine calls.
+                persist_first = triage_result["urgency"] in ("emergency", "urgent")
 
                 # Degrade gracefully when record_outcome failed or was skipped:
                 # fall back to call metadata; CRM ids are simply absent.
@@ -403,6 +428,13 @@ async def run_post_call_pipeline(params: dict):
                     )
 
                     async def _send_sms():
+                        if persist_first:
+                            await _enqueue_owner_notification_failure(
+                                supabase, tenant_id, call_id, "sms",
+                                recipient=sms_to,
+                                payload={"from_number": to_number, "body": sms_body},
+                                reason="pending: persisted before send (high-priority)",
+                            )
                         try:
                             await asyncio.wait_for(
                                 asyncio.to_thread(
@@ -411,6 +443,8 @@ async def run_post_call_pipeline(params: dict):
                                 ),
                                 timeout=OWNER_NOTIFY_TIMEOUT_S,
                             )
+                            if persist_first:
+                                await _delete_owner_notification_failure(supabase, call_id, "sms")
                             return "sms:ok"
                         except Exception as send_err:
                             await _enqueue_owner_notification_failure(
@@ -433,6 +467,13 @@ async def run_post_call_pipeline(params: dict):
                     )
 
                     async def _send_email():
+                        if persist_first:
+                            await _enqueue_owner_notification_failure(
+                                supabase, tenant_id, call_id, "email",
+                                recipient=email_to,
+                                payload={"subject": email_subject, "html": email_html},
+                                reason="pending: persisted before send (high-priority)",
+                            )
                         try:
                             await asyncio.wait_for(
                                 asyncio.to_thread(
@@ -441,6 +482,8 @@ async def run_post_call_pipeline(params: dict):
                                 ),
                                 timeout=OWNER_NOTIFY_TIMEOUT_S,
                             )
+                            if persist_first:
+                                await _delete_owner_notification_failure(supabase, call_id, "email")
                             return "email:ok"
                         except Exception as send_err:
                             await _enqueue_owner_notification_failure(

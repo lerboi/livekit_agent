@@ -1072,3 +1072,130 @@ def test_incoming_call_vip_check_fail(client_no_auth, monkeypatch):
     assert resp.status_code == 200
     body = resp.text
     assert "<Sip>" in body  # Fail-open -> AI TwiML
+
+
+# ---------- Call-readiness gate (setup hardening, migration 078) ----------
+
+
+def test_incoming_call_not_ready_forwards_to_owner(client_no_auth, monkeypatch):
+    """Tenant not call-ready + has a pickup number -> forward to owner (NOT the AI)."""
+    tenant = {
+        "id": "t-notready",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+1111"}],
+        "dial_timeout_seconds": 25,
+        "vip_numbers": [],
+    }
+    _patch_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._is_call_ready",
+        AsyncMock(return_value=False),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-NR1"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    # Forwarded to owner: parallel-ring Dial, NOT the AI SIP path.
+    assert "<Dial" in body
+    assert "<Number>+1111</Number>" in body
+    assert 'timeout="25"' in body
+    assert "/twilio/dial-status" in body
+    assert "<Sip>" not in body
+
+
+def test_incoming_call_not_ready_no_pickup_falls_back_to_ai(client_no_auth, monkeypatch):
+    """Tenant not call-ready + NO pickup number -> AI answers anyway (never drop a call)."""
+    tenant = {
+        "id": "t-notready-nopick",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [],
+    }
+    _patch_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._is_call_ready",
+        AsyncMock(return_value=False),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-NR2"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    # Falls through to AI, dialed number templated so the agent resolves the tenant.
+    assert "sip:+15551234567@sip.livekit.cloud" in body
+    assert "<Number>" not in body
+
+
+def test_incoming_call_ready_proceeds_normally(client_no_auth, monkeypatch):
+    """Call-ready tenant is unaffected by the gate -> normal schedule routing (AI here)."""
+    tenant = {
+        "id": "t-ready",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+1111"}],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [],
+    }
+    _patch_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._is_call_ready",
+        AsyncMock(return_value=True),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-RDY"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "sip:+15551234567@sip.livekit.cloud" in body
+    assert "<Number>" not in body  # gate did not force an owner-pickup
+
+
+def test_incoming_call_readiness_check_failopen(client_no_auth, monkeypatch):
+    """A readiness-check error must NOT drop the call -> fail open to normal routing."""
+    tenant = {
+        "id": "t-rdyfail",
+        "call_forwarding_schedule": {"enabled": False, "days": {}},
+        "tenant_timezone": "UTC",
+        "country": "US",
+        "pickup_numbers": [{"number": "+1111"}],
+        "dial_timeout_seconds": 15,
+        "vip_numbers": [],
+    }
+    _patch_routing(
+        monkeypatch,
+        tenant_data=tenant,
+        schedule_decision=ScheduleDecision(mode="ai", reason="schedule_disabled"),
+    )
+    monkeypatch.setattr(
+        "src.webhook.twilio_routes._is_call_ready",
+        AsyncMock(side_effect=Exception("RPC missing / DB down")),
+    )
+    resp = client_no_auth.post(
+        "/twilio/incoming-call",
+        data={"To": "+15551234567", "From": "+15559876543", "CallSid": "CA-RDYFAIL"},
+    )
+    assert resp.status_code == 200
+    # Fail-open: gate skipped, normal AI routing proceeds (never a 500, never a drop).
+    assert "<Sip>" in resp.text

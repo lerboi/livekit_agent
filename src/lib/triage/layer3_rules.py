@@ -10,6 +10,13 @@ SEVERITY = {"emergency": 3, "urgent": 2, "routine": 1}
 # spuriously and over-escalating. Names shorter than this are skipped.
 MIN_SERVICE_NAME_LEN = 4
 
+# PC-1: this services query runs inside the 8s post-call budget, BEFORE the owner
+# alert (§7). It was previously uncapped, so a slow query could exhaust the budget
+# and the pipeline would abort before the alert fired. Cap it here — the wait_for
+# lives INSIDE the try below so a timeout is caught and returns base_urgency
+# (never propagates to discard the layer1/layer2 verdict).
+LAYER3_QUERY_TIMEOUT_S = 1.5
+
 
 async def apply_owner_rules(
     supabase: Client,
@@ -19,15 +26,20 @@ async def apply_owner_rules(
     transcript: str | None = None,
 ) -> dict:
     try:
-        response = await asyncio.to_thread(
-            lambda: supabase.table("services")
-            .select("name, urgency_tag")
-            .eq("tenant_id", tenant_id)
-            .eq("is_active", True)
-            .execute()
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: supabase.table("services")
+                .select("name, urgency_tag")
+                .eq("tenant_id", tenant_id)
+                .eq("is_active", True)
+                .execute()
+            ),
+            timeout=LAYER3_QUERY_TIMEOUT_S,
         )
         services = response.data
     except Exception:
+        # Includes asyncio.TimeoutError — on a slow query we keep the layer1/layer2
+        # verdict rather than blocking the owner-alert budget.
         return {"urgency": base_urgency, "escalated": False}
 
     if not services:

@@ -151,6 +151,33 @@ async def _is_vip_caller(tenant: dict, from_number: str) -> bool:
     return False
 
 
+async def _is_call_ready(tenant_id: str) -> bool:
+    """Whether the tenant has finished setup and verified a test call.
+
+    Single source of truth is the DB function `is_tenant_call_ready` (migration
+    078), which mirrors the dashboard's ESSENTIAL checklist tier — business
+    profile, >=1 active service, working hours, a current active/trial/past_due
+    subscription, and a connected test call. Until this is true the webhook
+    forwards inbound callers to the owner so a live caller never reaches a
+    half-configured AI.
+
+    Raises on error so the CALLER can fail open (any failure → normal AI/owner
+    routing, never worse than before this gate; if migration 078 is not yet
+    applied the RPC simply errors and the gate stays inert).
+    """
+    from src.supabase_client import get_supabase_admin
+
+    def _q():
+        return (
+            get_supabase_admin()
+            .rpc("is_tenant_call_ready", {"p_tenant_id": tenant_id})
+            .execute()
+        )
+
+    resp = await asyncio.to_thread(_q)
+    return bool(resp.data)
+
+
 # --- /twilio/incoming-call ---------------------------------------------------
 #
 # Phase 40 live routing composition (D-02):
@@ -234,6 +261,43 @@ async def incoming_call(request: Request) -> Response:
             return _xml_response(_ai_sip_twiml(to_number))
     except Exception as e:
         logger.warning("[webhook] Subscription check failed (fail-open): %s", e)
+
+    # 2.4. Call-readiness gate (setup hardening). Until the tenant has finished
+    # essential setup AND a test call has connected (is_tenant_call_ready / migration
+    # 078), DON'T expose live callers to a half-configured AI — forward to the owner
+    # (their pre-Voco status quo) instead. With no pickup number to forward to, the
+    # AI answers anyway so a call is never dropped. Fail-open: any readiness-check
+    # error (incl. migration not yet applied) leaves the normal AI/owner routing
+    # below intact — never worse than before this gate.
+    try:
+        if not await _is_call_ready(tenant["id"]):
+            pickup_numbers = [
+                p["number"]
+                for p in (tenant.get("pickup_numbers") or [])
+                if p.get("number")
+            ]
+            if pickup_numbers:
+                logger.info(
+                    "[webhook] Tenant %s not call-ready — forwarding to owner (setup gate)",
+                    tenant["id"],
+                )
+                try:
+                    await _insert_owner_pickup_call(
+                        tenant["id"], call_sid, from_number, to_number,
+                    )
+                except Exception as e:
+                    logger.warning("[webhook] Failed to insert calls row: %s", e)
+                timeout = tenant.get("dial_timeout_seconds", 15)
+                return _xml_response(
+                    _owner_pickup_twiml(from_number, pickup_numbers, timeout),
+                )
+            logger.info(
+                "[webhook] Tenant %s not call-ready and no pickup number — AI fallback",
+                tenant["id"],
+            )
+            return _xml_response(_ai_sip_twiml(to_number))
+    except Exception as e:
+        logger.warning("[webhook] Call-readiness check failed (fail-open): %s", e)
 
     # 2.5. VIP check — bypass schedule + cap for VIP callers (per D-03, D-05)
     try:
