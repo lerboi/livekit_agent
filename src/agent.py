@@ -44,6 +44,7 @@ from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
 from .integrations.xero import fetch_xero_context_bounded
 from .lib.customer_context import fetch_merged_customer_context_bounded, FETCH_UNAVAILABLE
+from .lib.feature_flags import INTEGRATIONS_ENABLED
 from .lib.phone import _normalize_phone, derive_caller_region
 
 logger = logging.getLogger("voco-agent")
@@ -403,11 +404,23 @@ async def entrypoint(ctx: JobContext):
                 _r = await coro
                 return _r, int((time.perf_counter() - _t) * 1000)
 
+            async def _fetch_customer_context_bounded():
+                # v1: Jobber/Xero integrations are flagged OFF (see
+                # homeservice_agent "My Prompts/Jobber-Xero-Disable.md"). Skip the
+                # pre-session merged-context fetch entirely so it never enters the
+                # call-setup critical path or delays the greeting. The integration
+                # modules stay importable/dormant. Flip VOCO_INTEGRATIONS_ENABLED=true
+                # to restore. caller_history (Voco's own tables, NOT an integration)
+                # continues to fetch in parallel below.
+                if not INTEGRATIONS_ENABLED:
+                    return None
+                return await fetch_merged_customer_context_bounded(
+                    tenant_id, from_number, timeout_seconds=2.5
+                )
+
             _ctx_t0 = time.perf_counter()
             (customer_context, _ctx_ms), (caller_history, _hist_ms) = await asyncio.gather(
-                _timed(fetch_merged_customer_context_bounded(
-                    tenant_id, from_number, timeout_seconds=2.5
-                )),
+                _timed(_fetch_customer_context_bounded()),
                 _timed(_fetch_caller_history_bounded()),
             )
             _ctx_elapsed = time.perf_counter() - _ctx_t0
@@ -421,19 +434,22 @@ async def entrypoint(ctx: JobContext):
             # Pre-session fanout telemetry (2026-06-12 audit M11): the gather
             # boundary row was defined but never emitted. Fire-and-forget (held by
             # this entrypoint-scoped local ref so it isn't GC'd) — the call path
-            # never waits on the insert.
-            try:
-                from .lib.telemetry import emit_integration_fetch_fanout
+            # never waits on the insert. v1: only meaningful when integrations are
+            # enabled (the row describes the integration-context fetch), so it is
+            # gated off with the rest of the integration surface.
+            if INTEGRATIONS_ENABLED:
+                try:
+                    from .lib.telemetry import emit_integration_fetch_fanout
 
-                _fanout_task = asyncio.create_task(emit_integration_fetch_fanout(
-                    supabase,
-                    tenant_id,
-                    duration_ms=int(_ctx_elapsed * 1000),
-                    per_task_ms={"merged_context": _ctx_ms, "caller_history": _hist_ms},
-                    call_id=None,
-                ))
-            except Exception as _fanout_exc:  # noqa: BLE001
-                logger.debug("[agent] fanout telemetry skipped: %s", _fanout_exc)
+                    _fanout_task = asyncio.create_task(emit_integration_fetch_fanout(
+                        supabase,
+                        tenant_id,
+                        duration_ms=int(_ctx_elapsed * 1000),
+                        per_task_ms={"merged_context": _ctx_ms, "caller_history": _hist_ms},
+                        call_id=None,
+                    ))
+                except Exception as _fanout_exc:  # noqa: BLE001
+                    logger.debug("[agent] fanout telemetry skipped: %s", _fanout_exc)
             _sources = (customer_context or {}).get("_sources") or {}
             _unique_providers = sorted(set(_sources.values()))
             _history_state = (

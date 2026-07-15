@@ -6,6 +6,7 @@ Same pattern as createTools(deps) in src/tools/index.js.
 from .check_caller_history import create_check_caller_history_tool
 from .check_customer_account import create_check_customer_account_tool
 from .capture_lead import create_capture_lead_tool
+from ..lib.feature_flags import INTEGRATIONS_ENABLED
 from .end_call import create_end_call_tool
 from .transfer_call import create_transfer_call_tool
 from .check_slot import create_check_slot_tool
@@ -34,9 +35,15 @@ def create_tools(deps: dict) -> list:
         create_capture_lead_tool(deps),
         create_validate_address_tool(deps),
         create_check_caller_history_tool(deps),
-        create_check_customer_account_tool(deps),
         create_end_call_tool(deps),
     ]
+
+    # v1: Jobber/Xero integrations are flagged OFF, so the account-lookup tool is
+    # not registered — no dead tool on the LLM's tool-selection surface and no
+    # CUSTOMER CONTEXT block in the system prompt (prompt.py already omits it when
+    # customer_context is None). See My Prompts/Jobber-Xero-Disable.md.
+    if INTEGRATIONS_ENABLED:
+        tools.append(create_check_customer_account_tool(deps))
 
     if deps.get("onboarding_complete"):
         tools.append(create_check_slot_tool(deps))
