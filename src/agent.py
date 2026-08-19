@@ -31,11 +31,12 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
-from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, room_io
+from livekit.agents import AgentSession, Agent, cli, JobContext, JobProcess, WorkerOptions, room_io
 from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
+from .lib.background import create_background_task
 from .prompt import build_system_prompt
 from .tools import create_tools
 from .tools.end_call import _delayed_disconnect
@@ -270,6 +271,20 @@ async def _flush_goodbye_diag(
             pass
 
 
+def prewarm(proc: JobProcess) -> None:
+    """Load per-process ML resources ONCE, before any job is assigned.
+
+    silero.VAD.load() builds an ONNX inference session — hundreds of ms of
+    synchronous CPU that used to run per call inside entrypoint(), stalling
+    the event loop on the pre-greeting critical path. Idle worker processes
+    prewarm it instead, so a call picks up the already-loaded VAD via
+    ctx.proc.userdata. (MultilingualModel stays per-call: its inference runs
+    in the shared inference executor; the constructor only reads a local
+    languages.json.)
+    """
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 class VocoAgent(Agent):
     """Voco AI receptionist agent with dynamic tools."""
 
@@ -368,12 +383,15 @@ async def entrypoint(ctx: JobContext):
         # appointments tables) is fetched IN PARALLEL with customer_context.
         # Pre-session injection eliminates the 3-5s first-turn silent gap
         # caused by the prior eager-invoke check_caller_history pattern
-        # (call AJ_bFP3MLdqnKqT, 2026-05-07). Both fetches share the same
-        # 2.5s budget — completion happens during greeting playout (~5-7s)
-        # so caller-perceived latency is zero.
+        # (call AJ_bFP3MLdqnKqT, 2026-05-07). All pre-session fetches share
+        # the same 2.5s budget and run in ONE gather (intake questions
+        # included — 2026-08-19) — this block IS on the pre-greeting critical
+        # path, so the budget bounds the caller's dead air before the
+        # deterministic greeting.
         customer_context = None
         _ctx_unavailable = False
         caller_history = None
+        _intake_res = None
         if tenant_id:
             from .tools.check_caller_history import fetch_caller_history
 
@@ -398,17 +416,43 @@ async def entrypoint(ctx: JobContext):
                     )
                     return None
 
+            # Intake questions + service names. This used to be a SEQUENTIAL
+            # fetch after the gather below — one extra Supabase round-trip of
+            # dead air on the pre-greeting critical path of EVERY tenant call.
+            # It depends only on tenant_id, so it now runs concurrently with
+            # the customer-context + caller-history fetches. Never raises:
+            # returns None on failure (empty intake, same as before).
+            async def _fetch_intake_services():
+                try:
+                    return await asyncio.to_thread(
+                        lambda: supabase.table("services")
+                        .select("name, intake_questions")
+                        .eq("tenant_id", tenant_id)
+                        .eq("is_active", True)
+                        .execute()
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[63.1] intake_questions fetch failed, continuing with empty: %s", e
+                    )
+                    return None
+
             async def _timed(coro):
                 _t = time.perf_counter()
                 _r = await coro
                 return _r, int((time.perf_counter() - _t) * 1000)
 
             _ctx_t0 = time.perf_counter()
-            (customer_context, _ctx_ms), (caller_history, _hist_ms) = await asyncio.gather(
+            (
+                (customer_context, _ctx_ms),
+                (caller_history, _hist_ms),
+                (_intake_res, _intake_ms),
+            ) = await asyncio.gather(
                 _timed(fetch_merged_customer_context_bounded(
                     tenant_id, from_number, timeout_seconds=2.5
                 )),
                 _timed(_fetch_caller_history_bounded()),
+                _timed(_fetch_intake_services()),
             )
             _ctx_elapsed = time.perf_counter() - _ctx_t0
             # LOW-14: distinguish a FAILED context fetch from a genuine no-match.
@@ -419,17 +463,25 @@ async def entrypoint(ctx: JobContext):
             if _ctx_unavailable:
                 customer_context = None
             # Pre-session fanout telemetry (2026-06-12 audit M11): the gather
-            # boundary row was defined but never emitted. Fire-and-forget (held by
-            # this entrypoint-scoped local ref so it isn't GC'd) — the call path
-            # never waits on the insert.
+            # boundary row was defined but never emitted. Fire-and-forget via
+            # create_background_task (strong ref held until done) — the call
+            # path never waits on the insert. duration_ms stays the
+            # integration-fetch boundary (max of the two context tasks), NOT
+            # the whole gather, so the D-07 p95 query keeps its meaning now
+            # that the intake fetch shares the gather; intake time is its own
+            # per_task_ms key.
             try:
                 from .lib.telemetry import emit_integration_fetch_fanout
 
-                _fanout_task = asyncio.create_task(emit_integration_fetch_fanout(
+                create_background_task(emit_integration_fetch_fanout(
                     supabase,
                     tenant_id,
-                    duration_ms=int(_ctx_elapsed * 1000),
-                    per_task_ms={"merged_context": _ctx_ms, "caller_history": _hist_ms},
+                    duration_ms=max(_ctx_ms, _hist_ms),
+                    per_task_ms={
+                        "merged_context": _ctx_ms,
+                        "caller_history": _hist_ms,
+                        "intake_services": _intake_ms,
+                    },
                     call_id=None,
                 ))
             except Exception as _fanout_exc:  # noqa: BLE001
@@ -449,21 +501,15 @@ async def entrypoint(ctx: JobContext):
                 _history_state,
             )
 
-        # Hoist the intake_questions fetch BEFORE session.start() so the questions
-        # are part of the initial system prompt (built below) rather than injected
-        # mid-session. Extra ~100-200ms pre-start latency is acceptable —
-        # correctness wins.
+        # Intake questions arrive from the pre-session gather above (fetched
+        # concurrently with customer_context + caller_history — previously a
+        # sequential round-trip here). Parsing is unchanged, so the questions
+        # remain part of the initial system prompt (built below) rather than
+        # injected mid-session (Phase 63.1 pattern).
         intake_questions_text = ""
         service_names: list[str] = []  # P8.2: STT keyterm source (with business name)
-        if tenant_id:
+        if tenant_id and _intake_res is not None:
             try:
-                _intake_res = await asyncio.to_thread(
-                    lambda: supabase.table("services")
-                        .select("name, intake_questions")
-                        .eq("tenant_id", tenant_id)
-                        .eq("is_active", True)
-                        .execute()
-                )
                 all_q: list[str] = []
                 for s in (_intake_res.data or []):
                     _svc_name = (s.get("name") or "").strip()
@@ -475,7 +521,7 @@ async def entrypoint(ctx: JobContext):
                 intake_questions_text = "\n".join(all_q)
                 logger.info("[63.1] intake_questions injected count=%d", len(all_q))
             except Exception as e:
-                logger.warning("[63.1] intake_questions fetch failed, continuing with empty: %s", e)
+                logger.warning("[63.1] intake_questions parse failed, continuing with empty: %s", e)
 
         system_prompt = build_system_prompt(
             locale,
@@ -664,7 +710,13 @@ async def entrypoint(ctx: JobContext):
 
         # VAD: Silero defaults for barge-in. DO NOT port the realtime model's
         # 2.5s silence value here — Phase 64 did exactly that and added ~2s/turn.
-        vad = silero.VAD.load()
+        # Loaded once per process in prewarm() (WorkerOptions.prewarm_fnc);
+        # the per-call load below is only a belt-and-braces fallback for any
+        # execution path where prewarm didn't run.
+        vad = ctx.proc.userdata.get("vad")
+        if vad is None:
+            logger.warning("[agent] prewarmed VAD missing — loading per-call")
+            vad = silero.VAD.load()
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
@@ -768,7 +820,7 @@ async def entrypoint(ctx: JobContext):
             if call_end_reason[0] in ("agent_ended", "transferred", "max_duration"):
                 return
             _recovery_started[0] = True
-            asyncio.create_task(_speak_and_end(reason, message_key))
+            create_background_task(_speak_and_end(reason, message_key))
 
         async def _no_input_sequence():
             """Caller went silent (user_state 'away'). Prompt up to
@@ -844,7 +896,7 @@ async def entrypoint(ctx: JobContext):
                 if call_end_reason[0] in ("agent_ended", "transferred", "max_duration"):
                     return
                 _no_input_seq_active[0] = True
-                asyncio.create_task(_no_input_sequence())
+                create_background_task(_no_input_sequence())
             except Exception as e:
                 logger.warning("[agent] no-input handler error: %s", e)
 
@@ -949,8 +1001,15 @@ async def entrypoint(ctx: JobContext):
             if egress_id:
                 try:
                     lk = api.LiveKitAPI()
-                    await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
-                    await lk.aclose()
+                    try:
+                        await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
+                    finally:
+                        # Close even when stop_egress raises so the aiohttp
+                        # session never leaks.
+                        try:
+                            await lk.aclose()
+                        except Exception:
+                            pass
                     # Don't poll for S3 upload completion — LiveKit handles the upload
                     # asynchronously on their infrastructure. recording_storage_path was
                     # already written to the calls row at egress start, so the dashboard
@@ -1141,12 +1200,22 @@ async def entrypoint(ctx: JobContext):
                 sub = sub_data[0] if sub_data else None
                 if sub and is_subscription_blocked(sub.get("status"), sub.get("current_period_end")):
                     logger.info(f"[agent] Subscription blocked: tenant={tenant_id} status={sub['status']} — disconnecting caller")
+                    # Record the true reason — this disconnect previously
+                    # landed as the default 'caller_hangup'.
+                    call_end_reason[0] = "subscription_blocked"
                     try:
                         lk = api.LiveKitAPI()
-                        await lk.room.remove_participant(
-                            api.RoomParticipantIdentity(room=call_id, identity=sip_participant_identity)
-                        )
-                        await lk.aclose()
+                        try:
+                            await lk.room.remove_participant(
+                                api.RoomParticipantIdentity(room=call_id, identity=sip_participant_identity)
+                            )
+                        finally:
+                            # Close even when remove_participant raises so the
+                            # aiohttp session never leaks.
+                            try:
+                                await lk.aclose()
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.error(f"[agent] Failed to disconnect blocked caller: {e}")
                     return
@@ -1162,7 +1231,7 @@ async def entrypoint(ctx: JobContext):
                 logger.error(f"[agent] Call record insert failed: {call_res}")
 
         # Fire DB queries in background — they complete while session starts + greeting plays
-        db_task = asyncio.create_task(_run_db_queries())
+        db_task = create_background_task(_run_db_queries())
 
         # ── Start session (awaited — cascade STT/LLM/TTS plugins initialize) ──
         await session.start(
@@ -1267,7 +1336,7 @@ async def entrypoint(ctx: JobContext):
                 # AFTER the greeting window, so it never fires while input is muted.
                 _greeting_done[0] = True
 
-        _greeting_unmute_task = asyncio.create_task(_unmute_after_greeting())
+        _greeting_unmute_task = create_background_task(_unmute_after_greeting())
 
         # ── Call-duration watchdog (server-side cap; prompt prose is not enforcement) ──
         async def _call_duration_watchdog():
@@ -1328,7 +1397,7 @@ async def entrypoint(ctx: JobContext):
             except Exception as e:
                 logger.error(f"[agent] duration watchdog error: {e}")
 
-        watchdog_task = asyncio.create_task(_call_duration_watchdog())
+        watchdog_task = create_background_task(_call_duration_watchdog())
 
         # ── Start Egress recording (non-blocking) ──
         async def _start_egress():
@@ -1337,27 +1406,34 @@ async def entrypoint(ctx: JobContext):
             await db_task
             try:
                 lk = api.LiveKitAPI()
-                egress_info = await lk.egress.start_room_composite_egress(
-                    api.RoomCompositeEgressRequest(
-                        room_name=call_id,
-                        audio_only=True,
-                        file_outputs=[api.EncodedFileOutput(
-                            file_type=api.EncodedFileType.OGG,
-                            filepath=recording_path,
-                            disable_manifest=True,
-                            s3=api.S3Upload(
-                                access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
-                                secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
-                                bucket="call-recordings",
-                                region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
-                                endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
-                                force_path_style=True,
-                            ),
-                        )],
+                try:
+                    egress_info = await lk.egress.start_room_composite_egress(
+                        api.RoomCompositeEgressRequest(
+                            room_name=call_id,
+                            audio_only=True,
+                            file_outputs=[api.EncodedFileOutput(
+                                file_type=api.EncodedFileType.OGG,
+                                filepath=recording_path,
+                                disable_manifest=True,
+                                s3=api.S3Upload(
+                                    access_key=os.environ.get("SUPABASE_S3_ACCESS_KEY", ""),
+                                    secret=os.environ.get("SUPABASE_S3_SECRET_KEY", ""),
+                                    bucket="call-recordings",
+                                    region=os.environ.get("SUPABASE_S3_REGION", "ap-northeast-1"),
+                                    endpoint=os.environ.get("SUPABASE_S3_ENDPOINT", ""),
+                                    force_path_style=True,
+                                ),
+                            )],
+                        )
                     )
-                )
-                egress_id = egress_info.egress_id
-                await lk.aclose()
+                    egress_id = egress_info.egress_id
+                finally:
+                    # Close even when the egress start raises so the aiohttp
+                    # session never leaks.
+                    try:
+                        await lk.aclose()
+                    except Exception:
+                        pass
                 logger.info(f"[agent] Egress started: {egress_id}")
 
                 if deps.get("call_uuid"):
@@ -1370,7 +1446,9 @@ async def entrypoint(ctx: JobContext):
             except Exception as e:
                 logger.error(f"[agent] Failed to start egress: {e}")
 
-        asyncio.create_task(_start_egress())
+        # Held reference (lib/background): a GC'd egress task would silently
+        # skip the recording with no error anywhere.
+        create_background_task(_start_egress())
 
     except Exception as e:
         logger.error(f"[agent] Entry function error: {e}", exc_info=True)
@@ -1420,6 +1498,7 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
             agent_name="voco-voice-agent",
         )
     )

@@ -3,10 +3,8 @@ Utility functions for the LiveKit agent.
 Ported from src/utils.js -- same logic, same behavior.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-
-from .lib.slot_calculator import calculate_available_slots
 
 
 def _ordinal(n: int) -> str:
@@ -75,85 +73,3 @@ def to_local_date_string(date: str | datetime, tz: str | None = None) -> str:
 def format_zone_pair_buffers(buffers: list[dict] | None) -> list[dict]:
     """Format zone_travel_buffers array -- pass through as-is."""
     return buffers or []
-
-
-def calculate_initial_slots(supabase, tenant: dict) -> str:
-    """
-    Calculate initial slots for today + next 2 days (same logic as handleInbound).
-    Returns formatted numbered list string.
-
-    NOTE: This function is synchronous and should be called via
-    asyncio.to_thread() from async callers.
-    """
-    tenant_timezone = tenant.get("tenant_timezone") or "America/Chicago"
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Fetch scheduling data
-    appointments_result = (
-        supabase.table("appointments")
-        .select("start_time, end_time, zone_id")
-        .eq("tenant_id", tenant["id"])
-        .neq("status", "cancelled")
-        .gte("end_time", now_iso)
-        .execute()
-    )
-
-    events_result = (
-        supabase.table("calendar_events")
-        .select("start_time, end_time, is_all_day")
-        .eq("tenant_id", tenant["id"])
-        .gte("end_time", now_iso)
-        .execute()
-    )
-
-    zones_result = (
-        supabase.table("service_zones")
-        .select("id, name, postal_codes")
-        .eq("tenant_id", tenant["id"])
-        .execute()
-    )
-
-    buffers_result = (
-        supabase.table("zone_travel_buffers")
-        .select("zone_a_id, zone_b_id, buffer_mins")
-        .eq("tenant_id", tenant["id"])
-        .execute()
-    )
-
-    all_slots: list[dict] = []
-    for day_offset in range(3):
-        if len(all_slots) >= 6:
-            break
-
-        target_date = datetime.now(timezone.utc) + timedelta(days=day_offset)
-        target_date_str = to_local_date_string(target_date, tenant_timezone)
-
-        day_slots = calculate_available_slots(
-            working_hours=tenant.get("working_hours") or {},
-            slot_duration_mins=tenant.get("slot_duration_mins") or 60,
-            existing_bookings=appointments_result.data or [],
-            external_blocks=events_result.data or [],
-            zones=zones_result.data or [],
-            zone_pair_buffers=format_zone_pair_buffers(buffers_result.data or []),
-            target_date=target_date_str,
-            tenant_timezone=tenant_timezone,
-            max_slots=6 - len(all_slots),
-            travel_buffer_mins=tenant.get("travel_buffer_mins", 30),
-        )
-        all_slots.extend(day_slots)
-
-    if len(all_slots) == 0:
-        return ""
-
-    lines = []
-    for i, slot in enumerate(all_slots):
-        iso_str = slot["start"]
-        if iso_str.endswith("Z"):
-            iso_str = iso_str[:-1] + "+00:00"
-        zoned_start = datetime.fromisoformat(iso_str).astimezone(
-            ZoneInfo(tenant_timezone)
-        )
-        lines.append(f"{i + 1}. {_format_datetime_for_speech(zoned_start)}")
-
-    return "\n".join(lines)

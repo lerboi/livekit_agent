@@ -76,14 +76,23 @@ def create_transfer_call_tool(deps: dict):
         # Perform SIP REFER transfer via LiveKit
         try:
             lk = api.LiveKitAPI()
-            await lk.sip.transfer_sip_participant(
-                api.TransferSIPParticipantRequest(
-                    participant_identity=deps["sip_participant_identity"],
-                    room_name=deps["room_name"],
-                    transfer_to=f"sip:{owner_phone}@pstn.twilio.com",
+            try:
+                await lk.sip.transfer_sip_participant(
+                    api.TransferSIPParticipantRequest(
+                        participant_identity=deps["sip_participant_identity"],
+                        room_name=deps["room_name"],
+                        transfer_to=f"sip:{owner_phone}@pstn.twilio.com",
+                    )
                 )
-            )
-            await lk.aclose()
+            finally:
+                # Close even when the REFER raises — otherwise the aiohttp
+                # session leaks on every failed transfer. Best-effort: a
+                # close error must never turn a successful REFER into the
+                # transfer_failed branch below.
+                try:
+                    await lk.aclose()
+                except Exception:
+                    pass
             return (
                 "STATE:transfer_initiated"
                 " | DIRECTIVE:tell the caller you are connecting them now; keep the utterance"

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from livekit.agents import function_tool, RunContext
 
+from ..lib.background import create_background_task
 from ..lib.booking import atomic_book_slot
 from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
@@ -447,20 +448,27 @@ def create_book_appointment_tool(deps: dict):
             deps["_last_tool_state"] = cached_response
             return cached_response
 
-        # Fetch tenant timezone and config
-        # select("*") (parity with agent.py) instead of a named list so the live
-        # booking path stays fail-open if travel_buffer_mins (migration 075) isn't
-        # applied yet — a named column would make PostgREST 400 the whole query
-        # pre-migration, breaking booking; the value is read via the None-safe
-        # tenant.get("travel_buffer_mins", 30) below.
-        tenant_result = await asyncio.to_thread(
-            lambda: supabase.table("tenants")
-            .select("*")
-            .eq("id", tenant_id)
-            .single()
-            .execute()
-        )
-        tenant = tenant_result.data if tenant_result.data else None
+        # Tenant config: reuse the session-init row (agent.py fetched
+        # select("*") at call start; the availability tools already price
+        # slots off it via ensure_tenant) instead of paying an awaited
+        # round-trip inside the most latency-sensitive tool. Live fetch stays
+        # as the fallback for any path where deps["tenant"] was never
+        # populated. select("*") (parity with agent.py) instead of a named
+        # list so the live booking path stays fail-open if travel_buffer_mins
+        # (migration 075) isn't applied yet — a named column would make
+        # PostgREST 400 the whole query pre-migration, breaking booking; the
+        # value is read via the None-safe tenant.get("travel_buffer_mins", 30)
+        # below.
+        tenant = deps.get("tenant")
+        if not tenant:
+            tenant_result = await asyncio.to_thread(
+                lambda: supabase.table("tenants")
+                .select("*")
+                .eq("id", tenant_id)
+                .single()
+                .execute()
+            )
+            tenant = tenant_result.data if tenant_result.data else None
         tenant_timezone = tenant.get("tenant_timezone") if tenant else None
         if not tenant_timezone:
             logger.warning(
@@ -608,7 +616,7 @@ def create_book_appointment_tool(deps: dict):
             # between them), so it's race-safe on the single-threaded event loop.
             if not deps.get("_recovery_sms_fired"):
                 deps["_recovery_sms_fired"] = True
-                asyncio.create_task(
+                create_background_task(
                     _send_recovery_sms(deps, tenant, normalized_urgency, caller_name)
                 )
 
@@ -772,7 +780,7 @@ def create_book_appointment_tool(deps: dict):
                     )
                 except Exception as cal_err:
                     logger.error("[agent] Calendar push failed: %s", str(cal_err))
-            asyncio.create_task(_push_calendar_bg())
+            create_background_task(_push_calendar_bg())
 
         # Caller SMS confirmation — truly fire-and-forget for the same reason.
         sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
@@ -791,7 +799,7 @@ def create_book_appointment_tool(deps: dict):
                 )
             except Exception as sms_err:
                 logger.error("[agent] Caller SMS failed: %s", str(sms_err))
-        asyncio.create_task(_send_confirmation_sms_bg())
+        create_background_task(_send_confirmation_sms_bg())
 
         return return_msg
 

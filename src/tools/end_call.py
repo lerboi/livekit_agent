@@ -12,6 +12,8 @@ import sentry_sdk
 from livekit import api
 from livekit.agents import function_tool, RunContext
 
+from ..lib.background import create_background_task
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,7 +99,9 @@ def create_end_call_tool(deps: dict):
             pass  # diagnostic breadcrumb must never block tool execution
 
         deps["call_end_reason"][0] = "agent_ended"
-        asyncio.create_task(_delayed_disconnect(deps))
+        # Held reference (lib/background) — a GC'd disconnect task would leave
+        # the room open until the 10-min duration watchdog.
+        create_background_task(_delayed_disconnect(deps))
         # Let any in-flight sentence finish naturally (the disconnect task
         # waits for playout). The directive only prevents Gemini from
         # starting a NEW turn after the current one completes.

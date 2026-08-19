@@ -45,6 +45,16 @@ logger = logging.getLogger(__name__)
 SLOT_CACHE_TTL_S = 30.0
 SLOT_TOKEN_TTL_S = 600.0
 
+# Minimum notice for SAME-DAY slots (seconds). Mirrors check_slot's too_soon
+# rule (min_notice=1h). The slot calculator only drops slots that have already
+# STARTED, so without this floor check_day / next_available_days (and
+# check_slot's match/alternatives paths) could offer — and token-register — a
+# slot starting minutes from now; book_appointment would then book it with
+# less notice than check_slot itself enforces (a caller could book a slot
+# starting in 1 minute). Applied in calc_slots_for_dates for today only;
+# future days are unaffected.
+MIN_NOTICE_TODAY_S = 3600.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Slot-token registry
@@ -249,14 +259,30 @@ async def fetch_scheduling_data(deps: dict) -> dict | None:
 # Slot math
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _slot_start_dt_utc(slot: dict) -> datetime:
+    """Parse a slot's start ISO (Z- or offset-suffixed) to an aware datetime."""
+    s = slot["start"]
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
 def calc_slots_for_dates(
     tenant: dict,
     dates: list[str],
     sched: dict,
     tenant_timezone: str,
 ) -> list[dict]:
-    """Flatten calculate_available_slots() across one or more dates."""
+    """Flatten calculate_available_slots() across one or more dates.
+
+    Same-day slots starting inside the MIN_NOTICE_TODAY_S window are dropped
+    so every consumer (check_slot matching/alternatives, check_day OPTIONS,
+    next_available_days counts) shares the exact min-notice policy that
+    check_slot's too_soon branch enforces on explicit requests.
+    """
     slot_duration = tenant.get("slot_duration_mins") or 60
+    today_local = tenant_today(tenant_timezone)
+    min_start_utc = datetime.now(timezone.utc) + timedelta(seconds=MIN_NOTICE_TODAY_S)
     all_slots: list[dict] = []
     for date_str in dates:
         day_slots = calculate_available_slots(
@@ -271,6 +297,10 @@ def calc_slots_for_dates(
             max_slots=50,
             travel_buffer_mins=tenant.get("travel_buffer_mins", 30),
         )
+        if date_str == today_local:
+            day_slots = [
+                s for s in day_slots if _slot_start_dt_utc(s) >= min_start_utc
+            ]
         all_slots.extend(day_slots)
     return all_slots
 
