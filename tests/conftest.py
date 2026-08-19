@@ -14,11 +14,20 @@ Address Validation API response fixtures (tests/fixtures/gmaps_responses/).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# v1 ships the Jobber/Xero integrations flagged OFF (see homeservice_agent
+# "My Prompts/Jobber-Xero-Disable.md"). The existing agent tests exercise the
+# ENABLED path (check_customer_account registered, pre-session merged-context
+# fetch active), so enable the flag for tests to keep that coverage; production
+# defaults to off. Must run before any `src.*` import so the module-level
+# constant in src/lib/feature_flags.py reads it.
+os.environ.setdefault("VOCO_INTEGRATIONS_ENABLED", "true")
 
 
 @pytest.fixture
