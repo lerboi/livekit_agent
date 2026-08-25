@@ -134,6 +134,17 @@ PREEMPTIVE_GENERATION = (
     os.environ.get("VOCO_PREEMPTIVE_GENERATION", "true").strip().lower() != "false"
 )
 
+# 2026-08-25 latency pass: endpointing delays — how long the session waits
+# after the caller's speech before treating the turn as finished. SDK 1.5.7
+# defaults are 0.5s min and 3.0s max (the max applies whenever the semantic
+# turn detector thinks the caller may not be done — common on addresses,
+# numbers, and hesitant speech), which produced 0.5-3s of dead air before the
+# LLM even started. 0.4/2.0 keeps the semantic detector's protection against
+# talking over slow speakers while cutting the worst-case wait by a full
+# second. Env-overridable for instant rollback/tuning without a deploy.
+MIN_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MIN_ENDPOINTING_DELAY_S", "0.4"))
+MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "2.0"))
+
 # 2026-06-11 naturalness pass (findings.md P8.2): Deepgram nova-3 keyterm
 # prompting (business name + active service names) to cut the address/name
 # mis-hearing class ("Canberra" -> "Kenberg", call eef9f785). DEFAULT OFF:
@@ -787,6 +798,12 @@ async def entrypoint(ctx: JobContext):
             # final transcript differs) — cuts perceived response latency.
             # VOCO_PREEMPTIVE_GENERATION=false reverts to the old behavior.
             preemptive_generation=PREEMPTIVE_GENERATION,
+            # 2026-08-25 latency pass: shrink the post-speech wait (SDK defaults
+            # 0.5/3.0 — see the constants above). Passed via the same kwarg
+            # style as the rest of this constructor; SDK 1.5.7 honors these
+            # directly (agent_session.py maps them onto turn_handling).
+            min_endpointing_delay=MIN_ENDPOINTING_DELAY_S,
+            max_endpointing_delay=MAX_ENDPOINTING_DELAY_S,
         )
         deps["session"] = session
 
