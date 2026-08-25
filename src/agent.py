@@ -335,6 +335,14 @@ async def entrypoint(ctx: JobContext):
         if is_test_call and room_meta.get("to_number"):
             to_number = room_meta["to_number"]
 
+        # Web test console (admin): a browser participant has no SIP attributes,
+        # so from_number is empty. The admin console can simulate a caller number
+        # via room metadata (exercises the repeat-caller/caller-history path,
+        # read-only). Only honored on test calls — room metadata is set
+        # server-side by the admin route; the browser token cannot alter it.
+        if is_test_call and not from_number and room_meta.get("from_number"):
+            from_number = str(room_meta["from_number"])
+
         # Normalize phone numbers to E.164 for reliable tenant lookup.
         # LiveKit SIP attributes may include sip:/tel: prefixes or @domain suffixes.
         # _normalize_phone is imported from src/lib/phone.py (extracted in Plan 39-04
@@ -595,6 +603,14 @@ async def entrypoint(ctx: JobContext):
             "start_timestamp": start_timestamp,
             "onboarding_complete": onboarding_complete,
             "tenant_timezone": tenant_timezone,
+            # Test-call sandbox flag (room metadata test_call: true). Tools gate
+            # their real-world side effects on this: book_appointment skips the
+            # calendar push + caller SMS + recovery SMS, capture_lead skips the
+            # record_call_outcome RPC (no CRM writes). The post-call pipeline
+            # additionally skips record_outcome + owner notifications. The
+            # conversation flow itself (tools, slot math, triage, transcript,
+            # recording) is unchanged so tests stay realistic.
+            "is_test_call": is_test_call,
             # Tenant's ISO country code (e.g. "GB", "AU"). Read by
             # book_appointment.py / capture_lead.py as the address-validation
             # region_code; without it those tools always fell back to "US"
@@ -981,7 +997,15 @@ async def entrypoint(ctx: JobContext):
 
         # ── Handle session end (post-call pipeline) — registered BEFORE start to avoid race ──
         egress_id = None
-        recording_path = f"{tenant_id}/{call_id}.ogg" if tenant_id else f"{call_id}.ogg"
+        # Test calls record as audio-only MP4 (AAC) so the admin test console can
+        # offer a directly downloadable/playable .mp4; production calls stay OGG
+        # (Opus — the dashboard's existing playback path). Both are supported
+        # audio-only egress outputs (MP4 is in LiveKit's AudioOnlyFileOutputTypes).
+        _recording_ext = "mp4" if is_test_call else "ogg"
+        recording_path = (
+            f"{tenant_id}/{call_id}.{_recording_ext}" if tenant_id
+            else f"{call_id}.{_recording_ext}"
+        )
         # Call-duration watchdog task — created after session.start() below;
         # referenced here (closure) so it can be cancelled on normal close.
         watchdog_task = None
@@ -1114,21 +1138,24 @@ async def entrypoint(ctx: JobContext):
                 .limit(1)
                 .execute()
             )
+            # Test-call marker (migration 079): included ONLY for test calls so
+            # production inserts never reference the column — a lagging migration
+            # can break test calls but never a real customer call (fail-open).
+            _call_row = {
+                "call_id": call_id,
+                "tenant_id": tenant_id,
+                "from_number": from_number,
+                "to_number": to_number,
+                "direction": "inbound",
+                "status": "started",
+                "start_timestamp": start_timestamp,
+                "call_provider": "livekit",
+            }
+            if is_test_call:
+                _call_row["is_test_call"] = True
             call_task = asyncio.to_thread(
                 lambda: supabase.table("calls")
-                .upsert(
-                    {
-                        "call_id": call_id,
-                        "tenant_id": tenant_id,
-                        "from_number": from_number,
-                        "to_number": to_number,
-                        "direction": "inbound",
-                        "status": "started",
-                        "start_timestamp": start_timestamp,
-                        "call_provider": "livekit",
-                    },
-                    on_conflict="call_id",
-                )
+                .upsert(_call_row, on_conflict="call_id")
                 .execute()
             )
 
@@ -1216,7 +1243,16 @@ async def entrypoint(ctx: JobContext):
             if not isinstance(sub_res, Exception):
                 sub_data = sub_res.data
                 sub = sub_data[0] if sub_data else None
-                if sub and is_subscription_blocked(sub.get("status"), sub.get("current_period_end")):
+                if sub and is_subscription_blocked(sub.get("status"), sub.get("current_period_end")) and is_test_call:
+                    # Test calls bypass the gate so an admin can exercise the agent
+                    # for a canceled/past-due tenant. Safe: room metadata is set by
+                    # the server-side admin route only, and test calls are excluded
+                    # from usage billing in post_call.
+                    logger.info(
+                        f"[agent] Subscription blocked (status={sub['status']}) but this is a "
+                        f"test call — bypassing gate for tenant={tenant_id}"
+                    )
+                elif sub and is_subscription_blocked(sub.get("status"), sub.get("current_period_end")):
                     logger.info(f"[agent] Subscription blocked: tenant={tenant_id} status={sub['status']} — disconnecting caller")
                     # Record the true reason — this disconnect previously
                     # landed as the default 'caller_hangup'.
@@ -1430,7 +1466,10 @@ async def entrypoint(ctx: JobContext):
                             room_name=call_id,
                             audio_only=True,
                             file_outputs=[api.EncodedFileOutput(
-                                file_type=api.EncodedFileType.OGG,
+                                file_type=(
+                                    api.EncodedFileType.MP4 if is_test_call
+                                    else api.EncodedFileType.OGG
+                                ),
                                 filepath=recording_path,
                                 disable_manifest=True,
                                 s3=api.S3Upload(

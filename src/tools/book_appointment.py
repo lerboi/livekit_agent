@@ -614,7 +614,8 @@ def create_book_appointment_tool(deps: dict):
             # is a generic "couldn't book you" message, not slot-specific, so one per
             # call is the correct semantic. The check + set is synchronous (no await
             # between them), so it's race-safe on the single-threaded event loop.
-            if not deps.get("_recovery_sms_fired"):
+            # Test-call sandbox: never text the (possibly simulated) caller number.
+            if not deps.get("is_test_call") and not deps.get("_recovery_sms_fired"):
                 deps["_recovery_sms_fired"] = True
                 create_background_task(
                     _send_recovery_sms(deps, tenant, normalized_urgency, caller_name)
@@ -768,6 +769,17 @@ def create_book_appointment_tool(deps: dict):
                 )
             except Exception:
                 pass  # non-critical — post-call pipeline has fallback
+
+        # Test-call sandbox: the appointment row itself is created (realistic
+        # flow; post_call auto-cancels it), but no external side effects — no
+        # Google/Outlook calendar event (auto-cancel can't remove those) and no
+        # SMS to the (possibly simulated) caller number.
+        if deps.get("is_test_call"):
+            logger.info(
+                "[book_appointment] test call — skipping calendar push + caller SMS "
+                "for appointment=%s", appointment_id,
+            )
+            return return_msg
 
         # Calendar sync — truly fire-and-forget so the tool returns quickly. A slow tool
         # (awaited side effects) caused the AI to go silent, which let the caller's speech
