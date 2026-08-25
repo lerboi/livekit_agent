@@ -179,26 +179,44 @@ async def run_post_call_pipeline(params: dict):
             logger.error(f"[post-call] Booking reconciliation error: {e}", exc_info=True)
 
     # ── 3. Test call auto-cancel ──
+    # Cancels EVERY appointment the test call created (previously limit(1) —
+    # a test that booked twice leaked the second appointment). Two sources,
+    # union'd: appointments whose call_id FK was backfilled, plus the
+    # appointment_ids recorded in the tool_call_log (covers rows whose FK
+    # backfill lost the db_task race and stayed NULL).
     if is_test_call and tenant_id:
         try:
-            test_appt_resp = await asyncio.to_thread(
-                lambda: supabase.table("appointments")
-                .select("id")
-                .eq("call_id", call_uuid)
-                .eq("tenant_id", tenant_id)
-                .limit(1)
-                .execute()
-            )
-            test_appt = test_appt_resp.data[0] if test_appt_resp.data else None
+            _test_appt_ids: set = set()
+            if call_uuid:
+                test_appt_resp = await asyncio.to_thread(
+                    lambda: supabase.table("appointments")
+                    .select("id")
+                    .eq("call_id", call_uuid)
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                )
+                _test_appt_ids.update(
+                    row["id"] for row in (test_appt_resp.data or []) if row.get("id")
+                )
+            for entry in (params.get("tool_call_log") or []):
+                if entry.get("name") == "book_appointment" and entry.get("appointment_id"):
+                    _test_appt_ids.add(entry["appointment_id"])
 
-            if test_appt:
+            if _test_appt_ids:
                 # Phase 59 D-02a: legacy `leads` table is dropped (migration 061).
-                # Cancelling the appointment alone suffices — the associated
-                # customer row stays (desirable: remembers the test caller) and
-                # any linked job can be cleaned up by a follow-up phase if the
-                # appointment-cancel cascade proves insufficient.
+                # Cancelling the appointments alone suffices — for sandboxed test
+                # calls no customer/job/inquiry rows are created at all (see the
+                # is_test_call gate on record_outcome below).
+                _ids = list(_test_appt_ids)
                 await asyncio.to_thread(
-                    lambda: supabase.table("appointments").update({"status": "cancelled"}).eq("id", test_appt["id"]).execute()
+                    lambda: supabase.table("appointments")
+                    .update({"status": "cancelled"})
+                    .in_("id", _ids)
+                    .eq("tenant_id", tenant_id)
+                    .execute()
+                )
+                logger.info(
+                    "[post-call] Test call auto-cancelled %d appointment(s)", len(_ids)
                 )
         except Exception as e:
             logger.error(f"[post-call] Test call auto-cancel error: {e}", exc_info=True)
@@ -301,7 +319,17 @@ async def run_post_call_pipeline(params: dict):
     )
     job_type = _extract_field_from_transcript(transcript_turns, "job")
     lead: dict | None = None  # shape-compat dict for the Section 7 notification block
-    if call_uuid and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
+    # Test-call sandbox: NEVER write CRM rows for a test call. The
+    # record_call_outcome RPC upserts customers by phone — a simulated caller
+    # number matching a real customer would merge the test call into their
+    # real history. The calls row (flagged is_test_call, migration 079) is the
+    # test call's only durable record.
+    if is_test_call:
+        logger.info(
+            "[post-call] Test call — skipping record_outcome (no customer/job/"
+            "inquiry writes). call_id=%s", call_id,
+        )
+    elif call_uuid and duration_seconds >= MIN_BILLABLE_DURATION_SEC:
         try:
             # Prefer the appointment_id returned directly from the booking tool;
             # fall back to the FK lookup only if we don't have it.
@@ -353,7 +381,13 @@ async def run_post_call_pipeline(params: dict):
     # only enriches the message; when it is None we degrade to call metadata
     # (caller number + transcript-derived name/job, no CRM ids/address) so a
     # transient DB error can never silently drop an EMERGENCY alert.
-    if tenant_id and tenant:
+    # Test-call sandbox: no real SMS/email to the owner — the admin test
+    # console shows the triage + outcome from the calls row instead.
+    if is_test_call:
+        logger.info(
+            "[post-call] Test call — skipping owner notifications. call_id=%s", call_id,
+        )
+    elif tenant_id and tenant:
         try:
             tenant_info_resp = await asyncio.to_thread(
                 lambda: supabase.table("tenants")

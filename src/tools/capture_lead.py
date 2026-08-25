@@ -153,27 +153,39 @@ def create_capture_lead_tool(deps: dict):
             job_type_value = f"{job_type_value} — {notes}" if job_type_value else notes
 
         try:
-            # Phase 59 D-10 inquiry path: appointment_id=None → record_call_outcome
-            # upserts the customer and creates an inquiry row (not a job). No direct
-            # writes to legacy leads/lead_calls (D-02a).
-            outcome = await record_outcome(
-                supabase,
-                tenant_id=tenant_id,
-                raw_phone=raw_phone,
-                caller_name=caller_name or None,
-                service_address=service_address,
-                appointment_id=None,
-                urgency="routine",
-                call_id=call_uuid,
-                job_type=job_type_value,
-                # Phase 61 NEW — pass validation result fields through:
-                formatted_address=validation_result.get("formatted_address"),
-                place_id=validation_result.get("place_id"),
-                latitude=validation_result.get("latitude"),
-                longitude=validation_result.get("longitude"),
-                address_components=validation_result.get("address_components"),
-                address_validation_verdict=validation_verdict,
-            )
+            # Test-call sandbox: skip the record_call_outcome RPC entirely — it
+            # upserts customers by phone, so a simulated caller number matching a
+            # real customer would merge the test into their real CRM history.
+            # The verdict-driven return below is unchanged, so the conversation
+            # (and what the admin hears) is identical to production.
+            if deps.get("is_test_call"):
+                logger.info(
+                    "[capture_lead] test call — skipping record_outcome "
+                    "(no CRM writes) call=%s", deps.get("call_id"),
+                )
+                outcome = {}
+            else:
+                # Phase 59 D-10 inquiry path: appointment_id=None → record_call_outcome
+                # upserts the customer and creates an inquiry row (not a job). No direct
+                # writes to legacy leads/lead_calls (D-02a).
+                outcome = await record_outcome(
+                    supabase,
+                    tenant_id=tenant_id,
+                    raw_phone=raw_phone,
+                    caller_name=caller_name or None,
+                    service_address=service_address,
+                    appointment_id=None,
+                    urgency="routine",
+                    call_id=call_uuid,
+                    job_type=job_type_value,
+                    # Phase 61 NEW — pass validation result fields through:
+                    formatted_address=validation_result.get("formatted_address"),
+                    place_id=validation_result.get("place_id"),
+                    latitude=validation_result.get("latitude"),
+                    longitude=validation_result.get("longitude"),
+                    address_components=validation_result.get("address_components"),
+                    address_validation_verdict=validation_verdict,
+                )
 
             # M16 P1 (Capability A): persist the out-of-area flag on the inquiry
             # for CRM visibility. Re-classify from THIS tool's validation_result
