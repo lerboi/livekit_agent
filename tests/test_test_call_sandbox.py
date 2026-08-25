@@ -141,3 +141,26 @@ def test_post_call_auto_cancel_covers_all_appointments():
 def test_usage_tracking_still_excludes_test_calls():
     # Pre-existing behavior locked down: test calls never bill.
     assert "if not is_test_call and tenant_id and duration_seconds" in _read("post_call.py")
+
+
+# ── agent.py — test-call voice override ────────────────────────────────────
+
+
+def test_voice_override_only_on_test_calls():
+    src = _read("agent.py")
+    override_idx = src.find('room_meta.get("voice_override")')
+    assert override_idx != -1, "voice override must read from server-set room metadata"
+    # The override read must sit inside the test-call gate so production voice
+    # resolution can never be affected by room metadata.
+    gate_idx = src.rfind("if is_test_call:", 0, override_idx)
+    resolve_idx = src.find("voice_id = _resolve_voice(ai_voice, tone_preset)")
+    assert gate_idx != -1 and resolve_idx != -1
+    assert resolve_idx < gate_idx < override_idx, (
+        "the override must be gated on is_test_call AFTER normal voice resolution"
+    )
+
+
+def test_voice_override_shape_guarded():
+    assert 're.fullmatch(r"[A-Za-z0-9]{10,40}"' in _read("agent.py"), (
+        "a malformed voice_override must never reach the ElevenLabs TTS constructor"
+    )

@@ -678,6 +678,26 @@ async def entrypoint(ctx: JobContext):
             ai_voice, tone_preset, voice_id,
         )
 
+        # Test-call voice override (admin web test console): lets an admin hear
+        # candidate ElevenLabs voices without touching the tenant's production
+        # voice. Honored ONLY on test calls — the metadata is server-set by the
+        # verifyAdmin session route against its own allowlist; the browser token
+        # cannot alter it. The shape guard keeps a malformed value from reaching
+        # the TTS constructor (production resolution above stays untouched).
+        if is_test_call:
+            _voice_override = str(room_meta.get("voice_override") or "").strip()
+            if _voice_override and re.fullmatch(r"[A-Za-z0-9]{10,40}", _voice_override):
+                logger.info(
+                    "[agent] test call — voice override %r (was %r)",
+                    _voice_override, voice_id,
+                )
+                voice_id = _voice_override
+            elif _voice_override:
+                logger.warning(
+                    "[agent] test call — ignoring malformed voice_override=%r",
+                    _voice_override,
+                )
+
         # Phase 66: cascaded STT -> LLM -> TTS pipeline (replaces the single
         # gpt-realtime-2 speech-to-speech model). The migration rationale is
         # tool-calling reliability: a strong text LLM (gpt-4.1-mini) is a more
