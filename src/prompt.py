@@ -30,7 +30,11 @@ with open(_messages_dir / "es.json", "r", encoding="utf-8") as f:
 _messages = {"en": _en, "es": _es}
 
 TONE_LABELS = {
-    "professional": "measured and formal",
+    # 2026-08-25 naturalness: was "measured and formal" — "measured" read as an
+    # instruction to speak slowly/deliberately and "formal" stiffened sentence
+    # shape; this label lands in the prompt's FIRST sentence, so it set the
+    # pace for the whole call on the default preset.
+    "professional": "polished, warm, and efficient",
     "friendly": "upbeat and warm",
     "local_expert": "relaxed and neighborly",
 }
@@ -52,8 +56,8 @@ def _build_identity_section(
         f"You are the AI phone receptionist for {business_name}. "
         f"Your personality is {tone_label}. "
         "This is a live phone call — speak naturally and conversationally. "
-        "Be concise, but never rush through important details like appointment confirmations, "
-        "addresses, or scheduling information.\n"
+        "Be concise, and be clear on important details like appointment confirmations, "
+        "addresses, and scheduling information.\n"
         "\n"
         "UNMISTAKABLE INVARIANT: You may never speak a specific clock time, date, or the words "
         "'available', 'not available', 'booked', 'confirmed', or 'all set' unless a tool "

@@ -101,6 +101,18 @@ LLM_MODEL = "gpt-4.1-mini"
 # cascaded pipeline (GeminiTTS's ~1.3s first-byte is what killed Phase 64).
 ELEVENLABS_TTS_MODEL = "eleven_flash_v2_5"
 
+# 2026-08-25 naturalness: explicit voice settings so speech pace is a dial,
+# not the voice recording's default cadence. speed 1.08 is a light briskness
+# lift (ElevenLabs supports 0.7-1.2; 1.0 = the voice's natural pace) — the
+# production voices read sluggish at their defaults. stability 0.5 /
+# similarity 0.75 are ElevenLabs' standard conversational defaults
+# (VoiceSettings requires both, so they must be stated to set speed at all).
+# All env-overridable on Railway for live tuning without a deploy; set
+# VOCO_TTS_SPEED=1.0 to restore the previous pace.
+TTS_SPEED = float(os.environ.get("VOCO_TTS_SPEED", "1.08"))
+TTS_STABILITY = float(os.environ.get("VOCO_TTS_STABILITY", "0.5"))
+TTS_SIMILARITY = float(os.environ.get("VOCO_TTS_SIMILARITY", "0.75"))
+
 # LK-B1: OpenAI TTS used as the ElevenLabs FALLBACK (FallbackAdapter below) so a
 # single ElevenLabs outage doesn't dead-air every call fleet-wide. OPENAI_API_KEY
 # is already a boot-preflight requirement (it powers the LLM). Env-overridable;
@@ -754,7 +766,25 @@ async def entrypoint(ctx: JobContext):
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
-        _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+        # voice_settings construction is fail-open: if the plugin's VoiceSettings
+        # surface ever shifts on an upgrade, we fall back to the pre-2026-08-25
+        # construction (voice defaults, natural pace) rather than breaking calls.
+        try:
+            _voice_settings = elevenlabs.VoiceSettings(
+                stability=TTS_STABILITY,
+                similarity_boost=TTS_SIMILARITY,
+                speed=TTS_SPEED,
+            )
+            _eleven_tts = elevenlabs.TTS(
+                model=ELEVENLABS_TTS_MODEL,
+                voice_id=voice_id,
+                voice_settings=_voice_settings,
+            )
+        except Exception as _vs_err:  # noqa: BLE001
+            logger.warning(
+                "[agent] VoiceSettings unavailable (%s); using voice defaults", _vs_err
+            )
+            _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
         # LK-B1: wrap ElevenLabs in a FallbackAdapter that fails over to OpenAI TTS
         # mid-call if ElevenLabs errors/times out, so one vendor outage doesn't
         # leave the caller in silence on every call. Construction is wrapped: if
