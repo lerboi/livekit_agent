@@ -1147,6 +1147,14 @@ def build_system_prompt(
     LANGUAGE section ('Default to English…' vs 'This business operates in
     Spanish…'). Everything else is locale-invariant.
 
+    Section layout is cache-aware (2026-09-01): every tenant-stable section
+    comes first and the per-caller blocks (`caller_history`,
+    `customer_context`) are the last thing before the FINAL recap, so the
+    prompt prefix is byte-identical across calls to the same tenant and
+    OpenAI prompt caching can serve it. Nothing time-dependent is rendered
+    here (agent.py appends the "Today is …" line AFTER this function
+    returns, at the very end).
+
     Args:
         locale: Language locale ('en' or 'es') — selects the LANGUAGE
             section's tenant-default-language line only.
@@ -1188,8 +1196,6 @@ def build_system_prompt(
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t, locale),
         _build_repeat_caller_section(onboarding_complete),
-        _build_caller_history_section(caller_history),
-        _build_customer_account_section(customer_context, locale),
         _build_info_gathering_section(t, postal_label, locale),
         _build_intake_questions_section(intake_questions, locale),
         _build_booking_section(business_name, onboarding_complete, postal_label, locale),
@@ -1201,6 +1207,26 @@ def build_system_prompt(
     sections.extend(
         [
             _build_transfer_section(business_name, locale),
+        ]
+    )
+
+    # 2026-09-01 prompt caching: the two PER-CALLER blocks (caller history,
+    # CRM/accounting customer context) are appended AFTER every tenant-stable
+    # section so the bytes before them are identical for every call to the
+    # same tenant. OpenAI prompt caching matches on the longest identical
+    # prefix — in their previous position (index 12 of 18) a repeat caller's
+    # prompt diverged ~18k chars in and only about half of it was cross-call
+    # cacheable. Both blocks are "silent context" STATE+DIRECTIVE data (never
+    # read aloud, no ordering dependency on the sections above), and this
+    # position sits inside the recency attention band directly ahead of the
+    # FINAL recap. Both render "" (filtered below) when there is nothing to
+    # inject, so a first-time caller's prompt IS the tenant-stable prefix.
+    # Do not move them back up — it silently halves cache hits for repeat
+    # callers (locked by tests/test_prompt_cache_prefix.py).
+    sections.extend(
+        [
+            _build_caller_history_section(caller_history),
+            _build_customer_account_section(customer_context, locale),
         ]
     )
 

@@ -31,7 +31,16 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
-from livekit.agents import AgentSession, Agent, cli, JobContext, JobProcess, WorkerOptions, room_io
+from livekit.agents import (
+    AgentSession,
+    Agent,
+    APIConnectOptions,
+    cli,
+    JobContext,
+    JobProcess,
+    WorkerOptions,
+    room_io,
+)
 from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
@@ -146,6 +155,28 @@ PREEMPTIVE_GENERATION = (
     os.environ.get("VOCO_PREEMPTIVE_GENERATION", "true").strip().lower() != "false"
 )
 
+# 2026-09-01 prompt caching. The system prompt + tool schemas are a ~9k-token
+# preamble on EVERY LLM request. OpenAI caches identical prefixes >=1024 tokens
+# automatically (no opt-in), so turns 2..n of a call already hit — but a fresh
+# call's FIRST request pays the full prefill unless the prefix was written
+# recently (in_memory retention is ~5-10 min of inactivity; gpt-4.1-mini has
+# no 24h tier), and most tenants do not receive back-to-back calls. So: while
+# the deterministic greeting plays (~3-5s, caller input muted), fire ONE
+# background completion carrying the session's exact instructions + tools
+# (agent.chat_ctx.copy() + agent.tools — the same objects AgentActivity sends)
+# so the prefix is in the cache before the caller's first utterance. Turn 1
+# then reads the cached prefix instead of prefilling ~9k tokens. Cost: one
+# extra input-priced request per call. Never blocks the call; any failure is
+# logged and ignored. VOCO_LLM_CACHE_WARM=false disables it without a deploy.
+# Verify in Railway logs via the "[agent] llm_metrics" lines: cached_tokens
+# should be ~0 on the warm request and ~prompt size on turn 1.
+LLM_CACHE_WARM = (
+    os.environ.get("VOCO_LLM_CACHE_WARM", "true").strip().lower() != "false"
+)
+# Hard cap on the warm request (connect + first streamed chunk). The greeting
+# window is ~3-5s; a slower warm would not land before turn 1 anyway.
+LLM_CACHE_WARM_TIMEOUT_S = float(os.environ.get("VOCO_LLM_CACHE_WARM_TIMEOUT_S", "6"))
+
 # 2026-08-25 latency pass: endpointing delays — how long the session waits
 # after the caller's speech before treating the turn as finished. SDK 1.5.7
 # defaults are 0.5s min and 3.0s max (the max applies whenever the semantic
@@ -189,6 +220,45 @@ ELEVENLABS_VOICE_MAP = {
 
 # Valid stored-label allowlist (the keys of the voice map).
 ELEVENLABS_VOICE_LABELS = frozenset(ELEVENLABS_VOICE_MAP.keys())
+
+
+def _prompt_cache_key(tenant_id) -> str | None:
+    """OpenAI ``prompt_cache_key`` for a call: per-tenant, so consecutive calls
+    to the same business are routed to the machine holding that tenant's cached
+    prefix. The key only influences routing — a hit still requires a
+    byte-identical prefix (see prompt.py's cache-aware section layout). Stable
+    across calls, never per-call (OpenAI guidance). None when there is no
+    tenant row — nothing worth pinning."""
+    return f"voco-agent:{tenant_id}" if tenant_id else None
+
+
+async def _warm_prompt_cache(llm_obj, chat_ctx, tools, *, timeout_s: float, call_id: str = ""):
+    """Write this call's system prompt + tool schemas into OpenAI's prompt cache.
+
+    Sends ONE chat completion with the same chat_ctx/tools the session will
+    send on turn 1, reads the first streamed chunk (the cache write happens at
+    prefill, before any token streams) and closes the stream. Runs as a
+    background task during the greeting; never raises. See LLM_CACHE_WARM.
+    """
+    t0 = time.monotonic()
+    try:
+        stream = llm_obj.chat(
+            chat_ctx=chat_ctx,
+            tools=tools,
+            conn_options=APIConnectOptions(max_retry=0, timeout=timeout_s),
+        )
+        async with stream:
+            async for _chunk in stream:
+                break
+        logger.info(
+            "[agent] prompt cache warmed call=%s in %dms",
+            call_id, int((time.monotonic() - t0) * 1000),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[agent] prompt cache warm failed (non-fatal) call=%s after %dms: %s",
+            call_id, int((time.monotonic() - t0) * 1000), e,
+        )
 
 
 def _resolve_voice(ai_voice, tone_preset):
@@ -758,11 +828,36 @@ async def entrypoint(ctx: JobContext):
         # it only caps a pathological generation before the caller sits through
         # minutes of runaway TTS. Verified accepted by the installed
         # livekit-plugins-openai 1.5.7 LLM.__init__ signature.
-        llm = openai.LLM(
+        # 2026-09-01 prompt caching: prompt_cache_key routes this tenant's
+        # requests to the machine holding its cached prefix (see
+        # _prompt_cache_key + the LLM_CACHE_WARM constant). Verified accepted by
+        # the installed livekit-plugins-openai 1.5.7 LLM.__init__ signature.
+        _llm_kwargs = dict(
             model=LLM_MODEL,
             parallel_tool_calls=False,
             max_completion_tokens=500,
         )
+        _cache_key = _prompt_cache_key(tenant_id)
+        if _cache_key:
+            _llm_kwargs["prompt_cache_key"] = _cache_key
+        llm = openai.LLM(**_llm_kwargs)
+
+        # Per-request LLM metrics -> Railway logs. This is the LLM-object event
+        # (NOT the deprecated AgentSession "metrics_collected"); it carries ttft
+        # + prompt_cached_tokens, the only place cache hits are visible. Expect
+        # cached_tokens≈0 on the warm request, then ≈prompt size on turn 1 — if
+        # turn 1 reads 0 the warm didn't land before the caller spoke.
+        @llm.on("metrics_collected")
+        def _on_llm_metrics(m):
+            try:
+                logger.info(
+                    "[agent] llm_metrics call=%s ttft=%.3f prompt_tokens=%d "
+                    "cached_tokens=%d completion_tokens=%d cancelled=%s",
+                    call_id, m.ttft, m.prompt_tokens, m.prompt_cached_tokens,
+                    m.completion_tokens, m.cancelled,
+                )
+            except Exception:
+                pass
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
@@ -1369,6 +1464,27 @@ async def entrypoint(ctx: JobContext):
             ),
         )
         logger.info(f"[agent] Session started: room={call_id}")
+
+        # 2026-09-01: warm OpenAI's prompt cache with this call's exact
+        # instructions + tool schemas while the greeting plays (see the
+        # LLM_CACHE_WARM constant). agent.chat_ctx already holds the system
+        # instructions message (AgentActivity inserts it on start) and
+        # agent.tools is the list the activity sends, so the request prefix is
+        # byte-identical to turn 1's. Background + fail-open.
+        if LLM_CACHE_WARM:
+            try:
+                create_background_task(
+                    _warm_prompt_cache(
+                        llm,
+                        agent.chat_ctx.copy(),
+                        agent.tools,
+                        timeout_s=LLM_CACHE_WARM_TIMEOUT_S,
+                        call_id=call_id,
+                    ),
+                    name="llm-cache-warm",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[agent] prompt cache warm not started: %s", e)
 
         # Phase 60.3 Stream A (R-A2): wrap session.output.audio.capture_frame
         # to stamp last_audio_frame_at on every emitted frame. Per Pitfall 2
