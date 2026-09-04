@@ -422,7 +422,7 @@ emergency branch, prompt consolidation to ~4.8k tokens, per-tenant disclosure mo
 
 ## 8. Execution status (2026-09-04)
 
-Implemented in the working tree (uncommitted — commits are made on request, one per task per §5):
+Implemented and PUSHED to `main` as `d901df5..0fe3aa0` (7 commits, one per task per §5; suite green at every commit):
 
 | Task | Status | Notes |
 |---|---|---|
