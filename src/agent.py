@@ -56,6 +56,7 @@ from .integrations.xero import fetch_xero_context_bounded
 from .lib.customer_context import fetch_merged_customer_context_bounded, FETCH_UNAVAILABLE
 from .lib.feature_flags import INTEGRATIONS_ENABLED
 from .lib.phone import _normalize_phone, derive_caller_region
+from .lib.triage import layer2_llm
 
 logger = logging.getLogger("voco-agent")
 
@@ -187,6 +188,15 @@ LLM_CACHE_WARM_TIMEOUT_S = float(os.environ.get("VOCO_LLM_CACHE_WARM_TIMEOUT_S",
 # second. Env-overridable for instant rollback/tuning without a deploy.
 MIN_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MIN_ENDPOINTING_DELAY_S", "0.4"))
 MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "2.0"))
+
+# 2026-09-04 P1.1 follow-up: the post-call layer-2 triage classifier runs in
+# this job process on a cold OpenAI connection (one job per process). Warm it
+# in the background at call start so the classification does not spend its
+# 2.5 s budget on a TLS handshake (measured: first request ~2.1 s cold vs
+# ~0.85 s warm). One tiny GET per call; never raises. `false` disables.
+TRIAGE_LAYER2_WARM = (
+    os.environ.get("VOCO_TRIAGE_LAYER2_WARM", "true").strip().lower() != "false"
+)
 
 # 2026-06-11 naturalness pass (findings.md P8.2): Deepgram nova-3 keyterm
 # prompting (business name + active service names) to cut the address/name
@@ -1501,6 +1511,16 @@ async def entrypoint(ctx: JobContext):
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("[agent] prompt cache warm not started: %s", e)
+
+        # 2026-09-04: open the triage classifier's OpenAI connection now so the
+        # post-call layer-2 call is not cold (see TRIAGE_LAYER2_WARM).
+        if TRIAGE_LAYER2_WARM:
+            try:
+                create_background_task(
+                    layer2_llm.warm_client(), name="triage-layer2-warm",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[agent] triage layer2 warm not started: %s", e)
 
         # Phase 60.3 Stream A (R-A2): wrap session.output.audio.capture_frame
         # to stamp last_audio_frame_at on every emitted frame. Per Pitfall 2
