@@ -945,6 +945,22 @@ async def entrypoint(ctx: JobContext):
                     "content": text,
                     "timestamp": int(time.time() * 1000),
                 })
+                # 2026-09-04 P0.1: per-turn stage attribution. ChatMessage.metrics
+                # is a TypedDict(total=False) MetricsReport in livekit-agents
+                # 1.5.7 — user turns carry end_of_turn_delay / transcription_delay,
+                # assistant turns carry llm_node_ttft / tts_node_ttfb. Logging
+                # only; must never break the handler.
+                try:
+                    m = getattr(event.item, "metrics", None) or {}
+                    logger.info(
+                        "[agent] turn_metrics call=%s role=%s eot_delay=%s "
+                        "transcription_delay=%s llm_ttft=%s tts_ttfb=%s",
+                        call_id, role,
+                        m.get("end_of_turn_delay"), m.get("transcription_delay"),
+                        m.get("llm_node_ttft"), m.get("tts_node_ttfb"),
+                    )
+                except Exception:
+                    pass
                 # Phase 60.3 Stream A (R-A1): capture last_text_token_at on
                 # agent turns only — the last agent turn before end_call IS
                 # the goodbye.

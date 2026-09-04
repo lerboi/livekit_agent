@@ -115,8 +115,12 @@ async def run_post_call_pipeline(params: dict):
         for t in transcript_turns
     )
 
+    # 2026-09-04 P0.2: keep the per-turn ms timestamp (agent.py's
+    # on_conversation_item already records it) so caller-turn-end → agent-
+    # turn-start gaps are computable via SQL for every stored call. Additive
+    # key — every consumer reads role/content only.
     transcript_structured = [
-        {"role": t["role"], "content": t["content"]}
+        {"role": t["role"], "content": t["content"], "timestamp": t.get("timestamp")}
         for t in transcript_turns
     ]
 
