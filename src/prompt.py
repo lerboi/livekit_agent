@@ -713,7 +713,7 @@ def _build_customer_account_section(
     )
 
 
-def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> str:
+def _build_info_gathering_section(t, postal_label: str, locale: str = "en", country: str = "US") -> str:
     # Phase 60.3 Plan 10: invariant-lock + D6 compression + outer-frame parity.
     #
     # Audit dimension decisions (60.3-PROMPT-AUDIT.md §_build_info_gathering_section):
@@ -789,6 +789,16 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
         "- Do not add extra verification lines for spelled-out or low-confidence names. The "
         "existing CORRECTIONS rule handles mispronunciations during the readback.\n"
     )
+    # P1.4 (2026-09-04): country-gated (NOT locale-gated — see the single-
+    # English-prompt policy) postal-first hint for Singapore, where the
+    # validate_address tool resolves a 6-digit postal code via OneMap.
+    sg_postal_line = (
+        "- In Singapore the postal code pins down the building — if the caller gives it, "
+        "call validate_address right away even if the street name was unclear; then ask "
+        "only for the unit number.\n"
+        if country == "SG"
+        else ""
+    )
     service_address_block = (
         "SERVICE ADDRESS:\n"
         "- Ask one natural question: \"What's the address where you need the service?\"\n"
@@ -797,6 +807,7 @@ def _build_info_gathering_section(t, postal_label: str, locale: str = "en") -> s
         "- If a piece is missing that we would need to find the place, ask exactly one targeted "
         "follow-up for that specific missing piece. Loop one piece at a time. Never run a "
         "mechanical walkthrough or recite a list of fields to the caller.\n"
+        f"{sg_postal_line}"
         "- Capture enough for us to find the place. Do not enumerate field names on-air.\n"
     )
     phone_readback_block = (
@@ -1198,7 +1209,7 @@ def build_system_prompt(
         _build_greeting_section(locale, business_name, onboarding_complete, t),
         _build_language_section(t, locale),
         _build_repeat_caller_section(onboarding_complete),
-        _build_info_gathering_section(t, postal_label, locale),
+        _build_info_gathering_section(t, postal_label, locale, country=country),
         _build_intake_questions_section(intake_questions, locale),
         _build_booking_section(business_name, onboarding_complete, postal_label, locale),
     ]

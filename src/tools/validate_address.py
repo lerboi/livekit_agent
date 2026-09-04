@@ -22,15 +22,112 @@ too and is itself always registered.
 
 from __future__ import annotations
 
+import difflib
 import logging
+import os
+import re
 import time
 
 from livekit.agents import function_tool, RunContext
 
 from ..integrations.google_maps import validate_address_with_region_fallback
+from ..integrations.onemap import is_sg_postal, lookup_postal, normalize_postal
 from ..lib.service_area import classify_service_area
 
 logger = logging.getLogger(__name__)
+
+# P1.4 (2026-09-04): Singapore postal-first resolution via OneMap. When the
+# tenant is SG and the caller gave a 6-digit postal code, resolve the building
+# from the postal (which STT transcribes reliably) BEFORE — instead of — the
+# Google call, and fall through to the unchanged STATE logic. `false` reverts
+# to the Google-only path without a deploy.
+ONEMAP_ENABLED = os.environ.get("VOCO_SG_ONEMAP", "true").strip().lower() != "false"
+
+_ROAD_ABBREVIATIONS = {
+    "rd": "road", "st": "street", "ave": "avenue", "av": "avenue",
+    "dr": "drive", "cres": "crescent", "cl": "close", "ln": "lane",
+    "blvd": "boulevard", "pl": "place", "ter": "terrace", "wy": "way",
+    "hwy": "highway", "ctr": "central", "ctrl": "central", "jln": "jalan",
+    "lor": "lorong", "blk": "block",
+}
+_ROAD_FUZZY_THRESHOLD = 0.8
+
+
+def _norm_words(value: str | None) -> list[str]:
+    """Casefold, strip punctuation, expand common road abbreviations."""
+    words = re.findall(r"[a-z0-9]+", (value or "").casefold())
+    return [_ROAD_ABBREVIATIONS.get(w, w) for w in words]
+
+
+def _spoken_matches_onemap(street: str, blk_no: str, road_name: str) -> bool:
+    """Does the caller's spoken street already agree with the OneMap
+    building? True when it contains the block number, or the road name
+    fuzzy-matches (>= 0.8 ratio over the alphabetic words). 'Kenboro Drive'
+    vs 'Canberra Drive' fails both → confirmed_with_changes → the agent reads
+    the corrected form back once (the existing address_corrected branch)."""
+    spoken = _norm_words(street)
+    if not spoken:
+        return False
+    blk = (blk_no or "").strip().casefold()
+    if blk and blk in spoken:
+        return True
+    road = [w for w in _norm_words(road_name) if not w.isdigit()]
+    spoken_alpha = [w for w in spoken if not w.isdigit()]
+    if not road or not spoken_alpha:
+        return False
+    ratio = difflib.SequenceMatcher(None, " ".join(road), " ".join(spoken_alpha)).ratio()
+    return ratio >= _ROAD_FUZZY_THRESHOLD
+
+
+def _onemap_result(hit: dict, *, street: str, unit: str) -> dict:
+    """Shape a OneMap hit exactly like google_maps._voco_result so every
+    downstream consumer (STATE building, deps cache, book_appointment /
+    capture_lead reuse, service-area gate) works unchanged."""
+    blk_no = str(hit.get("BLK_NO") or "").strip()
+    road_name = str(hit.get("ROAD_NAME") or "").strip().title()
+    building = str(hit.get("BUILDING") or "").strip()
+    postal = str(hit.get("POSTAL") or "").strip()
+    if building.upper() == "NIL":
+        building = ""
+    else:
+        building = building.title()
+
+    formatted = f"Block {blk_no} {road_name}".strip() if blk_no else road_name
+    if building:
+        formatted = f"{formatted}, {building}"
+
+    verdict = (
+        "confirmed"
+        if _spoken_matches_onemap(street, blk_no, hit.get("ROAD_NAME") or "")
+        else "confirmed_with_changes"
+    )
+
+    def _float(v):
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "verdict": verdict,
+        "formatted_address": formatted,
+        "place_id": None,
+        "latitude": _float(hit.get("LATITUDE")),
+        "longitude": _float(hit.get("LONGITUDE")),
+        "address_components": {
+            "street_number": blk_no or None,
+            "route": road_name or None,
+            "subpremise": unit or None,
+            "locality": "Singapore",
+            "admin_area_level_1": None,
+            "admin_area_level_2": None,
+            "postal_code": postal or None,
+            "country": "Singapore",
+            "country_code": "SG",
+        },
+        "latency_ms": 0,
+        "raw_status": 200,
+    }
 
 
 # M16 P1 (Capability A) — caller-facing wording guard for the out-of-area
@@ -241,6 +338,33 @@ def create_validate_address_tool(deps: dict):
         _attempts[_attempt_key] = _attempts.get(_attempt_key, 0) + 1
         _attempts["__total__"] = _attempts.get("__total__", 0) + 1
 
+        # P1.4 (2026-09-04): Singapore postal-first. A 6-digit SG postal code
+        # pins down one building, and STT gets digits right far more often
+        # than proper-noun street names — resolve it via OneMap before (and
+        # instead of) Google. On a hit, `result` takes the exact google_maps
+        # shape and the STATE logic below runs unchanged; on a miss / error /
+        # flag off, today's Google path runs exactly as before.
+        result = None
+        if (
+            ONEMAP_ENABLED
+            and region_code == "SG"
+            and is_sg_postal(postal_code)
+        ):
+            try:
+                _hit = await lookup_postal(normalize_postal(postal_code))
+            except Exception as exc:  # noqa: BLE001 — lookup is never-raising; belt and braces
+                logger.warning("[validate_address] onemap lookup raised: %s", exc)
+                _hit = None
+            if _hit:
+                result = _onemap_result(_hit, street=street, unit=unit)
+                logger.info(
+                    "[validate_address] onemap hit postal=%s blk=%s road=%s "
+                    "building=%s verdict=%s call=%s",
+                    normalize_postal(postal_code), _hit.get("BLK_NO"),
+                    _hit.get("ROAD_NAME"), _hit.get("BUILDING"),
+                    result["verdict"], deps.get("call_id"),
+                )
+
         # The fallback orchestrator is contractually never-raising, but this
         # tool must ALSO never raise (an exception here would surface as a
         # failed tool call mid-conversation) — belt and braces.
@@ -248,17 +372,20 @@ def create_validate_address_tool(deps: dict):
         # automatic second attempt when the tenant-region verdict is
         # unhelpful — up to 1.5s extra on that rare path only.
         try:
-            result, region_used = await validate_address_with_region_fallback(
-                tenant_id=deps.get("tenant_id"),
-                call_id=deps.get("call_id"),
-                region_code=region_code,
-                caller_region=deps.get("caller_region"),
-                address_lines=address_lines,
-                postal_code=postal_code or None,
-                locality=city or None,
-                supabase=deps.get("supabase"),
-                timeout_seconds=1.5,
-            )
+            if result is not None:
+                region_used = region_code
+            else:
+                result, region_used = await validate_address_with_region_fallback(
+                    tenant_id=deps.get("tenant_id"),
+                    call_id=deps.get("call_id"),
+                    region_code=region_code,
+                    caller_region=deps.get("caller_region"),
+                    address_lines=address_lines,
+                    postal_code=postal_code or None,
+                    locality=city or None,
+                    supabase=deps.get("supabase"),
+                    timeout_seconds=1.5,
+                )
             if region_used != region_code:
                 logger.info(
                     "[validate_address] validated with region=%s "

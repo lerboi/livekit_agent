@@ -152,3 +152,47 @@ def test_postal_label_parametrized_both_locales(en_label: str, es_label: str):
     # The test accepts the Spanish form since postal_label is the English
     # surface form; ES prose uses "código postal" idiomatically.
     assert "código postal" in es.lower()
+
+
+# ---------------------------------------------------------------------------
+# P1.4 (2026-09-04): Singapore postal-first hint — country-gated, never
+# locale-gated (single-English-prompt policy).
+# ---------------------------------------------------------------------------
+
+_SG_POSTAL_HINT = "In Singapore the postal code pins down the building"
+
+
+def test_sg_country_adds_postal_first_hint():
+    section = _build_info_gathering_section(_noop_t, "postal code", "en", country="SG")
+    assert _SG_POSTAL_HINT in section
+    assert "call validate_address right away" in section
+    assert "ask only for the unit number" in section
+    # Inside the SERVICE ADDRESS block, ahead of the closing capture bullet.
+    assert section.index("SERVICE ADDRESS:") < section.index(_SG_POSTAL_HINT)
+    assert section.index(_SG_POSTAL_HINT) < section.index("Capture enough for us to find the place")
+
+
+def test_non_sg_country_omits_postal_first_hint():
+    # Positional call keeps working (country defaults to "US").
+    assert _SG_POSTAL_HINT not in _build_info_gathering_section(_noop_t, "zip code", "en")
+    assert _SG_POSTAL_HINT not in _build_info_gathering_section(
+        _noop_t, "zip code", "en", country="US"
+    )
+    assert _SG_POSTAL_HINT not in _build_info_gathering_section(
+        _noop_t, "postal code", "en", country="CA"
+    )
+
+
+def test_sg_hint_is_locale_invariant():
+    en = _build_info_gathering_section(_noop_t, "postal code", "en", country="SG")
+    es = _build_info_gathering_section(_noop_t, "postal code", "es", country="SG")
+    assert en == es
+    assert _SG_POSTAL_HINT in es
+
+
+def test_sg_hint_reaches_assembled_prompt():
+    from src.prompt import build_system_prompt
+    sg = build_system_prompt("en", business_name="Voco", onboarding_complete=True, country="SG")
+    us = build_system_prompt("en", business_name="Voco", onboarding_complete=True, country="US")
+    assert _SG_POSTAL_HINT in sg
+    assert _SG_POSTAL_HINT not in us
