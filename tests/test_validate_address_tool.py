@@ -168,6 +168,81 @@ async def test_unconfirmed_returns_address_unclear_with_hint(patched_validate):
     assert "one retry" in result.lower()
 
 
+# -- P1.3 (2026-09-04): address-loop cap enforced in code ---------------------
+
+
+@pytest.mark.asyncio
+async def test_second_unconfirmed_same_street_returns_address_noted(patched_validate):
+    """Two consecutive unconfirmed results for the same street: the first is
+    today's address_unclear, the second must be address_noted with an explicit
+    stop directive -- the prose 'after one retry' rule is now enforced by the
+    tool (the 2026-08-17 call asked the block number 4x in 66s)."""
+    patched_validate.return_value = (_bounded_result("unconfirmed", None), "US")
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    first = await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+    second = await tool.__wrapped__(_raw_args(postal_code="94043"), MagicMock())
+
+    assert first.startswith("STATE:address_unclear")
+    assert second.startswith("STATE:address_noted")
+    assert "Do not ask about the address again" in second
+    assert "Never mention validation" in second
+    # Caller's words carried forward for the readback.
+    assert "1600 Amphitheatre Pkwy" in second
+    # Cache + last-state bookkeeping unchanged by the cap.
+    assert deps["_validated_address"]["result"]["verdict"] == "unconfirmed"
+    assert deps["_last_tool_state"] == second
+    assert deps["_validate_attempts"]["1600 amphitheatre pkwy"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_new_street_gets_a_fresh_attempt(patched_validate):
+    """A genuine caller correction (different street) earns one fresh
+    address_unclear before the cap applies to it."""
+    patched_validate.return_value = (_bounded_result("unconfirmed", None), "US")
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    first = await tool.__wrapped__(_raw_args(street="12 Burr Drive"), MagicMock())
+    second = await tool.__wrapped__(_raw_args(street="12 Canberra Drive"), MagicMock())
+
+    assert first.startswith("STATE:address_unclear")
+    assert second.startswith("STATE:address_unclear")
+
+
+@pytest.mark.asyncio
+async def test_third_unconfirmed_any_street_returns_address_noted(patched_validate):
+    """Total-attempt backstop: STT drifting the street string between attempts
+    ('Burr Drive' / 'Kenboro Drive' / 'Canberra Drive') must not reset the
+    per-street clock forever -- the third unconfirmed in a call stops."""
+    patched_validate.return_value = (_bounded_result("unconfirmed", None), "US")
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    await tool.__wrapped__(_raw_args(street="12 Burr Drive"), MagicMock())
+    await tool.__wrapped__(_raw_args(street="12 Kenboro Drive"), MagicMock())
+    third = await tool.__wrapped__(_raw_args(street="12 Canberra Drive"), MagicMock())
+
+    assert third.startswith("STATE:address_noted")
+    assert "Do not ask about the address again" in third
+
+
+@pytest.mark.asyncio
+async def test_cap_does_not_affect_confirmed_after_retry(patched_validate):
+    """The cap only rewrites the unconfirmed branch: a retry that comes back
+    confirmed still returns address_ok."""
+    deps = _make_deps()
+    tool = create_validate_address_tool(deps)
+
+    patched_validate.return_value = (_bounded_result("unconfirmed", None), "US")
+    await tool.__wrapped__(_raw_args(postal_code=""), MagicMock())
+    patched_validate.return_value = (_bounded_result("confirmed", FORMATTED), "US")
+    second = await tool.__wrapped__(_raw_args(), MagicMock())
+
+    assert second.startswith("STATE:address_ok")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verdict", ["skipped", "unsupported_region", "error"])
 async def test_noted_for_each_nonblocking_verdict(patched_validate, verdict):

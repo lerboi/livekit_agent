@@ -143,6 +143,16 @@ def _norm(value: str | None) -> str:
     return (value or "").strip().casefold()
 
 
+# P1.3 (2026-09-04) address-loop cap. The Nth `unconfirmed` verdict for the
+# SAME normalized street (N = UNCONFIRMED_RETRY_CAP → the first retry is the
+# last), or the Mth unconfirmed verdict in the call regardless of street
+# (M = UNCONFIRMED_TOTAL_CAP → STT-drifted street strings can't reset the
+# clock), returns STATE:address_noted instead of STATE:address_unclear. First
+# attempt behaviour is unchanged.
+UNCONFIRMED_RETRY_CAP = 2
+UNCONFIRMED_TOTAL_CAP = 3
+
+
 def get_cached_validation(deps: dict, street: str, postal_code: str) -> dict | None:
     """Return the cached bounded-validation result from an earlier
     validate_address call IF the input address matches; else None.
@@ -217,6 +227,20 @@ def create_validate_address_tool(deps: dict):
             else []
         )
 
+        # 2026-09-04 P1.3: count validation attempts per normalized street (and
+        # in total) so the unconfirmed branch can enforce the "after one retry,
+        # proceed with what the caller said" rule in CODE. The prose version
+        # of that rule was not enough — under last-instruction-wins the
+        # identical address_unclear return re-arrived and the model asked the
+        # same question again (4× in 66s on the 2026-08-17 Canberra Drive
+        # call). Keyed per street so a genuine caller correction earns one
+        # fresh attempt; the total counter is the backstop when STT drifts the
+        # street string between attempts.
+        _attempts = deps.setdefault("_validate_attempts", {})
+        _attempt_key = _norm(street) or "_"
+        _attempts[_attempt_key] = _attempts.get(_attempt_key, 0) + 1
+        _attempts["__total__"] = _attempts.get("__total__", 0) + 1
+
         # The fallback orchestrator is contractually never-raising, but this
         # tool must ALSO never raise (an exception here would surface as a
         # failed tool call mid-conversation) — belt and braces.
@@ -289,6 +313,23 @@ def create_validate_address_tool(deps: dict):
                 " | DIRECTIVE:read the corrected address once, ask briefly if"
                 " that's right. If the caller corrects, call validate_address"
                 " again with the corrected pieces."
+            )
+        elif verdict == "unconfirmed" and (
+            _attempts[_attempt_key] >= UNCONFIRMED_RETRY_CAP
+            or _attempts["__total__"] >= UNCONFIRMED_TOTAL_CAP
+        ):
+            # P1.3 cap: the retry was already spent (same street asked twice,
+            # or three unconfirmed attempts in the call however the street was
+            # transcribed). Stop asking; carry the caller's words forward.
+            logger.info(
+                "[validate_address] unconfirmed cap reached (street=%d total=%d) call=%s",
+                _attempts[_attempt_key], _attempts["__total__"], deps.get("call_id"),
+            )
+            state = (
+                f"STATE:address_noted speech={as_given}"
+                " | DIRECTIVE:read it back once in the caller's words and"
+                " continue with the next intake step. Do not ask about the"
+                " address again this call. Never mention validation."
             )
         elif verdict == "unconfirmed":
             missing = _missing_component_hint(result, postal_code)
