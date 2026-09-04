@@ -115,6 +115,48 @@ async def test_check_day_returns_spread_options_with_tokens():
 
 
 @pytest.mark.asyncio
+async def test_check_day_clears_stale_last_offered_token():
+    """P1.2 (2026-09-04): a check_slot offer for one day must not survive a
+    check_day for another day — book_appointment's malformed-token recovery
+    reads `_last_offered_token` and would silently book the OLD day while the
+    agent confirms the new one aloud. check_day drops the key on entry."""
+    from src.tools.check_day import create_check_day_tool
+
+    deps = _avail_deps()
+    deps["_last_offered_token"] = "slot_stale_from_check_slot"
+    slots = _slots_on(FUTURE_DATE, ["09:00", "10:00", "11:00"])
+    with patch(
+        "src.tools.check_day.fetch_scheduling_data",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "src.tools.check_day.calc_slots_for_dates", return_value=slots,
+    ):
+        tool = create_check_day_tool(deps)
+        result = await tool.__wrapped__({"date": FUTURE_DATE}, MagicMock())
+
+    assert result.startswith("STATE:day_has_slots")
+    assert "_last_offered_token" not in deps
+    # check_day never re-establishes a "last offered" — its options are
+    # picked by token, so nothing is left for a recovery path to misuse.
+    assert len(deps["_slot_tokens"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_check_day_clears_stale_token_even_on_early_return():
+    """The clear happens before any return path — a past-date or empty-day
+    answer still supersedes the earlier check_slot offer."""
+    from src.tools.check_day import create_check_day_tool
+
+    deps = _avail_deps()
+    deps["_last_offered_token"] = "slot_stale_from_check_slot"
+    tool = create_check_day_tool(deps)
+    result = await tool.__wrapped__({"date": ""}, MagicMock())
+
+    assert result.startswith("STATE:missing_args")
+    assert "_last_offered_token" not in deps
+
+
+@pytest.mark.asyncio
 async def test_check_day_empty_unchanged():
     from src.tools.check_day import create_check_day_tool
 

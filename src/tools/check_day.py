@@ -63,6 +63,15 @@ def create_check_day_tool(deps: dict):
         t0 = _time.time()
         call_id = f"cd_{int(t0 * 1000) % 100000}"
         date = (raw_arguments.get("date") or "").strip()
+        # 2026-09-04 P1.2 (correctness): `_last_offered_token` is written only by
+        # check_slot and cleared only by check_slot's alternatives branch and
+        # book_appointment success. Asking about a different day supersedes the
+        # earlier offer, so drop it here — otherwise a malformed token after
+        # check_slot(Tue) → check_day(Wed) let book_appointment "recover" with
+        # Tuesday's token and book Tuesday while the agent confirmed Wednesday.
+        # book_appointment's recovery branch itself is unchanged (correct when
+        # the last offer is fresh).
+        deps.pop("_last_offered_token", None)
 
         logger.info("[63.1-DIAG] check_day ENTRY id=%s date=%r", call_id, date)
         try:
