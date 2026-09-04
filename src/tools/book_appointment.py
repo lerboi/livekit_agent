@@ -201,9 +201,9 @@ _BOOK_APPOINTMENT_SCHEMA = {
         "as confirmed with the caller. The tool return will indicate "
         "whether the address was confirmed, corrected, or could not be "
         "verified, and will tell you what to speak back to the caller. "
-        "Speak only what the return tells you. Speak a short filler phrase "
-        "first ('Let me get that booked in for you'), then invoke in the "
-        "same turn. Do not speak 'booked'/'confirmed' or the appointment "
+        "Speak only what the return tells you. Speak one short, varied filler "
+        "first (never the same one twice in a call — see TOOL NARRATION), "
+        "then invoke in the same turn. Do not speak 'booked'/'confirmed' or the appointment "
         "time as a settled fact before this tool returns success. This "
         "tool's return is a state+directive string — do not read it aloud."
     ),

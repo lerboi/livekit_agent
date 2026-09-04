@@ -233,3 +233,24 @@ def test_es_anti_fabrication_rule():
     lowered = section.lower()
     assert "book_appointment" in lowered
     assert ("confirmed" in lowered) or ("booked" in lowered)
+
+
+# --- P1.8 (2026-09-04): SCHEDULING contradictions removed ---
+
+def test_scheduling_paragraph_no_longer_contradicts_name_and_routing_rules():
+    """'Only discuss scheduling once you have the caller's name' contradicted
+    'Booking is never blocked by a missing name'; 'needs both a day and a
+    time … help them decide the other before you check' contradicted the
+    day-only → check_day routing. Each cost a question turn per booking."""
+    from src.prompt import _build_booking_section
+    section = _build_booking_section("Ace Plumbing", True, "zip code", "en")
+    sched = section.split("SCHEDULING:", 1)[1].split("AVAILABILITY RULES", 1)[0]
+    assert "never hold booking for it" in sched
+    assert "a day and a time → check_slot now" in sched
+    assert "a day only → check_day now" in sched
+    assert "nothing specific → next_available_days now" in sched
+    assert "don't ask \"what time?\" first" in sched
+    assert "Only discuss scheduling once you have the caller's name" not in section
+    assert "help them decide the other before you check" not in section
+    # The word "before" must survive elsewhere in the section (check_slot before book).
+    assert "before" in section.lower()

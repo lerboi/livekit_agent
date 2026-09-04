@@ -43,8 +43,9 @@ _SCHEMA = {
     "name": "check_slot",
     "description": (
         "Verify whether a specific date and time is bookable. Call this every "
-        "time the caller names a concrete hour. Speak a short filler phrase "
-        "first ('Let me pull that up real quick'), then invoke in the same turn. "
+        "time the caller names a concrete hour. Speak one short, varied filler "
+        "first (never the same one twice in a call — see TOOL NARRATION), then "
+        "invoke in the same turn. "
         "This tool's return is a state+directive string — do not read it aloud."
     ),
     "parameters": {

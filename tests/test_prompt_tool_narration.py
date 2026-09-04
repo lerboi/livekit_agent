@@ -157,3 +157,57 @@ def test_en_and_es_are_identical():
     en = _build_tool_narration_section("en")
     es = _build_tool_narration_section("es")
     assert en == es
+
+
+# --- P1.6 (2026-09-04): rotating, tool-keyed filler bank ---
+
+def _example_phrases(section: str) -> list[str]:
+    """Every quoted example phrase in the per-tool bank."""
+    import re
+    bank = section.split("Examples by tool", 1)[1]
+    return re.findall(r"'([^']+?[.!?])'", bank)
+
+
+def test_no_example_filler_appears_twice():
+    """The literal 'Let me just check that address real quick.' was spoken 7x
+    across 4 real calls — the bank must not hand the model one phrase to copy."""
+    section = _build_tool_narration_section("en")
+    phrases = _example_phrases(section)
+    assert len(phrases) >= 14, phrases
+    lowered = [p.lower() for p in phrases]
+    assert len(lowered) == len(set(lowered)), "duplicate example phrase in the bank"
+
+
+def test_rotation_and_bridge_rules_present():
+    section = _build_tool_narration_section("en")
+    lowered = section.lower()
+    assert "never say the same filler twice in one call" in lowered
+    assert "bridge" in lowered
+    # Retired literals must be gone from the bank.
+    assert "let me just check that address real quick" not in lowered
+    assert "second-worst" not in lowered
+
+
+def test_examples_drop_the_one_moment_tail():
+    """Most examples must not end in the 'one moment' / 'one sec' tail that
+    made every filler sound the same."""
+    section = _build_tool_narration_section("en")
+    phrases = _example_phrases(section)
+    tails = [p for p in phrases if "one moment" in p.lower() or "one sec" in p.lower()]
+    assert len(tails) <= 2, tails
+
+
+def test_tool_descriptions_carry_no_literal_filler():
+    """GPT-4.1 copies the literal nearest the decision point — the tool
+    description IS that point, so it must point at the rotating bank instead
+    of quoting one phrase."""
+    from src.tools.book_appointment import _BOOK_APPOINTMENT_SCHEMA as book
+    from src.tools.check_day import _SCHEMA as day
+    from src.tools.check_slot import _SCHEMA as slot
+    from src.tools.next_available_days import _SCHEMA as nad
+    from src.tools.validate_address import _SCHEMA as va
+    for schema in (book, day, slot, nad, va):
+        desc = schema["description"]
+        assert "'Let me" not in desc, schema["name"]
+        assert "TOOL NARRATION" in desc, schema["name"]
+        assert "never the same one twice" in desc, schema["name"]

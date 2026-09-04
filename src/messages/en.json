@@ -11,10 +11,10 @@
     "capture_job_type": "Could you describe the issue you're experiencing?",
     "fallback_no_booking": "I've noted your information and someone from our team will follow up with you shortly.",
     "language_barrier_escalation": "I'm going to make sure someone who speaks {language} gets back to you right away.",
-    "greeting_onboarding": "Hello, thank you for calling {business_name}. This call may be recorded for quality purposes. How can I help you today?",
-    "greeting_default": "Hello, this call may be recorded for quality purposes. How can I help you today?",
+    "greeting_onboarding": "Thanks for calling {business_name}. Calls are recorded — how can I help?",
+    "greeting_default": "Hi, thanks for calling. Calls are recorded — how can I help?",
     "max_duration_goodbye": "I'm sorry, we've reached the maximum call length. Someone from the team will follow up with you shortly. Thank you for calling — goodbye.",
-    "recovery_error": "I'm sorry, I'm having some trouble with the connection. Let me take your details and have someone call you right back.",
+    "recovery_error": "Sorry — the line's breaking up on my end. Someone from the team will call you right back at this number.",
     "no_input_prompt": "Sorry, are you still there?",
     "no_input_goodbye": "I'm having trouble hearing you. I'll have someone from the team call you back shortly. Goodbye."
   },

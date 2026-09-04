@@ -193,9 +193,9 @@ _SCHEMA = {
         "said them. The return tells you whether the address came back "
         "confirmed, corrected, or unclear, and exactly what to say next. "
         "The caller's word always beats the validated form — if they correct "
-        "any part of it, call this tool again with their correction. Speak a "
-        "one-sentence filler first ('Let me just check that address…'), then "
-        "invoke in the same turn. This tool's return is a state+directive "
+        "any part of it, call this tool again with their correction. Speak one "
+        "short, varied filler first (never the same one twice in a call — see "
+        "TOOL NARRATION), then invoke in the same turn. This tool's return is a state+directive "
         "string — data for you, not to be read aloud."
     ),
     "parameters": {

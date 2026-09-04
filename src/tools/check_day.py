@@ -39,8 +39,8 @@ _SCHEMA = {
         "date but not a time yet. Returns up to 3 open windows for the day, "
         "each with a slot_token — offer two or three of them naturally; a "
         "time the caller picks can be booked directly with its token. Speak "
-        "a short filler phrase first ('Let me see what that day looks like'), "
-        "then invoke in the same turn. This tool's return is a "
+        "one short, varied filler first (never the same one twice in a call "
+        "— see TOOL NARRATION), then invoke in the same turn. This tool's return is a "
         "state+directive string — do not read it aloud."
     ),
     "parameters": {

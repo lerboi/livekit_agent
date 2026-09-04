@@ -36,8 +36,8 @@ _SCHEMA = {
         "only when the caller is vague about when ('whenever works', "
         "'anytime'). Returns the open days — offer them and let the caller "
         "pick; then call check_day for the chosen day. Never invent times "
-        "yourself. Speak a short filler phrase first ('Let me see what's "
-        "coming up'), then invoke in the same turn. This tool's return is a "
+        "yourself. Speak one short, varied filler first (never the same one "
+        "twice in a call — see TOOL NARRATION), then invoke in the same turn. This tool's return is a "
         "state+directive string — do not read it aloud."
     ),
     "parameters": {

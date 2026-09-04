@@ -69,3 +69,24 @@ def test_both_locales_nonempty_nontrivial():
     es = _build_voice_behavior_section("es")
     assert len(en) > 200
     assert len(es) > 200
+
+
+# --- P1.7 (2026-09-04): acknowledge + act ---
+
+def test_acknowledge_and_act_rule():
+    """Acknowledgements are capped at two words and the model must never
+    restate the caller's problem (76% of agent turns were questions and most
+    opened by paraphrasing the caller — one wasted clause per turn)."""
+    from src.prompt import _build_voice_behavior_section, _build_info_gathering_section
+    section = _build_voice_behavior_section("en")
+    assert "After the caller answers, act:" in section
+    assert "at most two words" in section
+    assert "Never restate what the caller just said" in section
+    assert "a name, an address, a phone number, or a booking time" in section
+    assert "never start two turns in a row the same way" in section
+    # Old wording gone.
+    assert "acknowledge in a few words at most" not in section
+    # NAME USE companion bullet.
+    info = _build_info_gathering_section(lambda k: k, "zip code", "en")
+    assert "two words at most and must not contain the caller's name" in info
+    assert "confirm receipt" not in info
