@@ -49,7 +49,7 @@ from .lib.background import create_background_task
 from .prompt import build_system_prompt
 from .tools import create_tools
 from .tools.end_call import _delayed_disconnect
-from .supabase_client import get_supabase_admin
+from .supabase_client import get_supabase_admin, warm_supabase_connection
 from .post_call import run_post_call_pipeline
 from .webhook import start_webhook_server
 from .integrations.xero import fetch_xero_context_bounded
@@ -197,6 +197,21 @@ MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "
 TRIAGE_LAYER2_WARM = (
     os.environ.get("VOCO_TRIAGE_LAYER2_WARM", "true").strip().lower() != "false"
 )
+
+# 2026-09-04 P1.10: ping Supabase from prewarm() so each idle job process
+# already holds an open TLS session (keep-alive client — see
+# supabase_client.py) before a call is assigned to it. Default on; `false`
+# skips the ping (the keep-alive client itself is VOCO_SUPABASE_KEEPALIVE).
+SUPABASE_PREWARM = (
+    os.environ.get("VOCO_SUPABASE_PREWARM", "true").strip().lower() != "false"
+)
+
+# 2026-09-04 P1.11: pin the warm job-process pool. The SDK default is
+# min(ceil(cpu_count), 4) — an accident of the Railway container's CPU
+# allocation. A cold job process (interpreter + imports + VAD load) is 2-5 s
+# of dead air before the greeting. Two warm processes ~= 300-500 MB RAM.
+# Tune via Railway logs: "no warmed process available for job" means raise it.
+NUM_IDLE_PROCESSES = int(os.environ.get("VOCO_NUM_IDLE_PROCESSES", "2"))
 
 # 2026-06-11 naturalness pass (findings.md P8.2): Deepgram nova-3 keyterm
 # prompting (business name + active service names) to cut the address/name
@@ -387,6 +402,12 @@ def prewarm(proc: JobProcess) -> None:
     languages.json.)
     """
     proc.userdata["vad"] = silero.VAD.load()
+    # P1.10 (2026-09-04): open the Supabase TLS session now, so the first
+    # tenant lookup of the next call reuses a warm keep-alive connection
+    # instead of paying a Tokyo handshake. Never raises (see supabase_client).
+    if SUPABASE_PREWARM:
+        if warm_supabase_connection():
+            logger.info("[agent] prewarm: supabase connection warmed")
 
 
 class VocoAgent(Agent):
@@ -1776,5 +1797,6 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name="voco-voice-agent",
+            num_idle_processes=NUM_IDLE_PROCESSES,
         )
     )
