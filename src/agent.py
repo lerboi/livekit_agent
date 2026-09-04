@@ -131,6 +131,50 @@ TTS_SIMILARITY = float(os.environ.get("VOCO_TTS_SIMILARITY", "0.75"))
 OPENAI_TTS_MODEL = os.environ.get("VOCO_OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.environ.get("VOCO_OPENAI_TTS_VOICE", "alloy")
 
+# 2026-09-04: ElevenLabs key preflight. A rejected ELEVEN_API_KEY (e.g. the
+# dashboard's key *ID* pasted instead of the `sk_…` secret — exactly what a
+# local run showed: "API key ID used as API key") does not fail loudly: the
+# TTS FallbackAdapter retries ElevenLabs twice (~4-5 s), then switches to
+# OpenAI TTS — so EVERY call opened with ~6-7 s of dead air before the
+# greeting, in the wrong voice, with the greeting-mute cap firing
+# mid-sentence, and nothing in the dashboard said why. prewarm() now asks
+# ElevenLabs once per job process whether the key is accepted; on an explicit
+# authentication rejection the call is built on OpenAI TTS directly (no
+# ElevenLabs leg, no retries) and an ERROR line names the fix. Network
+# errors / unknown responses leave the ElevenLabs-first order untouched.
+TTS_KEY_PREFLIGHT = (
+    os.environ.get("VOCO_TTS_KEY_PREFLIGHT", "true").strip().lower() != "false"
+)
+ELEVENLABS_USER_URL = "https://api.elevenlabs.io/v1/user"
+
+
+def _check_elevenlabs_key(timeout_s: float = 4.0) -> bool | None:
+    """True = accepted, False = explicitly rejected (auth error), None = unknown
+    (no key set, network problem, unexpected response). Never raises."""
+    key = os.environ.get("ELEVEN_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import httpx
+
+        resp = httpx.get(ELEVENLABS_USER_URL, headers={"xi-api-key": key}, timeout=timeout_s)
+        if resp.status_code == 200:
+            return True
+        if resp.status_code in (400, 401, 403):
+            body = resp.text or ""
+            if "authentication_error" in body or "invalid_api_key" in body or resp.status_code == 401:
+                logger.error(
+                    "[agent] ELEVEN_API_KEY rejected by ElevenLabs (HTTP %s): %s — "
+                    "set ELEVEN_API_KEY to the secret that starts with 'sk_' (not the key ID); "
+                    "calls will use OpenAI TTS only until then",
+                    resp.status_code, body[:160],
+                )
+                return False
+        return None
+    except Exception as exc:  # noqa: BLE001 — preflight must never break prewarm
+        logger.warning("[agent] ElevenLabs key preflight inconclusive: %s", exc)
+        return None
+
 # LK-B1: no-input / "are you still there?" recovery. The session emits user_state
 # 'away' after ~15s of caller silence (livekit default user_away_timeout). We
 # prompt up to NO_INPUT_MAX_STRIKES times, waiting NO_INPUT_RESPONSE_WINDOW_S for
@@ -408,6 +452,64 @@ def prewarm(proc: JobProcess) -> None:
     if SUPABASE_PREWARM:
         if warm_supabase_connection():
             logger.info("[agent] prewarm: supabase connection warmed")
+    # 2026-09-04: ElevenLabs key preflight (see TTS_KEY_PREFLIGHT). Stored per
+    # job process; the entrypoint reads it when building the TTS.
+    if TTS_KEY_PREFLIGHT:
+        proc.userdata["eleven_key_ok"] = _check_elevenlabs_key()
+        if proc.userdata["eleven_key_ok"] is True:
+            logger.info("[agent] prewarm: ElevenLabs key accepted")
+
+
+def _build_tts(voice_id: str, *, eleven_key_ok: bool | None):
+    """TTS for one call. ElevenLabs (with the pace/voice settings) wrapped in a
+    FallbackAdapter over OpenAI TTS — unless the key preflight said ElevenLabs
+    rejects our key, in which case OpenAI TTS is used directly so the call does
+    not spend ~5 s failing over on its first line."""
+    if eleven_key_ok is False:
+        logger.error(
+            "[agent] ElevenLabs key rejected at prewarm — building this call on "
+            "OpenAI TTS only (model=%s voice=%s). Fix ELEVEN_API_KEY on the service.",
+            OPENAI_TTS_MODEL, OPENAI_TTS_VOICE,
+        )
+        return openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE)
+
+    # voice_settings construction is fail-open: if the plugin's VoiceSettings
+    # surface ever shifts on an upgrade, we fall back to the pre-2026-08-25
+    # construction (voice defaults, natural pace) rather than breaking calls.
+    try:
+        _voice_settings = elevenlabs.VoiceSettings(
+            stability=TTS_STABILITY,
+            similarity_boost=TTS_SIMILARITY,
+            speed=TTS_SPEED,
+        )
+        _eleven_tts = elevenlabs.TTS(
+            model=ELEVENLABS_TTS_MODEL,
+            voice_id=voice_id,
+            voice_settings=_voice_settings,
+        )
+    except Exception as _vs_err:  # noqa: BLE001
+        logger.warning(
+            "[agent] VoiceSettings unavailable (%s); using voice defaults", _vs_err
+        )
+        _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+    # LK-B1: wrap ElevenLabs in a FallbackAdapter that fails over to OpenAI TTS
+    # mid-call if ElevenLabs errors/times out, so one vendor outage doesn't
+    # leave the caller in silence on every call. Construction is wrapped: if
+    # the adapter or OpenAI TTS can't be built (plugin/version mismatch) we
+    # degrade to ElevenLabs-only — never WORSE than today (fail-open).
+    try:
+        from livekit.agents import tts as _agents_tts
+        tts = _agents_tts.FallbackAdapter([
+            _eleven_tts,
+            openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE),
+        ])
+        logger.info("[agent] TTS FallbackAdapter active (ElevenLabs -> OpenAI)")
+    except Exception as e:
+        logger.warning(
+            "[agent] TTS FallbackAdapter unavailable (%s); using ElevenLabs only", e
+        )
+        tts = _eleven_tts
+    return tts
 
 
 class VocoAgent(Agent):
@@ -892,42 +994,14 @@ async def entrypoint(ctx: JobContext):
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
-        # voice_settings construction is fail-open: if the plugin's VoiceSettings
-        # surface ever shifts on an upgrade, we fall back to the pre-2026-08-25
-        # construction (voice defaults, natural pace) rather than breaking calls.
+        # TTS construction lives in _build_tts (2026-09-04): ElevenLabs +
+        # FallbackAdapter over OpenAI as before, or OpenAI TTS directly when the
+        # prewarm key preflight found ElevenLabs rejecting ELEVEN_API_KEY.
         try:
-            _voice_settings = elevenlabs.VoiceSettings(
-                stability=TTS_STABILITY,
-                similarity_boost=TTS_SIMILARITY,
-                speed=TTS_SPEED,
-            )
-            _eleven_tts = elevenlabs.TTS(
-                model=ELEVENLABS_TTS_MODEL,
-                voice_id=voice_id,
-                voice_settings=_voice_settings,
-            )
-        except Exception as _vs_err:  # noqa: BLE001
-            logger.warning(
-                "[agent] VoiceSettings unavailable (%s); using voice defaults", _vs_err
-            )
-            _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
-        # LK-B1: wrap ElevenLabs in a FallbackAdapter that fails over to OpenAI TTS
-        # mid-call if ElevenLabs errors/times out, so one vendor outage doesn't
-        # leave the caller in silence on every call. Construction is wrapped: if
-        # the adapter or OpenAI TTS can't be built (plugin/version mismatch) we
-        # degrade to ElevenLabs-only — never WORSE than today (fail-open).
-        try:
-            from livekit.agents import tts as _agents_tts
-            tts = _agents_tts.FallbackAdapter([
-                _eleven_tts,
-                openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE),
-            ])
-            logger.info("[agent] TTS FallbackAdapter active (ElevenLabs -> OpenAI)")
-        except Exception as e:
-            logger.warning(
-                "[agent] TTS FallbackAdapter unavailable (%s); using ElevenLabs only", e
-            )
-            tts = _eleven_tts
+            _eleven_key_ok = ctx.proc.userdata.get("eleven_key_ok")
+        except Exception:  # noqa: BLE001
+            _eleven_key_ok = None
+        tts = _build_tts(voice_id, eleven_key_ok=_eleven_key_ok)
 
         # VAD: Silero defaults for barge-in. DO NOT port the realtime model's
         # 2.5s silence value here — Phase 64 did exactly that and added ~2s/turn.
