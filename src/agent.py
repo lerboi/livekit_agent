@@ -120,7 +120,11 @@ ELEVENLABS_TTS_MODEL = "eleven_flash_v2_5"
 # All env-overridable on Railway for live tuning without a deploy; set
 # VOCO_TTS_SPEED=1.0 to restore the previous pace.
 TTS_SPEED = float(os.environ.get("VOCO_TTS_SPEED", "1.08"))
-TTS_STABILITY = float(os.environ.get("VOCO_TTS_STABILITY", "0.5"))
+# 2026-09-05: 0.5 -> 0.45. ElevenLabs' conversational guidance: lower stability
+# (0.30-0.50) = livelier, more dynamic prosody; higher (0.6+) trends toward
+# "potentially monotonous", which reads as flat/robotic even at a normal pace.
+# 0.45 keeps it reliable while adding life. Env-overridable for live tuning.
+TTS_STABILITY = float(os.environ.get("VOCO_TTS_STABILITY", "0.45"))
 TTS_SIMILARITY = float(os.environ.get("VOCO_TTS_SIMILARITY", "0.75"))
 
 # LK-B1: OpenAI TTS used as the ElevenLabs FALLBACK (FallbackAdapter below) so a
@@ -231,7 +235,11 @@ LLM_CACHE_WARM_TIMEOUT_S = float(os.environ.get("VOCO_LLM_CACHE_WARM_TIMEOUT_S",
 # talking over slow speakers while cutting the worst-case wait by a full
 # second. Env-overridable for instant rollback/tuning without a deploy.
 MIN_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MIN_ENDPOINTING_DELAY_S", "0.4"))
-MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "2.0"))
+# 2026-09-05: 2.0 -> 1.2. Live recordings showed the worst turn-gaps (~2-3s of
+# dead air) landing on hesitant/number-heavy turns where the semantic detector
+# held for the full max. 1.2 trims that tail while still protecting slow speakers
+# (raise back toward 2.0 if the agent starts talking over callers). Env-overridable.
+MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "1.2"))
 
 # 2026-09-04 P1.1 follow-up: the post-call layer-2 triage classifier runs in
 # this job process on a cold OpenAI connection (one job per process). Warm it
@@ -277,14 +285,24 @@ STT_KEYTERMS_ENABLED = (
 #
 # Each voice_id MUST be added to the ElevenLabs account's "My Voices" (livekit/
 # agents #3992 — the plugin cannot use a voice that is not in My Voices and
-# hard-fails the call otherwise). Only two voices were provided; local_expert
-# reuses the professional voice (its prompt persona still differs via the
-# tone_preset TONE_LABELS). Kept in sync with main-repo migration 068 +
+# hard-fails the call otherwise, which then falls over to OpenAI TTS = a flat
+# "alloy" voice). Kept in sync with main-repo migration 068 +
 # src/lib/ai-voice-validation.js (which store/validate the LABELS, not the ids).
+#
+# 2026-09-05: switched from the generic BIvP0GN1cAtSRTxNHnWS/7EzWGsX10sAS4c9m9cPf
+# pair to ElevenLabs' curated CONVERSATIONAL voices (their voice-agent guide) —
+# chatty cadence, not narration. The prior voices read measured/flat on calls.
+# BEFORE THESE TAKE EFFECT: (1) ELEVEN_API_KEY on Railway must be the `sk_` SECRET,
+# not the key ID (a rejected key = every call in OpenAI "alloy"); (2) each id below
+# must be saved to the account's "My Voices". Audition via the admin test console's
+# voice picker before trusting a pin; Alexandra is the committed default pick.
+#   professional  = Alexandra (kdmDKE6EkgrWrrykO9Qt) — realistic young female, likes to chat
+#   friendly      = Eryn      (dj3G1R1ilKoFKhBnWOzG) — friendly, relatable, casual
+#   local_expert  = Cassidy   (56AoDkrOh6qfVPDXZ7Pt) — engaging, energetic
 ELEVENLABS_VOICE_MAP = {
-    "professional": "BIvP0GN1cAtSRTxNHnWS",
-    "friendly": "7EzWGsX10sAS4c9m9cPf",
-    "local_expert": "BIvP0GN1cAtSRTxNHnWS",  # no separate voice provided -> reuse professional
+    "professional": "kdmDKE6EkgrWrrykO9Qt",
+    "friendly": "dj3G1R1ilKoFKhBnWOzG",
+    "local_expert": "56AoDkrOh6qfVPDXZ7Pt",
 }
 
 # Valid stored-label allowlist (the keys of the voice map).
