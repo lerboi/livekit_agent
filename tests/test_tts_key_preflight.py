@@ -126,3 +126,64 @@ def test_build_tts_keeps_elevenlabs_first_otherwise(monkeypatch, verdict):
     assert el.call_args.kwargs["voice_id"] == "voice-1"
     assert el.call_args.kwargs["model"] == agent.ELEVENLABS_TTS_MODEL
     assert fa.call_args.args[0][0] is eleven
+
+
+# ── 2026-09-09: restricted keys + voice availability ────────────────────────
+
+
+def test_restricted_key_missing_user_read_is_inconclusive_not_rejected():
+    body = ('{"detail":{"type":"authentication_error","code":"unauthorized","message":'
+            '"The API key you used is missing the permission user_read to execute this operation.",'
+            '"status":"missing_permissions"}}')
+    with patch("httpx.get", return_value=_resp(401, body)):
+        assert agent._check_elevenlabs_key() is None
+
+
+def test_elevenlabs_api_key_alias_is_in_module_source():
+    src = open(agent.__file__, encoding="utf-8").read()
+    assert 'os.environ["ELEVEN_API_KEY"] = os.environ["ELEVENLABS_API_KEY"]' in src
+
+
+def test_voice_list_fetch_returns_ids_or_none():
+    class _R:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    with patch("httpx.get", return_value=_R(200, {"voices": [{"voice_id": "a"}, {"voice_id": "b"}]})):
+        assert agent._fetch_elevenlabs_voice_ids() == {"a", "b"}
+    with patch("httpx.get", return_value=_R(401, {})):
+        assert agent._fetch_elevenlabs_voice_ids() is None
+
+
+def test_build_tts_substitutes_fallback_voice_when_mapped_voice_missing():
+    seen = {}
+
+    class _FakeTTS:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    with patch.object(agent.elevenlabs, "TTS", _FakeTTS), patch.object(agent, "openai") as oa:
+        oa.TTS.return_value = object()
+        agent._build_tts("kdmDKE6EkgrWrrykO9Qt", eleven_key_ok=None,
+                         eleven_voice_ids={"EXAVITQu4vr4xnSDxMaL", "zzz"})
+    assert seen["voice_id"] == "EXAVITQu4vr4xnSDxMaL"
+
+
+def test_build_tts_keeps_mapped_voice_when_present_or_unknown():
+    seen = {}
+
+    class _FakeTTS:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    with patch.object(agent.elevenlabs, "TTS", _FakeTTS), patch.object(agent, "openai") as oa:
+        oa.TTS.return_value = object()
+        agent._build_tts("voice-1", eleven_key_ok=None, eleven_voice_ids={"voice-1", "x"})
+        assert seen["voice_id"] == "voice-1"
+        agent._build_tts("voice-2", eleven_key_ok=None, eleven_voice_ids=None)
+        assert seen["voice_id"] == "voice-2"
+

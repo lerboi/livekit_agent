@@ -24,14 +24,15 @@ Invariants asserted here:
    (`verdict=validated` AND `verdict=validated_with_corrections`).
 6. Both locales declare silence/neutral readback acceptable.
 7. The new section appears in the top-attention zone of the assembled prompt
-   — specifically BEFORE `_build_tool_narration_section`'s output.
+   — specifically BEFORE the OPENING section (2026-09-09: the TOOL NARRATION
+   section it used to be anchored against no longer exists; latency cover is
+   runtime-owned, see src/lib/tool_filler.py).
 8. EN and ES strings are distinct (parity guard against copy-paste error).
 """
 from __future__ import annotations
 
 from src.prompt import (
     _build_address_validation_section,
-    _build_tool_narration_section,
     build_system_prompt,
 )
 
@@ -70,19 +71,18 @@ def test_en_unless_clause_present():
 
 
 def test_en_position_in_top_attention_zone():
-    # The full assembled prompt must place the address-validation rule BEFORE
-    # the tool_narration section's output (top-attention zone alongside
-    # outcome_words / call_duration).
+    # The full assembled prompt must place the address-validation rule in the
+    # top-attention zone alongside outcome_words / call_duration — before the
+    # OPENING section (and therefore before LANGUAGE / INFORMATION GATHERING).
     full = build_system_prompt(locale="en", business_name="Voco")
     addr_section = _build_address_validation_section("en")
-    tool_narration = _build_tool_narration_section("en")
     addr_idx = full.find(addr_section)
-    tool_idx = full.find(tool_narration)
+    opening_idx = full.find("OPENING:")
     assert addr_idx >= 0, "Address validation section not assembled into EN prompt"
-    assert tool_idx >= 0, "Tool narration section not assembled into EN prompt"
-    assert addr_idx < tool_idx, (
-        f"Address validation section must precede tool narration "
-        f"(addr_idx={addr_idx}, tool_idx={tool_idx})"
+    assert opening_idx >= 0, "OPENING section not assembled into EN prompt"
+    assert addr_idx < opening_idx, (
+        f"Address validation section must precede OPENING "
+        f"(addr_idx={addr_idx}, opening_idx={opening_idx})"
     )
 
 
@@ -128,14 +128,13 @@ def test_es_unless_clause_present():
 def test_es_position_in_top_attention_zone():
     full = build_system_prompt(locale="es", business_name="Voco")
     addr_section = _build_address_validation_section("es")
-    tool_narration = _build_tool_narration_section("es")
     addr_idx = full.find(addr_section)
-    tool_idx = full.find(tool_narration)
+    opening_idx = full.find("OPENING:")
     assert addr_idx >= 0, "Address validation section not assembled into ES prompt"
-    assert tool_idx >= 0, "Tool narration section not assembled into ES prompt"
-    assert addr_idx < tool_idx, (
-        f"Address validation section must precede tool narration "
-        f"(addr_idx={addr_idx}, tool_idx={tool_idx})"
+    assert opening_idx >= 0, "OPENING section not assembled into ES prompt"
+    assert addr_idx < opening_idx, (
+        f"Address validation section must precede OPENING "
+        f"(addr_idx={addr_idx}, opening_idx={opening_idx})"
     )
 
 
@@ -205,7 +204,11 @@ def test_both_locales_early_validation_flow():
             assert state in section, f"missing {state!r}"
         # The read-at-most-twice cap.
         assert "more than twice" in section
-        # No silence license anywhere (Phase 61.1 deadlock class) — the
-        # filler before validate_address must be REQUIRED, not optional.
+        # No silence license anywhere (Phase 61.1 deadlock class). Since
+        # 2026-09-09 the runtime covers the lookup wait (lib/tool_filler), so
+        # the rule tells the model to call the tool directly and never stall
+        # on its own — the model-spoken filler is no longer part of the flow.
         assert "silence is acceptable" not in section.lower()
         assert "never leave the line silent" in section
+        assert "without announcing it" in section
+        assert "the system covers the wait" in section

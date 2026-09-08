@@ -121,14 +121,15 @@ def test_en_contains_voco_business_name():
 
 def test_section_is_position_5_or_earlier_in_both_locales():
     """D3: in the assembled prompt (both locales), the call_duration
-    CRITICAL RULE header must appear BEFORE the tool_narration header —
-    i.e. inside the top-attention band (Plan 3 Branch P invariant,
-    extended to the es branch by Plan 5; tool_narration es header added
-    by Plan 6)."""
+    CRITICAL RULE header must appear inside the top-attention band — before
+    the OPENING section (Plan 3 Branch P invariant, extended to the es
+    branch by Plan 5). 2026-09-09: anchored on OPENING because the TOOL
+    NARRATION section it was previously compared against no longer exists
+    (latency cover is runtime-owned, see src/lib/tool_filler.py)."""
     # 2026-06-11 collapse: both locales assemble the same EN headers.
     for locale, cd_header, tn_header in (
-        ("en", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION:"),
-        ("es", "ENDING THE CALL — CRITICAL RULE", "TOOL NARRATION:"),
+        ("en", "ENDING THE CALL — CRITICAL RULE", "OPENING:"),
+        ("es", "ENDING THE CALL — CRITICAL RULE", "OPENING:"),
     ):
         assembled = build_system_prompt(
             locale=locale,
@@ -141,7 +142,7 @@ def test_section_is_position_5_or_earlier_in_both_locales():
         idx_tn = assembled.index(tn_header)
         assert idx_cd < idx_tn, (
             f"[locale={locale}] call_duration CRITICAL RULE header must "
-            f"appear before tool_narration header in the assembled prompt"
+            f"appear before the OPENING header in the assembled prompt"
         )
 
 

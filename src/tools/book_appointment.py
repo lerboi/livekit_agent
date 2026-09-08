@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from livekit.agents import function_tool, RunContext
 
 from ..lib.background import create_background_task
+from ..lib.tool_filler import tool_filler
 from ..lib.booking import atomic_book_slot
 from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
@@ -201,11 +202,11 @@ _BOOK_APPOINTMENT_SCHEMA = {
         "as confirmed with the caller. The tool return will indicate "
         "whether the address was confirmed, corrected, or could not be "
         "verified, and will tell you what to speak back to the caller. "
-        "Speak only what the return tells you. Speak one short, varied filler "
-        "first (never the same one twice in a call — see TOOL NARRATION), "
-        "then invoke in the same turn. Do not speak 'booked'/'confirmed' or the appointment "
-        "time as a settled fact before this tool returns success. This "
-        "tool's return is a state+directive string — do not read it aloud."
+        "Speak only what the return tells you. Call it directly, without "
+        "announcing it — the system covers any wait. Do not speak "
+        "'booked'/'confirmed' or the appointment time as a settled fact before "
+        "this tool returns success. This tool's return is a state+directive "
+        "string — do not read it aloud."
     ),
     "parameters": {
         "type": "object",
@@ -255,564 +256,573 @@ _BOOK_APPOINTMENT_SCHEMA = {
 def create_book_appointment_tool(deps: dict):
     @function_tool(raw_schema=_BOOK_APPOINTMENT_SCHEMA)
     async def book_appointment(raw_arguments: dict, context: RunContext) -> str:
-        # raw_schema drops slot_start/slot_end from the Gemini-facing surface
-        # entirely. Kept as empty locals for one release cycle so the
-        # _ensure_utc_iso fallback path below stays syntactically intact; the
-        # branch is now dead code and can be removed in the next cycle.
-        slot_token = (raw_arguments.get("slot_token") or "").strip()
-        slot_start = ""
-        slot_end = ""
-        street_name = (raw_arguments.get("street_name") or "").strip()
-        postal_code = (raw_arguments.get("postal_code") or "").strip()
-        caller_name = (raw_arguments.get("caller_name") or "").strip()
-        unit_number = (raw_arguments.get("unit_number") or "").strip()
-        urgency = raw_arguments.get("urgency") or "routine"
+        # Runtime-owned latency cover (lib/tool_filler). Booking is the slowest
+        # tool on the call (validation fallback + atomic RPC + post-book
+        # queries, several Tokyo round-trips): one filler after the idle dwell,
+        # and a second "still working" line if it is still running 6 s later.
+        async with tool_filler(context, deps, "booking", interval=6.0, max_steps=2):
+            return await _book_appointment_impl(deps, raw_arguments, context)
 
-        tenant_id = deps.get("tenant_id")
-        supabase = deps["supabase"]
+    return book_appointment
 
-        # Combine street_name + unit_number + postal_code into service_address
-        parts = [p for p in [street_name, unit_number, postal_code] if p]
-        service_address = ", ".join(parts) if parts else "Address to be confirmed"
 
-        # ============================================================================
-        # Phase 61 (D-B2): validate address BEFORE atomic_book_slot
-        #   - External HTTP must not be inside the slot-lock contention window
-        #   - Booking never blocks on Google: every verdict proceeds to atomic_book_slot
-        # NOTE: `tenant_id` is already in local scope (extracted above via
-        # `tenant_id = deps.get("tenant_id")`). Use the existing local `tenant_id`
-        # directly — do NOT refetch from `deps`.
-        # ============================================================================
-        region_code = (deps.get("country") or "US").upper()
-        address_lines_for_validation = (
-            [", ".join(p for p in [street_name, unit_number] if p)]
-            if (street_name or unit_number)
-            else []
+async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunContext) -> str:
+    # raw_schema drops slot_start/slot_end from the Gemini-facing surface
+    # entirely. Kept as empty locals for one release cycle so the
+    # _ensure_utc_iso fallback path below stays syntactically intact; the
+    # branch is now dead code and can be removed in the next cycle.
+    slot_token = (raw_arguments.get("slot_token") or "").strip()
+    slot_start = ""
+    slot_end = ""
+    street_name = (raw_arguments.get("street_name") or "").strip()
+    postal_code = (raw_arguments.get("postal_code") or "").strip()
+    caller_name = (raw_arguments.get("caller_name") or "").strip()
+    unit_number = (raw_arguments.get("unit_number") or "").strip()
+    urgency = raw_arguments.get("urgency") or "routine"
+
+    tenant_id = deps.get("tenant_id")
+    supabase = deps["supabase"]
+
+    # Combine street_name + unit_number + postal_code into service_address
+    parts = [p for p in [street_name, unit_number, postal_code] if p]
+    service_address = ", ".join(parts) if parts else "Address to be confirmed"
+
+    # ============================================================================
+    # Phase 61 (D-B2): validate address BEFORE atomic_book_slot
+    #   - External HTTP must not be inside the slot-lock contention window
+    #   - Booking never blocks on Google: every verdict proceeds to atomic_book_slot
+    # NOTE: `tenant_id` is already in local scope (extracted above via
+    # `tenant_id = deps.get("tenant_id")`). Use the existing local `tenant_id`
+    # directly — do NOT refetch from `deps`.
+    # ============================================================================
+    region_code = (deps.get("country") or "US").upper()
+    address_lines_for_validation = (
+        [", ".join(p for p in [street_name, unit_number] if p)]
+        if (street_name or unit_number)
+        else []
+    )
+
+    # 2026-06-10 early-validation reuse: if the validate_address tool
+    # already validated this exact address mid-call (normalized street +
+    # postal match; unit differences tolerated), reuse its cached result —
+    # no second Google call. Any mismatch (or a cached transient error)
+    # falls back to validating here, exactly as before.
+    cached_validation = get_cached_validation(deps, street_name, postal_code)
+    used_cached_validation = cached_validation is not None
+    if used_cached_validation:
+        logger.info(
+            "[book_appointment] reusing mid-call validate_address result "
+            "(verdict=%s) for call=%s",
+            cached_validation.get("verdict"),
+            deps.get("call_id"),
+        )
+        validation_result = cached_validation
+    else:
+        # Tenant region first; automatic caller-region (caller-ID) second
+        # attempt only when the first verdict is unconfirmed/unsupported —
+        # up to 1.5s extra on that rare path only (see google_maps).
+        validation_result, _validation_region = await validate_address_with_region_fallback(
+            tenant_id=tenant_id,
+            call_id=deps.get("call_id"),
+            region_code=region_code,
+            caller_region=deps.get("caller_region"),
+            address_lines=address_lines_for_validation,
+            postal_code=postal_code or None,
+            locality=None,  # not captured by current single-question intake (Phase 60 D-08)
+            supabase=supabase,
+            timeout_seconds=1.5,
+        )
+        if _validation_region != region_code:
+            logger.info(
+                "[book_appointment] address validated with region=%s "
+                "(tenant region=%s) call=%s",
+                _validation_region, region_code, deps.get("call_id"),
+            )
+
+    # D-D3' service_address overwrite: only on confirmed / confirmed_with_changes
+    validation_verdict = validation_result.get("verdict", "error")
+    formatted_address_value = validation_result.get("formatted_address")
+    if validation_verdict in ("confirmed", "confirmed_with_changes") and formatted_address_value:
+        service_address = formatted_address_value
+    # Else: keep agent-joined string from `parts` block above
+
+    # Phase-fix (2026-04-24): slot_token is authoritative. Gemini 3.1 Flash
+    # Live has been observed ignoring the "pass slot_start_utc VERBATIM"
+    # directive and constructing naive ISO strings from the caller's
+    # wall-clock speech (e.g. '2026-04-27T14:00:00' for a 2-PM-SGT slot),
+    # which _ensure_utc_iso then coerces to UTC, producing an 8h-off
+    # booking. Structural fix: check_availability stashes (token -> UTC
+    # slot_start/end) on deps; we resolve here and ignore any
+    # Gemini-constructed slot_start/slot_end when the token is valid.
+    _token_resolved = False
+    # Defense-in-depth (2026-04-24): if Gemini hallucinates or forgets the
+    # token on the single-slot path, fall back to the last-offered token
+    # stashed by check_availability. The alternatives branch clears this
+    # key, so this only fires when there was an unambiguous single slot.
+    _tokens = deps.get("_slot_tokens") or {}
+    if slot_token and slot_token not in _tokens:
+        _last_offered = deps.get("_last_offered_token")
+        if _last_offered and _last_offered in _tokens:
+            logger.warning(
+                "[book_appointment] slot_token=%r not in registry; "
+                "recovering with _last_offered_token=%r",
+                slot_token, _last_offered,
+            )
+            slot_token = _last_offered
+    elif not slot_token:
+        _last_offered = deps.get("_last_offered_token")
+        if _last_offered and _last_offered in _tokens:
+            logger.info(
+                "[book_appointment] no slot_token supplied; using "
+                "_last_offered_token=%r", _last_offered,
+            )
+            slot_token = _last_offered
+    if slot_token:
+        _entry = _tokens.get(slot_token)
+        if _entry and (time.time() - _entry.get("created_at", 0)) < 600.0:
+            _authoritative_start = _entry["slot_start_utc"]
+            _authoritative_end = _entry["slot_end_utc"]
+            if slot_start and slot_start != _authoritative_start:
+                logger.info(
+                    "[book_appointment] slot_token=%s override: gemini-supplied "
+                    "slot_start=%r ignored; using authoritative %r",
+                    slot_token, slot_start, _authoritative_start,
+                )
+            if slot_end and slot_end != _authoritative_end:
+                logger.info(
+                    "[book_appointment] slot_token=%s override: gemini-supplied "
+                    "slot_end=%r ignored; using authoritative %r",
+                    slot_token, slot_end, _authoritative_end,
+                )
+            slot_start = _authoritative_start
+            slot_end = _authoritative_end
+            _token_resolved = True
+        else:
+            logger.warning(
+                "[book_appointment] slot_token=%r invalid or expired; falling "
+                "back to gemini-supplied slot_start/slot_end (may be misaligned)",
+                slot_token,
+            )
+
+    if not slot_start or not slot_end:
+        state = (
+            "STATE:booking_invalid reason=missing_slot_fields"
+            " | DIRECTIVE:apologize briefly; call check_slot again for the"
+            " time the caller wants, then call book_appointment with the slot_token"
+            " returned in the STATE line."
+        )
+        deps["_last_tool_state"] = state
+        return state
+
+    # Canonicalize slot_start / slot_end to UTC ISO up front. Only applies
+    # on the legacy fallback path (no valid token); a resolved token is
+    # already UTC. Gemini may drop the '+00:00' offset (especially after
+    # Phase 60 added a human-readable `speech=` field to check_availability's
+    # STATE line), which silently shifts the wall-clock seen by SMS /
+    # calendar / RPC consumers. Fix it once here so every downstream
+    # caller sees UTC.
+    if not _token_resolved:
+        try:
+            slot_start = _ensure_utc_iso(slot_start)
+            slot_end = _ensure_utc_iso(slot_end)
+        except ValueError:
+            state = (
+                "STATE:booking_invalid reason=malformed_slot_iso"
+                " | DIRECTIVE:apologize briefly; call check_slot again for the"
+                " same date and time to get a fresh slot, then call book_appointment"
+                " with the slot_token returned in the STATE line."
+            )
+            deps["_last_tool_state"] = state
+            return state
+
+    if not tenant_id:
+        state = (
+            "STATE:booking_failed reason=no_tenant_id"
+            " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
+            " capture_lead; do not attempt to book again in this call. Do not repeat this"
+            " message text on-air."
+        )
+        deps["_last_tool_state"] = state
+        return state
+
+    # Idempotency guard: if this exact slot was already successfully booked earlier
+    # in this call, return the cached confirmation without re-running the booking.
+    # Prevents duplicate side effects (recovery SMS, calendar events) when Gemini
+    # invokes the tool twice for the same slot in quick succession.
+    _slot_key = f"{slot_start}|{slot_end}"
+    cached_response = deps.get("_last_booked_slot_response")
+    if cached_response and deps.get("_last_booked_slot_key") == _slot_key:
+        logger.info(
+            "[agent] book_appointment: idempotent re-invocation for call=%s slot=%s",
+            deps.get("call_id"),
+            _slot_key,
+        )
+        deps["_last_tool_state"] = cached_response
+        return cached_response
+
+    # Tenant config: reuse the session-init row (agent.py fetched
+    # select("*") at call start; the availability tools already price
+    # slots off it via ensure_tenant) instead of paying an awaited
+    # round-trip inside the most latency-sensitive tool. Live fetch stays
+    # as the fallback for any path where deps["tenant"] was never
+    # populated. select("*") (parity with agent.py) instead of a named
+    # list so the live booking path stays fail-open if travel_buffer_mins
+    # (migration 075) isn't applied yet — a named column would make
+    # PostgREST 400 the whole query pre-migration, breaking booking; the
+    # value is read via the None-safe tenant.get("travel_buffer_mins", 30)
+    # below.
+    tenant = deps.get("tenant")
+    if not tenant:
+        tenant_result = await asyncio.to_thread(
+            lambda: supabase.table("tenants")
+            .select("*")
+            .eq("id", tenant_id)
+            .single()
+            .execute()
+        )
+        tenant = tenant_result.data if tenant_result.data else None
+    tenant_timezone = tenant.get("tenant_timezone") if tenant else None
+    if not tenant_timezone:
+        logger.warning(
+            "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
+            "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
+            tenant_id,
+        )
+        tenant_timezone = "UTC"
+
+    # Normalize urgency to a DB-constraint-valid value. Gemini has been observed
+    # passing freeform strings like "high" which violate appointments_urgency_check
+    # (backlog 999.1). Defense-in-depth alongside the tool-description enumeration.
+    normalized_urgency = _normalize_urgency(urgency)
+    if normalized_urgency != (urgency or "routine"):
+        logger.info(
+            "[agent] book_appointment: normalized urgency %r -> %r for call=%s",
+            urgency,
+            normalized_urgency,
+            deps.get("call_id"),
         )
 
-        # 2026-06-10 early-validation reuse: if the validate_address tool
-        # already validated this exact address mid-call (normalized street +
-        # postal match; unit differences tolerated), reuse its cached result —
-        # no second Google call. Any mismatch (or a cached transient error)
-        # falls back to validating here, exactly as before.
-        cached_validation = get_cached_validation(deps, street_name, postal_code)
-        used_cached_validation = cached_validation is not None
-        if used_cached_validation:
+    # Attempt atomic slot booking
+    try:
+        result = await atomic_book_slot(
+            supabase,
+            tenant_id=tenant_id,
+            call_id=deps.get("call_uuid") or None,
+            start_time=slot_start,
+            end_time=slot_end,
+            address=service_address,
+            caller_name=caller_name or "Caller",
+            caller_phone=deps.get("from_number", ""),
+            urgency=normalized_urgency,
+            zone_id=None,
+            postal_code=postal_code or None,
+            street_name=street_name or None,
+            # Phase 61 NEW — pass validation result fields through:
+            formatted_address=validation_result.get("formatted_address"),
+            place_id=validation_result.get("place_id"),
+            latitude=validation_result.get("latitude"),
+            longitude=validation_result.get("longitude"),
+            address_components=validation_result.get("address_components"),
+            address_validation_verdict=validation_verdict,
+        )
+    except Exception as booking_err:
+        logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
+        state = (
+            "STATE:booking_failed reason=rpc_error"
+            " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
+            " capture_lead; do not attempt to book again in this call. Do not repeat this"
+            " message text on-air."
+        )
+        deps["_last_tool_state"] = state
+        return state
+
+    if not result.get("success"):
+        # Late duplicate guard: if a prior successful booking of THIS EXACT slot
+        # has already cached a response on this call, this is a concurrent duplicate
+        # invocation arriving AFTER the first booking committed. Return the cached
+        # success response instead of treating it as a real slot_taken (which would
+        # fire a spurious recovery SMS for an already-booked slot).
+        # Key match is required so that a legitimate attempt at a *different* slot
+        # after a prior success doesn't accidentally return the old confirmation.
+        if deps.get("_last_booked_slot_key") == _slot_key:
             logger.info(
-                "[book_appointment] reusing mid-call validate_address result "
-                "(verdict=%s) for call=%s",
-                cached_validation.get("verdict"),
+                "[agent] book_appointment: slot_taken after prior success for same slot; returning cached response for call=%s",
                 deps.get("call_id"),
             )
-            validation_result = cached_validation
-        else:
-            # Tenant region first; automatic caller-region (caller-ID) second
-            # attempt only when the first verdict is unconfirmed/unsupported —
-            # up to 1.5s extra on that rare path only (see google_maps).
-            validation_result, _validation_region = await validate_address_with_region_fallback(
-                tenant_id=tenant_id,
-                call_id=deps.get("call_id"),
-                region_code=region_code,
-                caller_region=deps.get("caller_region"),
-                address_lines=address_lines_for_validation,
-                postal_code=postal_code or None,
-                locality=None,  # not captured by current single-question intake (Phase 60 D-08)
-                supabase=supabase,
-                timeout_seconds=1.5,
-            )
-            if _validation_region != region_code:
-                logger.info(
-                    "[book_appointment] address validated with region=%s "
-                    "(tenant region=%s) call=%s",
-                    _validation_region, region_code, deps.get("call_id"),
-                )
-
-        # D-D3' service_address overwrite: only on confirmed / confirmed_with_changes
-        validation_verdict = validation_result.get("verdict", "error")
-        formatted_address_value = validation_result.get("formatted_address")
-        if validation_verdict in ("confirmed", "confirmed_with_changes") and formatted_address_value:
-            service_address = formatted_address_value
-        # Else: keep agent-joined string from `parts` block above
-
-        # Phase-fix (2026-04-24): slot_token is authoritative. Gemini 3.1 Flash
-        # Live has been observed ignoring the "pass slot_start_utc VERBATIM"
-        # directive and constructing naive ISO strings from the caller's
-        # wall-clock speech (e.g. '2026-04-27T14:00:00' for a 2-PM-SGT slot),
-        # which _ensure_utc_iso then coerces to UTC, producing an 8h-off
-        # booking. Structural fix: check_availability stashes (token -> UTC
-        # slot_start/end) on deps; we resolve here and ignore any
-        # Gemini-constructed slot_start/slot_end when the token is valid.
-        _token_resolved = False
-        # Defense-in-depth (2026-04-24): if Gemini hallucinates or forgets the
-        # token on the single-slot path, fall back to the last-offered token
-        # stashed by check_availability. The alternatives branch clears this
-        # key, so this only fires when there was an unambiguous single slot.
-        _tokens = deps.get("_slot_tokens") or {}
-        if slot_token and slot_token not in _tokens:
-            _last_offered = deps.get("_last_offered_token")
-            if _last_offered and _last_offered in _tokens:
-                logger.warning(
-                    "[book_appointment] slot_token=%r not in registry; "
-                    "recovering with _last_offered_token=%r",
-                    slot_token, _last_offered,
-                )
-                slot_token = _last_offered
-        elif not slot_token:
-            _last_offered = deps.get("_last_offered_token")
-            if _last_offered and _last_offered in _tokens:
-                logger.info(
-                    "[book_appointment] no slot_token supplied; using "
-                    "_last_offered_token=%r", _last_offered,
-                )
-                slot_token = _last_offered
-        if slot_token:
-            _entry = _tokens.get(slot_token)
-            if _entry and (time.time() - _entry.get("created_at", 0)) < 600.0:
-                _authoritative_start = _entry["slot_start_utc"]
-                _authoritative_end = _entry["slot_end_utc"]
-                if slot_start and slot_start != _authoritative_start:
-                    logger.info(
-                        "[book_appointment] slot_token=%s override: gemini-supplied "
-                        "slot_start=%r ignored; using authoritative %r",
-                        slot_token, slot_start, _authoritative_start,
-                    )
-                if slot_end and slot_end != _authoritative_end:
-                    logger.info(
-                        "[book_appointment] slot_token=%s override: gemini-supplied "
-                        "slot_end=%r ignored; using authoritative %r",
-                        slot_token, slot_end, _authoritative_end,
-                    )
-                slot_start = _authoritative_start
-                slot_end = _authoritative_end
-                _token_resolved = True
-            else:
-                logger.warning(
-                    "[book_appointment] slot_token=%r invalid or expired; falling "
-                    "back to gemini-supplied slot_start/slot_end (may be misaligned)",
-                    slot_token,
-                )
-
-        if not slot_start or not slot_end:
-            state = (
-                "STATE:booking_invalid reason=missing_slot_fields"
-                " | DIRECTIVE:apologize briefly; call check_slot again for the"
-                " time the caller wants, then call book_appointment with the slot_token"
-                " returned in the STATE line."
+            state = deps.get(
+                "_last_booked_slot_response",
+                "STATE:booking_succeeded reason=idempotent_duplicate"
+                " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
+                " read back; do not restate the time; ask if there is anything else before wrapping"
+                " up.",
             )
             deps["_last_tool_state"] = state
             return state
 
-        # Canonicalize slot_start / slot_end to UTC ISO up front. Only applies
-        # on the legacy fallback path (no valid token); a resolved token is
-        # already UTC. Gemini may drop the '+00:00' offset (especially after
-        # Phase 60 added a human-readable `speech=` field to check_availability's
-        # STATE line), which silently shifts the wall-clock seen by SMS /
-        # calendar / RPC consumers. Fix it once here so every downstream
-        # caller sees UTC.
-        if not _token_resolved:
-            try:
-                slot_start = _ensure_utc_iso(slot_start)
-                slot_end = _ensure_utc_iso(slot_end)
-            except ValueError:
-                state = (
-                    "STATE:booking_invalid reason=malformed_slot_iso"
-                    " | DIRECTIVE:apologize briefly; call check_slot again for the"
-                    " same date and time to get a fresh slot, then call book_appointment"
-                    " with the slot_token returned in the STATE line."
-                )
-                deps["_last_tool_state"] = state
-                return state
+        # Slot was taken -- recalculate next available
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Widen the all-day floor 24h so today's UTC-midnight-encoded all-day
+        # rows survive the prefilter in west-of-UTC evenings (2026-06-12 audit M12).
+        all_day_floor_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-        if not tenant_id:
-            state = (
-                "STATE:booking_failed reason=no_tenant_id"
-                " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
-                " capture_lead; do not attempt to book again in this call. Do not repeat this"
-                " message text on-air."
-            )
-            deps["_last_tool_state"] = state
-            return state
-
-        # Idempotency guard: if this exact slot was already successfully booked earlier
-        # in this call, return the cached confirmation without re-running the booking.
-        # Prevents duplicate side effects (recovery SMS, calendar events) when Gemini
-        # invokes the tool twice for the same slot in quick succession.
-        _slot_key = f"{slot_start}|{slot_end}"
-        cached_response = deps.get("_last_booked_slot_response")
-        if cached_response and deps.get("_last_booked_slot_key") == _slot_key:
-            logger.info(
-                "[agent] book_appointment: idempotent re-invocation for call=%s slot=%s",
-                deps.get("call_id"),
-                _slot_key,
-            )
-            deps["_last_tool_state"] = cached_response
-            return cached_response
-
-        # Tenant config: reuse the session-init row (agent.py fetched
-        # select("*") at call start; the availability tools already price
-        # slots off it via ensure_tenant) instead of paying an awaited
-        # round-trip inside the most latency-sensitive tool. Live fetch stays
-        # as the fallback for any path where deps["tenant"] was never
-        # populated. select("*") (parity with agent.py) instead of a named
-        # list so the live booking path stays fail-open if travel_buffer_mins
-        # (migration 075) isn't applied yet — a named column would make
-        # PostgREST 400 the whole query pre-migration, breaking booking; the
-        # value is read via the None-safe tenant.get("travel_buffer_mins", 30)
-        # below.
-        tenant = deps.get("tenant")
-        if not tenant:
-            tenant_result = await asyncio.to_thread(
-                lambda: supabase.table("tenants")
-                .select("*")
-                .eq("id", tenant_id)
-                .single()
+        current_bookings, current_events, current_zones, current_buffers = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .select("start_time, end_time, zone_id")
+                .eq("tenant_id", tenant_id)
+                .neq("status", "cancelled")
+                .gte("end_time", now_iso)
                 .execute()
-            )
-            tenant = tenant_result.data if tenant_result.data else None
-        tenant_timezone = tenant.get("tenant_timezone") if tenant else None
-        if not tenant_timezone:
-            logger.warning(
-                "[tenant_config] null tenant_timezone tenant_id=%s — falling back to UTC; "
-                "caller times may be misaligned; backfill tenants.tenant_timezone to fix",
-                tenant_id,
-            )
-            tenant_timezone = "UTC"
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("calendar_events")
+                .select("start_time, end_time, is_all_day")
+                .eq("tenant_id", tenant_id)
+                .gte("end_time", all_day_floor_iso)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("service_zones")
+                .select("id, name, postal_codes")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("zone_travel_buffers")
+                .select("zone_a_id, zone_b_id, buffer_mins")
+                .eq("tenant_id", tenant_id)
+                .execute()
+            ),
+        )
 
-        # Normalize urgency to a DB-constraint-valid value. Gemini has been observed
-        # passing freeform strings like "high" which violate appointments_urgency_check
-        # (backlog 999.1). Defense-in-depth alongside the tool-description enumeration.
-        normalized_urgency = _normalize_urgency(urgency)
-        if normalized_urgency != (urgency or "routine"):
-            logger.info(
-                "[agent] book_appointment: normalized urgency %r -> %r for call=%s",
-                urgency,
-                normalized_urgency,
-                deps.get("call_id"),
-            )
+        end_date_str = to_local_date_string(slot_end, tenant_timezone)
+        next_slots = calculate_available_slots(
+            working_hours=tenant.get("working_hours") or {} if tenant else {},
+            slot_duration_mins=(tenant.get("slot_duration_mins") if tenant else None) or 60,
+            existing_bookings=current_bookings.data or [],
+            external_blocks=current_events.data or [],
+            zones=current_zones.data or [],
+            zone_pair_buffers=format_zone_pair_buffers(current_buffers.data or []),
+            target_date=end_date_str,
+            tenant_timezone=tenant_timezone,
+            max_slots=1,
+            travel_buffer_mins=(tenant or {}).get("travel_buffer_mins", 30),
+        )
 
-        # Attempt atomic slot booking
-        try:
-            result = await atomic_book_slot(
-                supabase,
-                tenant_id=tenant_id,
-                call_id=deps.get("call_uuid") or None,
-                start_time=slot_start,
-                end_time=slot_end,
-                address=service_address,
-                caller_name=caller_name or "Caller",
-                caller_phone=deps.get("from_number", ""),
-                urgency=normalized_urgency,
-                zone_id=None,
-                postal_code=postal_code or None,
-                street_name=street_name or None,
-                # Phase 61 NEW — pass validation result fields through:
-                formatted_address=validation_result.get("formatted_address"),
-                place_id=validation_result.get("place_id"),
-                latitude=validation_result.get("latitude"),
-                longitude=validation_result.get("longitude"),
-                address_components=validation_result.get("address_components"),
-                address_validation_verdict=validation_verdict,
-            )
-        except Exception as booking_err:
-            logger.error("[agent] atomic_book_slot error: %s", str(booking_err))
-            state = (
-                "STATE:booking_failed reason=rpc_error"
-                " | DIRECTIVE:apologize; offer to transfer to a human or take a callback via"
-                " capture_lead; do not attempt to book again in this call. Do not repeat this"
-                " message text on-air."
-            )
-            deps["_last_tool_state"] = state
-            return state
-
-        if not result.get("success"):
-            # Late duplicate guard: if a prior successful booking of THIS EXACT slot
-            # has already cached a response on this call, this is a concurrent duplicate
-            # invocation arriving AFTER the first booking committed. Return the cached
-            # success response instead of treating it as a real slot_taken (which would
-            # fire a spurious recovery SMS for an already-booked slot).
-            # Key match is required so that a legitimate attempt at a *different* slot
-            # after a prior success doesn't accidentally return the old confirmation.
-            if deps.get("_last_booked_slot_key") == _slot_key:
-                logger.info(
-                    "[agent] book_appointment: slot_taken after prior success for same slot; returning cached response for call=%s",
-                    deps.get("call_id"),
-                )
-                state = deps.get(
-                    "_last_booked_slot_response",
-                    "STATE:booking_succeeded reason=idempotent_duplicate"
-                    " | DIRECTIVE:confirm verbally to the caller using the name and address you already"
-                    " read back; do not restate the time; ask if there is anything else before wrapping"
-                    " up.",
-                )
-                deps["_last_tool_state"] = state
-                return state
-
-            # Slot was taken -- recalculate next available
-            now_iso = datetime.now(timezone.utc).isoformat()
-            # Widen the all-day floor 24h so today's UTC-midnight-encoded all-day
-            # rows survive the prefilter in west-of-UTC evenings (2026-06-12 audit M12).
-            all_day_floor_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-
-            current_bookings, current_events, current_zones, current_buffers = await asyncio.gather(
-                asyncio.to_thread(
-                    lambda: supabase.table("appointments")
-                    .select("start_time, end_time, zone_id")
-                    .eq("tenant_id", tenant_id)
-                    .neq("status", "cancelled")
-                    .gte("end_time", now_iso)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("calendar_events")
-                    .select("start_time, end_time, is_all_day")
-                    .eq("tenant_id", tenant_id)
-                    .gte("end_time", all_day_floor_iso)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("service_zones")
-                    .select("id, name, postal_codes")
-                    .eq("tenant_id", tenant_id)
-                    .execute()
-                ),
-                asyncio.to_thread(
-                    lambda: supabase.table("zone_travel_buffers")
-                    .select("zone_a_id, zone_b_id, buffer_mins")
-                    .eq("tenant_id", tenant_id)
-                    .execute()
-                ),
-            )
-
-            end_date_str = to_local_date_string(slot_end, tenant_timezone)
-            next_slots = calculate_available_slots(
-                working_hours=tenant.get("working_hours") or {} if tenant else {},
-                slot_duration_mins=(tenant.get("slot_duration_mins") if tenant else None) or 60,
-                existing_bookings=current_bookings.data or [],
-                external_blocks=current_events.data or [],
-                zones=current_zones.data or [],
-                zone_pair_buffers=format_zone_pair_buffers(current_buffers.data or []),
-                target_date=end_date_str,
-                tenant_timezone=tenant_timezone,
-                max_slots=1,
-                travel_buffer_mins=(tenant or {}).get("travel_buffer_mins", 30),
-            )
-
-            if len(next_slots) > 0:
-                next_slot_text = format_slot_for_speech(next_slots[0]["start"], tenant_timezone)
-            else:
-                next_slot_text = "tomorrow morning"
-
-            # Write booking_outcome: 'attempted'
-            await asyncio.to_thread(
-                lambda: supabase.table("calls").update(
-                    {"booking_outcome": "attempted"}
-                ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
-            )
-
-            # Send recovery SMS (non-blocking) — fire at most ONCE per call, even if
-            # multiple slot_taken events occur across different slots. The recovery SMS
-            # is a generic "couldn't book you" message, not slot-specific, so one per
-            # call is the correct semantic. The check + set is synchronous (no await
-            # between them), so it's race-safe on the single-threaded event loop.
-            # Test-call sandbox: never text the (possibly simulated) caller number.
-            if not deps.get("is_test_call") and not deps.get("_recovery_sms_fired"):
-                deps["_recovery_sms_fired"] = True
-                create_background_task(
-                    _send_recovery_sms(deps, tenant, normalized_urgency, caller_name)
-                )
-
-            deps.setdefault("_tool_call_log", []).append({
-                "name": "book_appointment",
-                "success": False,
-                "reason": "slot_taken",
-                "slot_start": slot_start,
-                "slot_end": slot_end,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
-
-            state = (
-                "STATE:slot_taken"
-                f" next_available={next_slot_text}"
-                " | DIRECTIVE:tell the caller that slot was just booked by someone else; offer"
-                " the next available time listed above as an alternative and ask if they want"
-                " to book it."
-            )
-            deps["_last_tool_state"] = state
-            return state
-
-        # Success — compute and cache the confirmation response SYNCHRONOUSLY before
-        # any await. A concurrent duplicate invocation (that lost the race to
-        # atomic_book_slot) will see this cache via the late-guard above and return
-        # the success response instead of firing a spurious recovery SMS. Previously
-        # the cache was set AFTER two awaited DB updates, opening a ~100-200ms window
-        # where a duplicate could fall through to the slot_taken branch.
-        appointment_id = result.get("appointment_id")
-
-        # Phase 61 D-E2 verdict-driven return strings, SHORTENED 2026-06-10 for
-        # the early-validation flow: when the address was already validated and
-        # confirmed mid-call via validate_address (used_cached_validation), the
-        # post-commit confirmation is ONE short sentence — day + time only, no
-        # address re-read. The address only re-enters the directive when this
-        # tool had to validate it itself (fallback path — the caller never
-        # heard the final form). The verdict= tokens are load-bearing: tests
-        # and the prompt's ADDRESS VALIDATION rule key on them — do not rename.
-        # The agent reads these; the strings are NEVER spoken aloud verbatim.
-        slot_speech = format_slot_for_speech(slot_start, tenant_timezone)
-        formatted_address_for_return = validation_result.get("formatted_address")
-        if validation_verdict == "confirmed":
-            if used_cached_validation:
-                return_msg = (
-                    f"BOOKED [verdict=validated]: confirm day and time "
-                    f"[{slot_speech}] in ONE short sentence; the address was "
-                    f"already confirmed — do not re-read it; "
-                    f"ask if anything else is needed"
-                )
-            else:
-                # 2026-06-11 (findings.md P2): the fallback-validated path no
-                # longer re-reads the address. When validation happened here
-                # (not mid-call), the prompt's BEFORE BOOKING readback already
-                # made the caller hear and acknowledge the address seconds ago
-                # — re-reading the normalized form was a repetition failure
-                # (Call B spoke one address ~5 times). confirmed_with_changes
-                # below still reads its corrected form: Google materially
-                # changed something the caller has not heard.
-                return_msg = (
-                    f"BOOKED [verdict=validated]: confirm day and time "
-                    f"[{slot_speech}] in ONE short sentence; do not re-read "
-                    f"the address — the caller already heard it in the "
-                    f"readback; ask if anything else is needed"
-                )
-        elif validation_verdict == "confirmed_with_changes":
-            if used_cached_validation:
-                return_msg = (
-                    f"BOOKED [verdict=validated_with_corrections]: confirm day "
-                    f"and time [{slot_speech}] in ONE short sentence; the "
-                    f"corrected address was already confirmed — do not re-read "
-                    f"it; ask if anything else is needed"
-                )
-            else:
-                return_msg = (
-                    f"BOOKED [verdict=validated_with_corrections]: confirm day "
-                    f"and time [{slot_speech}]; read corrected address "
-                    f"[{formatted_address_for_return}] once and "
-                    f"explicitly invite caller confirmation; "
-                    f"if caller corrects, accept correction and re-read once"
-                )
+        if len(next_slots) > 0:
+            next_slot_text = format_slot_for_speech(next_slots[0]["start"], tenant_timezone)
         else:
-            # unconfirmed | error | skipped | unsupported_region
-            return_msg = (
-                f"BOOKED [verdict=unvalidated]: confirm day and time "
-                f"[{slot_speech}] in ONE short sentence; "
-                "relay address as caller spoke it only if it was never read back; "
-                "do NOT claim \"validated\", \"confirmed against records\", or "
-                "\"looked up your address\""
+            next_slot_text = "tomorrow morning"
+
+        # Write booking_outcome: 'attempted'
+        await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {"booking_outcome": "attempted"}
+            ).eq("call_id", deps.get("call_id", "")).is_("booking_outcome", "null").execute()
+        )
+
+        # Send recovery SMS (non-blocking) — fire at most ONCE per call, even if
+        # multiple slot_taken events occur across different slots. The recovery SMS
+        # is a generic "couldn't book you" message, not slot-specific, so one per
+        # call is the correct semantic. The check + set is synchronous (no await
+        # between them), so it's race-safe on the single-threaded event loop.
+        # Test-call sandbox: never text the (possibly simulated) caller number.
+        if not deps.get("is_test_call") and not deps.get("_recovery_sms_fired"):
+            deps["_recovery_sms_fired"] = True
+            create_background_task(
+                _send_recovery_sms(deps, tenant, normalized_urgency, caller_name)
             )
 
-        deps["_last_booked_slot_key"] = _slot_key
-        deps["_last_booked_slot_response"] = return_msg
-        # Mirror the BOOKED verdict onto _last_tool_state (harmless bookkeeping;
-        # the Gemini-era cascade-recovery replay that consumed it was removed in
-        # the Phase 65 OpenAI migration).
-        deps["_last_tool_state"] = return_msg
-
-        # Phase-fix (2026-04-23): invalidate the slot_cache so a subsequent
-        # check_availability in this call sees the new appointment and will
-        # not re-offer the slot we just booked. Next check_availability will
-        # refetch from Supabase and repopulate the cache.
-        deps.pop("_slot_cache", None)
-        deps.pop("_last_offered_token", None)
-
-        # Authoritative booking flags for post-call reconciliation. These are set
-        # synchronously (no await between) so post-call can correct the DB even if
-        # the mid-call update below races the background db_task that creates the
-        # calls row.
-        deps["_booking_succeeded"] = True
-        deps["_booked_appointment_id"] = appointment_id
-        deps["_booked_caller_name"] = caller_name or None
-
-        # Audit trail for post-call hallucination detection.
         deps.setdefault("_tool_call_log", []).append({
             "name": "book_appointment",
-            "success": True,
-            "appointment_id": appointment_id,
+            "success": False,
+            "reason": "slot_taken",
             "slot_start": slot_start,
             "slot_end": slot_end,
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
-        # Now safe to do the awaited follow-up work. Write booking_outcome immediately
-        # so it persists even if the caller hangs up during calendar push or SMS.
-        # If the calls row hasn't been inserted yet (db_task race), this matches zero
-        # rows silently; post-call reconciliation handles that case.
-        result_update = await asyncio.to_thread(
-            lambda: supabase.table("calls").update(
-                {"booking_outcome": "booked"}
-            ).eq("call_id", deps.get("call_id", "")).execute()
+        state = (
+            "STATE:slot_taken"
+            f" next_available={next_slot_text}"
+            " | DIRECTIVE:tell the caller that slot was just booked by someone else; offer"
+            " the next available time listed above as an alternative and ask if they want"
+            " to book it."
         )
-        if not (result_update.data if result_update else None):
-            logger.warning(
-                "[booking] mid-call booking_outcome update matched zero rows "
-                "(race with db_task); will be reconciled in post-call. call_id=%s",
-                deps.get("call_id"),
+        deps["_last_tool_state"] = state
+        return state
+
+    # Success — compute and cache the confirmation response SYNCHRONOUSLY before
+    # any await. A concurrent duplicate invocation (that lost the race to
+    # atomic_book_slot) will see this cache via the late-guard above and return
+    # the success response instead of firing a spurious recovery SMS. Previously
+    # the cache was set AFTER two awaited DB updates, opening a ~100-200ms window
+    # where a duplicate could fall through to the slot_taken branch.
+    appointment_id = result.get("appointment_id")
+
+    # Phase 61 D-E2 verdict-driven return strings, SHORTENED 2026-06-10 for
+    # the early-validation flow: when the address was already validated and
+    # confirmed mid-call via validate_address (used_cached_validation), the
+    # post-commit confirmation is ONE short sentence — day + time only, no
+    # address re-read. The address only re-enters the directive when this
+    # tool had to validate it itself (fallback path — the caller never
+    # heard the final form). The verdict= tokens are load-bearing: tests
+    # and the prompt's ADDRESS VALIDATION rule key on them — do not rename.
+    # The agent reads these; the strings are NEVER spoken aloud verbatim.
+    slot_speech = format_slot_for_speech(slot_start, tenant_timezone)
+    formatted_address_for_return = validation_result.get("formatted_address")
+    if validation_verdict == "confirmed":
+        if used_cached_validation:
+            return_msg = (
+                f"BOOKED [verdict=validated]: confirm day and time "
+                f"[{slot_speech}] in ONE short sentence; the address was "
+                f"already confirmed — do not re-read it; "
+                f"ask if anything else is needed"
             )
-
-        # Backfill appointment call_id if it was NULL at booking time
-        # (call_uuid may not have been populated yet from the background DB task)
-        if appointment_id and deps.get("call_uuid"):
-            try:
-                await asyncio.to_thread(
-                    lambda: supabase.table("appointments")
-                    .update({"call_id": deps["call_uuid"]})
-                    .eq("id", appointment_id)
-                    .is_("call_id", "null")
-                    .execute()
-                )
-            except Exception:
-                pass  # non-critical — post-call pipeline has fallback
-
-        # Test-call sandbox: the appointment row itself is created (realistic
-        # flow; post_call auto-cancels it), but no external side effects — no
-        # Google/Outlook calendar event (auto-cancel can't remove those) and no
-        # SMS to the (possibly simulated) caller number.
-        if deps.get("is_test_call"):
-            logger.info(
-                "[book_appointment] test call — skipping calendar push + caller SMS "
-                "for appointment=%s", appointment_id,
+        else:
+            # 2026-06-11 (findings.md P2): the fallback-validated path no
+            # longer re-reads the address. When validation happened here
+            # (not mid-call), the prompt's BEFORE BOOKING readback already
+            # made the caller hear and acknowledge the address seconds ago
+            # — re-reading the normalized form was a repetition failure
+            # (Call B spoke one address ~5 times). confirmed_with_changes
+            # below still reads its corrected form: Google materially
+            # changed something the caller has not heard.
+            return_msg = (
+                f"BOOKED [verdict=validated]: confirm day and time "
+                f"[{slot_speech}] in ONE short sentence; do not re-read "
+                f"the address — the caller already heard it in the "
+                f"readback; ask if anything else is needed"
             )
-            return return_msg
+    elif validation_verdict == "confirmed_with_changes":
+        if used_cached_validation:
+            return_msg = (
+                f"BOOKED [verdict=validated_with_corrections]: confirm day "
+                f"and time [{slot_speech}] in ONE short sentence; the "
+                f"corrected address was already confirmed — do not re-read "
+                f"it; ask if anything else is needed"
+            )
+        else:
+            return_msg = (
+                f"BOOKED [verdict=validated_with_corrections]: confirm day "
+                f"and time [{slot_speech}]; read corrected address "
+                f"[{formatted_address_for_return}] once and "
+                f"explicitly invite caller confirmation; "
+                f"if caller corrects, accept correction and re-read once"
+            )
+    else:
+        # unconfirmed | error | skipped | unsupported_region
+        return_msg = (
+            f"BOOKED [verdict=unvalidated]: confirm day and time "
+            f"[{slot_speech}] in ONE short sentence; "
+            "relay address as caller spoke it only if it was never read back; "
+            "do NOT claim \"validated\", \"confirmed against records\", or "
+            "\"looked up your address\""
+        )
 
-        # Calendar sync — truly fire-and-forget so the tool returns quickly. A slow tool
-        # (awaited side effects) caused the AI to go silent, which let the caller's speech
-        # trigger duplicate invocations and a spurious recovery SMS.
-        if appointment_id:
-            async def _push_calendar_bg():
-                try:
-                    await asyncio.to_thread(
-                        lambda: push_booking_to_calendar(tenant_id, appointment_id, tenant_timezone)
-                    )
-                except Exception as cal_err:
-                    logger.error("[agent] Calendar push failed: %s", str(cal_err))
-            create_background_task(_push_calendar_bg())
+    deps["_last_booked_slot_key"] = _slot_key
+    deps["_last_booked_slot_response"] = return_msg
+    # Mirror the BOOKED verdict onto _last_tool_state (harmless bookkeeping;
+    # the Gemini-era cascade-recovery replay that consumed it was removed in
+    # the Phase 65 OpenAI migration).
+    deps["_last_tool_state"] = return_msg
 
-        # Caller SMS confirmation — truly fire-and-forget for the same reason.
-        sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
-        async def _send_confirmation_sms_bg():
-            try:
-                await asyncio.to_thread(
-                    lambda: send_caller_sms(
-                        to=deps.get("from_number"),
-                        from_number=deps.get("to_number"),
-                        business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
-                        date=_format_date_for_sms(slot_start, tenant_timezone),
-                        time=_format_time_for_sms(slot_start, tenant_timezone),
-                        address=service_address or "",
-                        locale=sms_locale,
-                    )
-                )
-            except Exception as sms_err:
-                logger.error("[agent] Caller SMS failed: %s", str(sms_err))
-        create_background_task(_send_confirmation_sms_bg())
+    # Phase-fix (2026-04-23): invalidate the slot_cache so a subsequent
+    # check_availability in this call sees the new appointment and will
+    # not re-offer the slot we just booked. Next check_availability will
+    # refetch from Supabase and repopulate the cache.
+    deps.pop("_slot_cache", None)
+    deps.pop("_last_offered_token", None)
 
+    # Authoritative booking flags for post-call reconciliation. These are set
+    # synchronously (no await between) so post-call can correct the DB even if
+    # the mid-call update below races the background db_task that creates the
+    # calls row.
+    deps["_booking_succeeded"] = True
+    deps["_booked_appointment_id"] = appointment_id
+    deps["_booked_caller_name"] = caller_name or None
+
+    # Audit trail for post-call hallucination detection.
+    deps.setdefault("_tool_call_log", []).append({
+        "name": "book_appointment",
+        "success": True,
+        "appointment_id": appointment_id,
+        "slot_start": slot_start,
+        "slot_end": slot_end,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Now safe to do the awaited follow-up work. Write booking_outcome immediately
+    # so it persists even if the caller hangs up during calendar push or SMS.
+    # If the calls row hasn't been inserted yet (db_task race), this matches zero
+    # rows silently; post-call reconciliation handles that case.
+    result_update = await asyncio.to_thread(
+        lambda: supabase.table("calls").update(
+            {"booking_outcome": "booked"}
+        ).eq("call_id", deps.get("call_id", "")).execute()
+    )
+    if not (result_update.data if result_update else None):
+        logger.warning(
+            "[booking] mid-call booking_outcome update matched zero rows "
+            "(race with db_task); will be reconciled in post-call. call_id=%s",
+            deps.get("call_id"),
+        )
+
+    # Backfill appointment call_id if it was NULL at booking time
+    # (call_uuid may not have been populated yet from the background DB task)
+    if appointment_id and deps.get("call_uuid"):
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .update({"call_id": deps["call_uuid"]})
+                .eq("id", appointment_id)
+                .is_("call_id", "null")
+                .execute()
+            )
+        except Exception:
+            pass  # non-critical — post-call pipeline has fallback
+
+    # Test-call sandbox: the appointment row itself is created (realistic
+    # flow; post_call auto-cancels it), but no external side effects — no
+    # Google/Outlook calendar event (auto-cancel can't remove those) and no
+    # SMS to the (possibly simulated) caller number.
+    if deps.get("is_test_call"):
+        logger.info(
+            "[book_appointment] test call — skipping calendar push + caller SMS "
+            "for appointment=%s", appointment_id,
+        )
         return return_msg
 
-    return book_appointment
+    # Calendar sync — truly fire-and-forget so the tool returns quickly. A slow tool
+    # (awaited side effects) caused the AI to go silent, which let the caller's speech
+    # trigger duplicate invocations and a spurious recovery SMS.
+    if appointment_id:
+        async def _push_calendar_bg():
+            try:
+                await asyncio.to_thread(
+                    lambda: push_booking_to_calendar(tenant_id, appointment_id, tenant_timezone)
+                )
+            except Exception as cal_err:
+                logger.error("[agent] Calendar push failed: %s", str(cal_err))
+        create_background_task(_push_calendar_bg())
+
+    # Caller SMS confirmation — truly fire-and-forget for the same reason.
+    sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
+    async def _send_confirmation_sms_bg():
+        try:
+            await asyncio.to_thread(
+                lambda: send_caller_sms(
+                    to=deps.get("from_number"),
+                    from_number=deps.get("to_number"),
+                    business_name=(tenant.get("business_name") if tenant else None) or "Your service provider",
+                    date=_format_date_for_sms(slot_start, tenant_timezone),
+                    time=_format_time_for_sms(slot_start, tenant_timezone),
+                    address=service_address or "",
+                    locale=sms_locale,
+                )
+            )
+        except Exception as sms_err:
+            logger.error("[agent] Caller SMS failed: %s", str(sms_err))
+    create_background_task(_send_confirmation_sms_bg())
+
+    return return_msg

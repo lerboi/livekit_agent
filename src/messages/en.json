@@ -18,6 +18,40 @@
     "no_input_prompt": "Sorry, are you still there?",
     "no_input_goodbye": "I'm having trouble hearing you. I'll have someone from the team call you back shortly. Goodbye."
   },
+  "tool_fillers": {
+    "generic": [
+      "Let me pull that up.",
+      "One sec, checking that now.",
+      "Hang on, let me have a look.",
+      "Okay, give me a second.",
+      "Let me check on that.",
+      "Just a moment."
+    ],
+    "address": [
+      "Let me find that on the map.",
+      "Okay, pulling that address up.",
+      "Let me look that one up."
+    ],
+    "booking": [
+      "Alright, locking that in now.",
+      "Let me get that on the schedule.",
+      "Okay, booking that in for you."
+    ],
+    "lead": [
+      "Let me get your details down.",
+      "Saving that for the team now.",
+      "Let me make a note of that."
+    ],
+    "transfer": [
+      "Let me get you over to the team.",
+      "Connecting you now, hang on."
+    ],
+    "still_working": [
+      "Almost there.",
+      "Still working on it, one moment.",
+      "Nearly done."
+    ]
+  },
   "notifications": {
     "booking_confirmation": "Your appointment with {business_name} is confirmed for {date} at {time}. Address: {address}",
     "recovery_sms_attempted_routine": "Hi {first_name}, {business_name} received your call. We'll follow up soon to schedule.",

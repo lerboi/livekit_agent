@@ -2,7 +2,7 @@
 validate_address tool -- early, mid-call address validation (2026-06-10).
 
 Lets the agent validate the service address the MOMENT the caller finishes
-saying it (after a one-sentence filler), instead of waiting for the
+saying it (any wait is covered by the runtime filler), instead of waiting for the
 booking/lead commit like Phase 61 did. The Phase 61 plumbing is unchanged:
 this tool goes through `validate_address_with_region_fallback`, which wraps
 the same `validate_address_bounded` (1.5s hard timeout per attempt, never
@@ -33,6 +33,7 @@ from livekit.agents import function_tool, RunContext
 from ..integrations.google_maps import validate_address_with_region_fallback
 from ..integrations.onemap import is_sg_postal, lookup_postal, normalize_postal
 from ..lib.service_area import classify_service_area
+from ..lib.tool_filler import tool_filler
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +194,10 @@ _SCHEMA = {
         "said them. The return tells you whether the address came back "
         "confirmed, corrected, or unclear, and exactly what to say next. "
         "The caller's word always beats the validated form — if they correct "
-        "any part of it, call this tool again with their correction. Speak one "
-        "short, varied filler first (never the same one twice in a call — see "
-        "TOOL NARRATION), then invoke in the same turn. This tool's return is a state+directive "
-        "string — data for you, not to be read aloud."
+        "any part of it, call this tool again with their correction. Call it "
+        "directly, without announcing it — the system covers any wait. This "
+        "tool's return is a state+directive string — data for you, not to be "
+        "read aloud."
     ),
     "parameters": {
         "type": "object",
@@ -344,57 +345,61 @@ def create_validate_address_tool(deps: dict):
         # instead of) Google. On a hit, `result` takes the exact google_maps
         # shape and the STATE logic below runs unchanged; on a miss / error /
         # flag off, today's Google path runs exactly as before.
-        result = None
-        if (
-            ONEMAP_ENABLED
-            and region_code == "SG"
-            and is_sg_postal(postal_code)
-        ):
-            try:
-                _hit = await lookup_postal(normalize_postal(postal_code))
-            except Exception as exc:  # noqa: BLE001 — lookup is never-raising; belt and braces
-                logger.warning("[validate_address] onemap lookup raised: %s", exc)
-                _hit = None
-            if _hit:
-                result = _onemap_result(_hit, street=street, unit=unit)
-                logger.info(
-                    "[validate_address] onemap hit postal=%s blk=%s road=%s "
-                    "building=%s verdict=%s call=%s",
-                    normalize_postal(postal_code), _hit.get("BLK_NO"),
-                    _hit.get("ROAD_NAME"), _hit.get("BUILDING"),
-                    result["verdict"], deps.get("call_id"),
-                )
+        # Runtime-owned latency cover (lib/tool_filler): OneMap/Google take
+        # 300-1500 ms, so this is the tool most likely to trigger the spoken
+        # filler; the address itself is never spoken by the filler.
+        async with tool_filler(context, deps, "address"):
+            result = None
+            if (
+                ONEMAP_ENABLED
+                and region_code == "SG"
+                and is_sg_postal(postal_code)
+            ):
+                try:
+                    _hit = await lookup_postal(normalize_postal(postal_code))
+                except Exception as exc:  # noqa: BLE001 — lookup is never-raising; belt and braces
+                    logger.warning("[validate_address] onemap lookup raised: %s", exc)
+                    _hit = None
+                if _hit:
+                    result = _onemap_result(_hit, street=street, unit=unit)
+                    logger.info(
+                        "[validate_address] onemap hit postal=%s blk=%s road=%s "
+                        "building=%s verdict=%s call=%s",
+                        normalize_postal(postal_code), _hit.get("BLK_NO"),
+                        _hit.get("ROAD_NAME"), _hit.get("BUILDING"),
+                        result["verdict"], deps.get("call_id"),
+                    )
 
-        # The fallback orchestrator is contractually never-raising, but this
-        # tool must ALSO never raise (an exception here would surface as a
-        # failed tool call mid-conversation) — belt and braces.
-        # caller_region (derived from caller-ID in agent.py deps) powers an
-        # automatic second attempt when the tenant-region verdict is
-        # unhelpful — up to 1.5s extra on that rare path only.
-        try:
-            if result is not None:
-                region_used = region_code
-            else:
-                result, region_used = await validate_address_with_region_fallback(
-                    tenant_id=deps.get("tenant_id"),
-                    call_id=deps.get("call_id"),
-                    region_code=region_code,
-                    caller_region=deps.get("caller_region"),
-                    address_lines=address_lines,
-                    postal_code=postal_code or None,
-                    locality=city or None,
-                    supabase=deps.get("supabase"),
-                    timeout_seconds=1.5,
-                )
-            if region_used != region_code:
-                logger.info(
-                    "[validate_address] validated with region=%s "
-                    "(tenant region=%s) call=%s",
-                    region_used, region_code, deps.get("call_id"),
-                )
-        except Exception as exc:  # noqa: BLE001 — tool must never raise
-            logger.error("[validate_address] unexpected error: %s", exc)
-            result = {"verdict": "error", "formatted_address": None}
+            # The fallback orchestrator is contractually never-raising, but this
+            # tool must ALSO never raise (an exception here would surface as a
+            # failed tool call mid-conversation) — belt and braces.
+            # caller_region (derived from caller-ID in agent.py deps) powers an
+            # automatic second attempt when the tenant-region verdict is
+            # unhelpful — up to 1.5s extra on that rare path only.
+            try:
+                if result is not None:
+                    region_used = region_code
+                else:
+                    result, region_used = await validate_address_with_region_fallback(
+                        tenant_id=deps.get("tenant_id"),
+                        call_id=deps.get("call_id"),
+                        region_code=region_code,
+                        caller_region=deps.get("caller_region"),
+                        address_lines=address_lines,
+                        postal_code=postal_code or None,
+                        locality=city or None,
+                        supabase=deps.get("supabase"),
+                        timeout_seconds=1.5,
+                    )
+                if region_used != region_code:
+                    logger.info(
+                        "[validate_address] validated with region=%s "
+                        "(tenant region=%s) call=%s",
+                        region_used, region_code, deps.get("call_id"),
+                    )
+            except Exception as exc:  # noqa: BLE001 — tool must never raise
+                logger.error("[validate_address] unexpected error: %s", exc)
+                result = {"verdict": "error", "formatted_address": None}
 
         # Cache the full bounded result for reuse by book_appointment /
         # capture_lead (skips the second Google call when the address the

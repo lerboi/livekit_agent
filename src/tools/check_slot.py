@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from livekit.agents import function_tool, RunContext
 
+from ..lib.tool_filler import tool_filler
 from ..utils import format_slot_for_speech
 from ._availability_lib import (
     calc_slots_for_dates,
@@ -43,9 +44,8 @@ _SCHEMA = {
     "name": "check_slot",
     "description": (
         "Verify whether a specific date and time is bookable. Call this every "
-        "time the caller names a concrete hour. Speak one short, varied filler "
-        "first (never the same one twice in a call — see TOOL NARRATION), then "
-        "invoke in the same turn. "
+        "time the caller names a concrete hour. Call it directly, without "
+        "announcing it — the system covers any wait. "
         "This tool's return is a state+directive string — do not read it aloud."
     ),
     "parameters": {
@@ -86,7 +86,11 @@ def create_check_slot_tool(deps: dict):
             call_id, date, time_str, urgency,
         )
         try:
-            result = await _impl(deps, date, time_str, urgency)
+            # Runtime-owned latency cover (lib/tool_filler): the warm slot
+            # cache answers in ~50 ms and nothing is spoken; only a stale-cache
+            # live fetch is slow enough to trigger the filler.
+            async with tool_filler(context, deps, "generic"):
+                result = await _impl(deps, date, time_str, urgency)
             elapsed_ms = int((_time.time() - t0) * 1000)
             logger.info(
                 "[63.1-DIAG] check_slot EXIT id=%s elapsed_ms=%d len=%d preview=%r",

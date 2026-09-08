@@ -17,6 +17,7 @@ import time as _time
 
 from livekit.agents import function_tool, RunContext
 
+from ..lib.tool_filler import tool_filler
 from ._availability_lib import (
     calc_slots_for_dates,
     ensure_tenant,
@@ -36,9 +37,9 @@ _SCHEMA = {
         "only when the caller is vague about when ('whenever works', "
         "'anytime'). Returns the open days — offer them and let the caller "
         "pick; then call check_day for the chosen day. Never invent times "
-        "yourself. Speak one short, varied filler first (never the same one "
-        "twice in a call — see TOOL NARRATION), then invoke in the same turn. This tool's return is a "
-        "state+directive string — do not read it aloud."
+        "yourself. Call it directly, without announcing it — the system covers "
+        "any wait. This tool's return is a state+directive string — do not read "
+        "it aloud."
     ),
     "parameters": {
         "type": "object",
@@ -55,7 +56,8 @@ def create_next_available_days_tool(deps: dict):
 
         logger.info("[63.1-DIAG] next_available_days ENTRY id=%s", call_id)
         try:
-            result = await _impl(deps)
+            async with tool_filler(context, deps, "generic"):
+                result = await _impl(deps)
             logger.info(
                 "[63.1-DIAG] next_available_days EXIT id=%s elapsed_ms=%d len=%d preview=%r",
                 call_id, int((_time.time() - t0) * 1000), len(result or ""), (result or "")[:180],

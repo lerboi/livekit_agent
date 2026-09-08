@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 from livekit.agents import function_tool, RunContext
 
+from ..lib.tool_filler import tool_filler
+
 from ..utils import format_slot_for_speech
 
 logger = logging.getLogger(__name__)
@@ -223,9 +225,11 @@ def create_check_caller_history_tool(deps: dict):
             deps["_last_tool_state"] = _HISTORY_LOOKUP_FAILED_STATE
             return _HISTORY_LOOKUP_FAILED_STATE
 
-        history = await fetch_caller_history(
-            supabase, tenant_id, from_number, tenant_timezone
-        )
+        # Runtime-owned latency cover (lib/tool_filler): four Supabase queries.
+        async with tool_filler(context, deps, "generic"):
+            history = await fetch_caller_history(
+                supabase, tenant_id, from_number, tenant_timezone
+            )
         state = format_caller_history_state(history)
         deps["_last_tool_state"] = state
         return state

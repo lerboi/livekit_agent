@@ -31,21 +31,38 @@ sentry_sdk.init(
     environment=os.environ.get("PYTHON_ENV", "production"),
 )
 
+# 2026-09-09: accept ELEVENLABS_API_KEY as an alias for ELEVEN_API_KEY. The
+# LiveKit plugin, the key preflight and the __main__ boot check all read
+# ELEVEN_API_KEY; the Railway service (and the main repo) were re-keyed under
+# the ELEVENLABS_API_KEY name, which would otherwise fail the boot check.
+if not os.environ.get("ELEVEN_API_KEY") and os.environ.get("ELEVENLABS_API_KEY"):
+    os.environ["ELEVEN_API_KEY"] = os.environ["ELEVENLABS_API_KEY"]
+
 from livekit.agents import (
     AgentSession,
     Agent,
     APIConnectOptions,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
     cli,
+    inference,
     JobContext,
     JobProcess,
     WorkerOptions,
     room_io,
 )
 from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
+# Deprecated text turn detector — kept importable ONLY as the
+# VOCO_TURN_DETECTOR=text rollback path (see TURN_DETECTOR_MODE). The import
+# must stay at module level: `download-files` (Dockerfile build step) only
+# fetches models for plugins that were imported/registered, and the text
+# model's languages.json must be in the image for the rollback to work.
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
 from .lib.background import create_background_task
+from .lib.tool_filler import ThinkingSoundController
 from .prompt import build_system_prompt
 from .tools import create_tools
 from .tools.end_call import _delayed_disconnect
@@ -150,6 +167,19 @@ TTS_KEY_PREFLIGHT = (
     os.environ.get("VOCO_TTS_KEY_PREFLIGHT", "true").strip().lower() != "false"
 )
 ELEVENLABS_USER_URL = "https://api.elevenlabs.io/v1/user"
+ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
+
+# 2026-09-09: none of the mapped conversational voices were in the ElevenLabs
+# account's "My Voices" — the plugin's websocket then closes with 1008 and the
+# FallbackAdapter burns ~7 s of dead air per call before switching to OpenAI.
+# prewarm() fetches the account's voice list once per job process (needs the
+# key's Voices:Read permission; skipped silently otherwise) and _build_tts()
+# substitutes this in-account premade voice when the mapped one is missing,
+# logging an ERROR that names the fix. Sarah is a standard ElevenLabs premade
+# voice present in every account; env-overridable.
+ELEVENLABS_FALLBACK_VOICE_ID = os.environ.get(
+    "VOCO_ELEVEN_FALLBACK_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"
+)
 
 
 def _check_elevenlabs_key(timeout_s: float = 4.0) -> bool | None:
@@ -166,6 +196,16 @@ def _check_elevenlabs_key(timeout_s: float = 4.0) -> bool | None:
             return True
         if resp.status_code in (400, 401, 403):
             body = resp.text or ""
+            # A RESTRICTED key without the User:Read permission is a valid key —
+            # ElevenLabs answers 401 "missing_permissions" / "user_read". Treat it
+            # as unknown (ElevenLabs-first), not rejected, and say what to grant.
+            if "missing_permissions" in body or "user_read" in body:
+                logger.warning(
+                    "[agent] ELEVEN_API_KEY is valid but lacks the User:Read permission "
+                    "(/v1/user -> %s); key preflight inconclusive — grant User:Read on the "
+                    "restricted key to enable the fast-fail check", resp.status_code,
+                )
+                return None
             if "authentication_error" in body or "invalid_api_key" in body or resp.status_code == 401:
                 logger.error(
                     "[agent] ELEVEN_API_KEY rejected by ElevenLabs (HTTP %s): %s — "
@@ -226,20 +266,80 @@ LLM_CACHE_WARM = (
 # window is ~3-5s; a slower warm would not land before turn 1 anyway.
 LLM_CACHE_WARM_TIMEOUT_S = float(os.environ.get("VOCO_LLM_CACHE_WARM_TIMEOUT_S", "6"))
 
-# 2026-08-25 latency pass: endpointing delays — how long the session waits
-# after the caller's speech before treating the turn as finished. SDK 1.5.7
-# defaults are 0.5s min and 3.0s max (the max applies whenever the semantic
-# turn detector thinks the caller may not be done — common on addresses,
-# numbers, and hesitant speech), which produced 0.5-3s of dead air before the
-# LLM even started. 0.4/2.0 keeps the semantic detector's protection against
-# talking over slow speakers while cutting the worst-case wait by a full
-# second. Env-overridable for instant rollback/tuning without a deploy.
-MIN_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MIN_ENDPOINTING_DELAY_S", "0.4"))
-# 2026-09-05: 2.0 -> 1.2. Live recordings showed the worst turn-gaps (~2-3s of
-# dead air) landing on hesitant/number-heavy turns where the semantic detector
-# held for the full max. 1.2 trims that tail while still protecting slow speakers
-# (raise back toward 2.0 if the agent starts talking over callers). Env-overridable.
-MAX_ENDPOINTING_DELAY_S = float(os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "1.2"))
+# 2026-09-09 turn-taking (livekit-agents 1.8). Two detectors are wired:
+#   audio (default): `inference.TurnDetector` — LiveKit's audio-native
+#     end-of-turn model. It decides from the audio itself (prosody + semantics,
+#     14 languages incl. EN/ES) instead of waiting for the STT final and then
+#     running a text classifier, and it leads LiveKit's public eot-bench (4.5%
+#     false cut-offs at 600 ms). "v1" is the full model served by LiveKit
+#     Inference; the SDK degrades to the bundled local "v1-mini" if the
+#     gateway is unreachable (local_fallback=True). NOTE: on a self-hosted
+#     worker (Railway) the SDK auto-selects v1-mini unless the version is
+#     given explicitly, so it is pinned here. LIVEKIT_API_KEY/SECRET already
+#     on the service authenticate the inference call.
+#   text: the deprecated MultilingualModel + the pre-1.8 endpointing values —
+#     instant rollback to the previous behaviour (VOCO_TURN_DETECTOR=text).
+TURN_DETECTOR_MODE = os.environ.get("VOCO_TURN_DETECTOR", "audio").strip().lower()
+TURN_DETECTOR_VERSION = os.environ.get("VOCO_TURN_DETECTOR_VERSION", "v1").strip().lower()
+# End-of-turn confidence below which the detector holds the turn open until
+# max_delay. Empty = the SDK's per-language default (0.56 for English on v1 in
+# the 2026-09-09 local run). The scripted e2e run saw genuine end-of-utterance
+# probabilities of 0.13-0.36 on a synthetic caller voice, i.e. the full
+# max_delay wait; lower this (e.g. 0.35) if real-caller `eot prediction` debug
+# lines show the same, raise it if the agent starts talking over callers.
+_unlikely = os.environ.get("VOCO_TURN_DETECTOR_UNLIKELY_THRESHOLD", "").strip()
+TURN_DETECTOR_UNLIKELY_THRESHOLD = float(_unlikely) if _unlikely else None
+
+# Endpointing: how long the session waits after the caller's speech before
+# treating the turn as finished. With the audio detector LiveKit's recommended
+# values are 0.3 s min / 2.5 s max in "dynamic" mode (the max only applies
+# when the model is unsure, which is rare; dynamic mode adapts the delay to
+# the caller's own pause statistics). The text detector keeps the 2026-09-05
+# tuning (0.4 / 1.2) that the live recordings settled on. Env-overridable.
+_AUDIO_EOT = TURN_DETECTOR_MODE != "text"
+ENDPOINTING_MODE = os.environ.get(
+    "VOCO_ENDPOINTING_MODE", "dynamic" if _AUDIO_EOT else "fixed"
+).strip().lower()
+MIN_ENDPOINTING_DELAY_S = float(
+    os.environ.get("VOCO_MIN_ENDPOINTING_DELAY_S", "0.3" if _AUDIO_EOT else "0.4")
+)
+MAX_ENDPOINTING_DELAY_S = float(
+    os.environ.get("VOCO_MAX_ENDPOINTING_DELAY_S", "2.5" if _AUDIO_EOT else "1.2")
+)
+
+# Interruptions (barge-in). "adaptive" = LiveKit's audio classifier that tells
+# a real interruption from a backchannel ("mm-hmm", "yeah", "okay") so the
+# agent keeps talking through acknowledgements; min_words=2 is the
+# belt-and-braces gate the 2026 guides converge on (a single stray word or a
+# cough no longer stops the agent; "no, wait" still does). A false
+# interruption (VAD fired, nothing followed) resumes the agent's sentence
+# after false_interruption_timeout. Emergencies keep full barge-in.
+INTERRUPTION_MODE = os.environ.get("VOCO_INTERRUPTION_MODE", "adaptive").strip().lower()
+MIN_INTERRUPTION_WORDS = int(os.environ.get("VOCO_MIN_INTERRUPTION_WORDS", "2"))
+MIN_INTERRUPTION_DURATION_S = float(os.environ.get("VOCO_MIN_INTERRUPTION_DURATION_S", "0.5"))
+FALSE_INTERRUPTION_TIMEOUT_S = float(os.environ.get("VOCO_FALSE_INTERRUPTION_TIMEOUT_S", "2.0"))
+
+# Background audio (BackgroundAudioPlayer). The typing clip plays ONLY while a
+# tool is running and the agent is in the "thinking" state (see
+# lib/tool_filler.ThinkingSoundController) — the caller hears the receptionist
+# "looking it up" instead of dead air, and never hears typing before ordinary
+# sentences. Faint office ambience is wired but OFF by default: enable after a
+# listening test on the admin test console (VOCO_AMBIENT_SOUND=true).
+THINKING_SOUND_ENABLED = (
+    os.environ.get("VOCO_THINKING_SOUND", "true").strip().lower() != "false"
+)
+THINKING_SOUND_VOLUME = float(os.environ.get("VOCO_THINKING_SOUND_VOLUME", "0.5"))
+AMBIENT_SOUND_ENABLED = (
+    os.environ.get("VOCO_AMBIENT_SOUND", "false").strip().lower() == "true"
+)
+AMBIENT_SOUND_VOLUME = float(os.environ.get("VOCO_AMBIENT_SOUND_VOLUME", "0.25"))
+
+# Greet-first (2026-09-09): the per-caller context (caller history, optional
+# CRM context) is fetched WHILE the greeting plays and injected with
+# agent.update_instructions() before the caller is unmuted. This bounds how
+# long the mute may be extended past the greeting waiting for that fetch — the
+# fetch itself is budgeted at 2.5 s, well inside a ~3 s greeting.
+CONTEXT_READY_TIMEOUT_S = float(os.environ.get("VOCO_CONTEXT_READY_TIMEOUT_S", "4.0"))
 
 # 2026-09-04 P1.1 follow-up: the post-call layer-2 triage classifier runs in
 # this job process on a cold OpenAI connection (one job per process). Warm it
@@ -267,13 +367,14 @@ NUM_IDLE_PROCESSES = int(os.environ.get("VOCO_NUM_IDLE_PROCESSES", "2"))
 
 # 2026-06-11 naturalness pass (findings.md P8.2): Deepgram nova-3 keyterm
 # prompting (business name + active service names) to cut the address/name
-# mis-hearing class ("Canberra" -> "Kenberg", call eef9f785). DEFAULT OFF:
-# the plugin accepts keyterm with nova-3, but Deepgram's API behavior for
-# keyterm + language="multi" is unverified — an unsupported combo could fail
-# the STT websocket and break every call. Flip VOCO_STT_KEYTERMS=true on a
-# UAT deploy first; keep it off in prod until a live call confirms it.
+# mis-hearing class ("Canberra" -> "Kenberg", call eef9f785). Default ON since
+# 2026-09-09: Deepgram's keyterm docs now state "Keyterm Prompting is
+# available for both monolingual and multilingual transcription using the
+# Nova-3 Models" (limit 500 tokens/request; we send <= 20 short terms), which
+# closes the language="multi" concern that kept it off. VOCO_STT_KEYTERMS=false
+# disables it without a deploy.
 STT_KEYTERMS_ENABLED = (
-    os.environ.get("VOCO_STT_KEYTERMS", "false").strip().lower() == "true"
+    os.environ.get("VOCO_STT_KEYTERMS", "true").strip().lower() != "false"
 )
 
 # Voice mapping: tone_preset/ai_voice LABEL -> ElevenLabs voice_id.
@@ -476,13 +577,60 @@ def prewarm(proc: JobProcess) -> None:
         proc.userdata["eleven_key_ok"] = _check_elevenlabs_key()
         if proc.userdata["eleven_key_ok"] is True:
             logger.info("[agent] prewarm: ElevenLabs key accepted")
+        if proc.userdata["eleven_key_ok"] is not False:
+            proc.userdata["eleven_voice_ids"] = _fetch_elevenlabs_voice_ids()
+            if proc.userdata["eleven_voice_ids"]:
+                logger.info(
+                    "[agent] prewarm: ElevenLabs account has %d voices",
+                    len(proc.userdata["eleven_voice_ids"]),
+                )
 
 
-def _build_tts(voice_id: str, *, eleven_key_ok: bool | None):
+def _fetch_elevenlabs_voice_ids(timeout_s: float = 4.0) -> set[str] | None:
+    """voice_ids available to this ElevenLabs account (premade + My Voices), or
+    None when the list could not be fetched (no key, no Voices:Read permission,
+    network). Never raises."""
+    key = os.environ.get("ELEVEN_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import httpx
+
+        resp = httpx.get(ELEVENLABS_VOICES_URL, headers={"xi-api-key": key}, timeout=timeout_s)
+        if resp.status_code != 200:
+            logger.info(
+                "[agent] ElevenLabs voice list unavailable (HTTP %s); skipping voice check",
+                resp.status_code,
+            )
+            return None
+        ids = {v.get("voice_id") for v in (resp.json().get("voices") or []) if v.get("voice_id")}
+        return ids or None
+    except Exception as exc:  # noqa: BLE001 — preflight must never break prewarm
+        logger.warning("[agent] ElevenLabs voice list fetch inconclusive: %s", exc)
+        return None
+
+
+def _build_tts(
+    voice_id: str, *, eleven_key_ok: bool | None, eleven_voice_ids: set[str] | None = None
+):
     """TTS for one call. ElevenLabs (with the pace/voice settings) wrapped in a
     FallbackAdapter over OpenAI TTS — unless the key preflight said ElevenLabs
     rejects our key, in which case OpenAI TTS is used directly so the call does
-    not spend ~5 s failing over on its first line."""
+    not spend ~5 s failing over on its first line. When the account's voice
+    list is known and the mapped voice is not in it, an in-account fallback
+    voice is used instead of paying the 1008-close retry burn on every line."""
+    if eleven_voice_ids is not None and voice_id not in eleven_voice_ids:
+        fallback = (
+            ELEVENLABS_FALLBACK_VOICE_ID
+            if ELEVENLABS_FALLBACK_VOICE_ID in eleven_voice_ids
+            else sorted(eleven_voice_ids)[0]
+        )
+        logger.error(
+            "[agent] ElevenLabs voice %s is not in this account's voices — add it to "
+            "My Voices in ElevenLabs; using fallback voice %s for this call",
+            voice_id, fallback,
+        )
+        voice_id = fallback
     if eleven_key_ok is False:
         logger.error(
             "[agent] ElevenLabs key rejected at prewarm — building this call on "
@@ -596,17 +744,32 @@ async def entrypoint(ctx: JobContext):
 
         logger.info(f"[agent] Call started: room={call_id} from={from_number} to={to_number} test={is_test_call}")
 
-        # ── Tenant lookup ──
+        # ── Tenant lookup (ONE round-trip: tenant row + its active services) ──
+        # 2026-09-09 greet-first: the tenant row and the active services (intake
+        # questions + names for STT keyterms) used to be two sequential Supabase
+        # queries (Tokyo, ~130-200 ms each) on the pre-greeting critical path.
+        # PostgREST embedding (services.tenant_id -> tenants.id FK) returns both
+        # in one request; `.eq("services.is_active", True)` filters the embedded
+        # rows only, so a tenant with no active services still resolves. Verified
+        # against the live DB before shipping (identical service set to the
+        # two-step fetch). Everything else that used to sit before the greeting
+        # (caller history, CRM context) now loads WHILE the greeting plays.
         supabase = get_supabase_admin()
+        services_rows: list[dict] = []
         try:
             tenant_resp = await asyncio.to_thread(
                 lambda: supabase.table("tenants")
-                .select("*")
+                .select("*, services(name, intake_questions, is_active)")
                 .eq("phone_number", to_number)
+                .eq("services.is_active", True)
                 .single()
                 .execute()
             )
             tenant = tenant_resp.data
+            if tenant:
+                # Detach the embedded list so `tenant` keeps the plain row shape
+                # every tool and the post-call pipeline already expect.
+                services_rows = tenant.pop("services", None) or []
         except Exception as e:
             logger.warning(f"[agent] Tenant lookup failed for {to_number}: {e}")
             tenant = None
@@ -622,166 +785,18 @@ async def entrypoint(ctx: JobContext):
 
         logger.info(f"[agent] Tenant: {tenant_id or 'NONE'} ({business_name})")
 
-        # ── Build system prompt immediately (intake questions injected later) ──
         start_timestamp = int(time.time() * 1000)
 
-        # P56 D-06/D-08: fetch MERGED Jobber+Xero caller-context BEFORE
-        # build_system_prompt so the STATE+DIRECTIVE block is part of the
-        # initial system message. Both providers race CONCURRENTLY within the
-        # 2.5s budget; on timeout/error for either, that half silent-skips
-        # (Sentry-logged with hashed phone, not raw PII). On BOTH-miss the
-        # block is omitted entirely (D-11).
-        #
-        # Phase 62: caller_history (Voco's own customers/jobs/inquiries/
-        # appointments tables) is fetched IN PARALLEL with customer_context.
-        # Pre-session injection eliminates the 3-5s first-turn silent gap
-        # caused by the prior eager-invoke check_caller_history pattern
-        # (call AJ_bFP3MLdqnKqT, 2026-05-07). All pre-session fetches share
-        # the same 2.5s budget and run in ONE gather (intake questions
-        # included — 2026-08-19) — this block IS on the pre-greeting critical
-        # path, so the budget bounds the caller's dead air before the
-        # deterministic greeting.
-        customer_context = None
-        _ctx_unavailable = False
-        caller_history = None
-        _intake_res = None
-        if tenant_id:
-            from .tools.check_caller_history import fetch_caller_history
-
-            async def _fetch_caller_history_bounded():
-                if not from_number:
-                    return None
-                try:
-                    return await asyncio.wait_for(
-                        fetch_caller_history(
-                            supabase, tenant_id, from_number, tenant_timezone
-                        ),
-                        timeout=2.5,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[agent] caller_history fetch timeout — proceeding without"
-                    )
-                    return None
-                except Exception as e:
-                    logger.warning(
-                        "[agent] caller_history fetch failed: %s — proceeding without", e
-                    )
-                    return None
-
-            # Intake questions + service names. This used to be a SEQUENTIAL
-            # fetch after the gather below — one extra Supabase round-trip of
-            # dead air on the pre-greeting critical path of EVERY tenant call.
-            # It depends only on tenant_id, so it now runs concurrently with
-            # the customer-context + caller-history fetches. Never raises:
-            # returns None on failure (empty intake, same as before).
-            async def _fetch_intake_services():
-                try:
-                    return await asyncio.to_thread(
-                        lambda: supabase.table("services")
-                        .select("name, intake_questions")
-                        .eq("tenant_id", tenant_id)
-                        .eq("is_active", True)
-                        .execute()
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[63.1] intake_questions fetch failed, continuing with empty: %s", e
-                    )
-                    return None
-
-            async def _timed(coro):
-                _t = time.perf_counter()
-                _r = await coro
-                return _r, int((time.perf_counter() - _t) * 1000)
-
-            async def _fetch_customer_context_bounded():
-                # v1: Jobber/Xero integrations are flagged OFF (see
-                # homeservice_agent "My Prompts/Jobber-Xero-Disable.md"). Skip the
-                # pre-session merged-context fetch entirely so it never enters the
-                # call-setup critical path or delays the greeting. The integration
-                # modules stay importable/dormant. Flip VOCO_INTEGRATIONS_ENABLED=true
-                # to restore. caller_history (Voco's own tables, NOT an integration)
-                # continues to fetch in parallel below.
-                if not INTEGRATIONS_ENABLED:
-                    return None
-                return await fetch_merged_customer_context_bounded(
-                    tenant_id, from_number, timeout_seconds=2.5
-                )
-
-            _ctx_t0 = time.perf_counter()
-            (
-                (customer_context, _ctx_ms),
-                (caller_history, _hist_ms),
-                (_intake_res, _intake_ms),
-            ) = await asyncio.gather(
-                _timed(_fetch_customer_context_bounded()),
-                _timed(_fetch_caller_history_bounded()),
-                _timed(_fetch_intake_services()),
-            )
-            _ctx_elapsed = time.perf_counter() - _ctx_t0
-            # LOW-14: distinguish a FAILED context fetch from a genuine no-match.
-            # The sentinel must not flow into the prompt builder, _sources, or
-            # deps["customer_context"] (all expect dict|None) — coerce it to None
-            # and carry the failure as a separate boolean for the tool.
-            _ctx_unavailable = customer_context is FETCH_UNAVAILABLE
-            if _ctx_unavailable:
-                customer_context = None
-            # Pre-session fanout telemetry (2026-06-12 audit M11): the gather
-            # boundary row was defined but never emitted. Fire-and-forget via
-            # create_background_task (strong ref held until done) — the call
-            # path never waits on the insert. duration_ms stays the
-            # integration-fetch boundary (max of the two context tasks), NOT
-            # the whole gather, so the D-07 p95 query keeps its meaning now
-            # that the intake fetch shares the gather; intake time is its own
-            # per_task_ms key. v1: only meaningful when integrations are
-            # enabled (the row describes the integration-context fetch, and
-            # with the flag off _ctx_ms times a no-op — emitting would pollute
-            # the p95 metric), so it is gated off with the rest of the
-            # integration surface.
-            if INTEGRATIONS_ENABLED:
-                try:
-                    from .lib.telemetry import emit_integration_fetch_fanout
-
-                    create_background_task(emit_integration_fetch_fanout(
-                        supabase,
-                        tenant_id,
-                        duration_ms=max(_ctx_ms, _hist_ms),
-                        per_task_ms={
-                            "merged_context": _ctx_ms,
-                            "caller_history": _hist_ms,
-                            "intake_services": _intake_ms,
-                        },
-                        call_id=None,
-                    ))
-                except Exception as _fanout_exc:  # noqa: BLE001
-                    logger.debug("[agent] fanout telemetry skipped: %s", _fanout_exc)
-            _sources = (customer_context or {}).get("_sources") or {}
-            _unique_providers = sorted(set(_sources.values()))
-            _history_state = (
-                "repeat_caller" if caller_history else
-                ("first_time_caller" if caller_history == {} else "none")
-            )
-            logger.info(
-                "[agent] customer_context+caller_history fetch elapsed=%.3fs "
-                "providers=%s field_sources=%s history=%s",
-                _ctx_elapsed,
-                _unique_providers or "none",
-                _sources or "{}",
-                _history_state,
-            )
-
-        # Intake questions arrive from the pre-session gather above (fetched
-        # concurrently with customer_context + caller_history — previously a
-        # sequential round-trip here). Parsing is unchanged, so the questions
-        # remain part of the initial system prompt (built below) rather than
-        # injected mid-session (Phase 63.1 pattern).
+        # Intake questions + service names come straight off the embedded
+        # services rows (no extra fetch). Parsing is unchanged from the former
+        # _fetch_intake_services path, so the questions stay part of the
+        # initial system prompt.
         intake_questions_text = ""
         service_names: list[str] = []  # P8.2: STT keyterm source (with business name)
-        if tenant_id and _intake_res is not None:
+        if tenant_id and services_rows:
             try:
                 all_q: list[str] = []
-                for s in (_intake_res.data or []):
+                for s in services_rows:
                     _svc_name = (s.get("name") or "").strip()
                     if _svc_name and _svc_name not in service_names:
                         service_names.append(_svc_name)
@@ -793,20 +808,39 @@ async def entrypoint(ctx: JobContext):
             except Exception as e:
                 logger.warning("[63.1] intake_questions parse failed, continuing with empty: %s", e)
 
-        system_prompt = build_system_prompt(
-            locale,
-            business_name=business_name,
-            onboarding_complete=onboarding_complete,
-            tone_preset=tone_preset,
-            intake_questions=intake_questions_text,
-            country=country,
-            working_hours=tenant.get("working_hours") if tenant else None,
-            tenant_timezone=tenant_timezone,
-            customer_context=customer_context,
-            caller_history=caller_history,
-        )
+        # ── Base system prompt: every tenant-stable section, no per-caller blocks ──
+        # The per-caller CALLER HISTORY / CUSTOMER CONTEXT blocks are appended by
+        # _load_caller_context() below via agent.update_instructions() once their
+        # fetch completes (during the greeting). Because prompt.py renders those
+        # blocks LAST, the cacheable tenant-stable prefix is byte-identical either
+        # way. Nothing time-dependent is rendered inside build_system_prompt; the
+        # "Today is" line is appended here, after the builder returns.
         local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
-        system_prompt += f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
+        _today_line = f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
+
+        def _render_prompt(*, customer_context, caller_history) -> str:
+            return build_system_prompt(
+                locale,
+                business_name=business_name,
+                onboarding_complete=onboarding_complete,
+                tone_preset=tone_preset,
+                intake_questions=intake_questions_text,
+                country=country,
+                working_hours=tenant.get("working_hours") if tenant else None,
+                tenant_timezone=tenant_timezone,
+                customer_context=customer_context,
+                caller_history=caller_history,
+            ) + _today_line
+
+        system_prompt = _render_prompt(customer_context=None, caller_history=None)
+
+        # Per-caller context state, filled in by _load_caller_context() during
+        # the greeting. Tools read these lazily through deps, so a late fill is
+        # safe; the prompt is refreshed with update_instructions() before the
+        # caller is unmuted.
+        customer_context = None
+        _ctx_unavailable = False
+        caller_history = None
 
         # Default disconnect reason — tools update this via deps closure
         call_end_reason = ["caller_hangup"]
@@ -885,23 +919,28 @@ async def entrypoint(ctx: JobContext):
             # above — tools write via deps, session-level handlers write via
             # the closure. end_call.py writes end_call_invoked_at here.
             "_diag_record": diag_record,
-            # P56: merged Jobber+Xero caller-context (pre-fetched above,
-            # concurrent per-provider 2.5s budget). None means BOTH providers
-            # genuinely missed / aren't connected — check_customer_account
-            # returns the locked no_customer_match_for_phone string then.
+            # P56: merged Jobber+Xero caller-context. Filled by
+            # _load_caller_context() during the greeting (concurrent
+            # per-provider 2.5s budget). None means BOTH providers genuinely
+            # missed / aren't connected — check_customer_account returns the
+            # locked no_customer_match_for_phone string then.
             "customer_context": customer_context,
             # LOW-14: True when a CONNECTED provider's fetch FAILED (timeout /
             # HTTP / auth), as opposed to a clean no-match. The tool serves
             # "records temporarily unavailable" so a known caller is never
             # wrongly told they're a new/walk-in customer.
             "customer_context_unavailable": _ctx_unavailable,
-            # Phase 62: pre-fetched caller history from Voco's own
-            # customers/jobs/inquiries/appointments tables. Same 2.5s budget,
-            # parallel with customer_context. None means fetch failed/empty.
-            # Already injected into the system prompt via
-            # _build_caller_history_section — exposed here for any future
-            # tool/handler that needs the structured dict.
+            # Phase 62: caller history from Voco's own customers/jobs/
+            # inquiries/appointments tables. Filled by _load_caller_context()
+            # during the greeting; injected into the system prompt via
+            # _build_caller_history_section + update_instructions. None means
+            # fetch failed/empty.
             "caller_history": caller_history,
+            # Tenant default locale + the language the caller is currently
+            # speaking (tracked from STT finals below). Read by
+            # lib/tool_filler so runtime fillers come out in the right language.
+            "locale": locale,
+            "_active_language": None,
         }
         tools = create_tools(deps)
 
@@ -952,11 +991,8 @@ async def entrypoint(ctx: JobContext):
         # code-switching. Deliberately isolated to these two lines so the STT is
         # one-line-swappable — AssemblyAI Universal-3 Pro and Deepgram Flux-multi
         # are the UAT A/B candidates for alphanumeric/address accuracy (see
-        # My Prompts/Migration.md §D1). MultilingualModel() supplies semantic
-        # end-of-turn detection (more robust to brief SIP echo than raw Silero
-        # endpointing) and needs the model files the Dockerfile pre-downloads.
-        # P8.2: optional keyterm prompting (env-gated, default off — see the
-        # STT_KEYTERMS_ENABLED constant for the language="multi" caveat).
+        # My Prompts/Migration.md §D1). P8.2: keyterm prompting (business name
+        # + active service names; default on — see STT_KEYTERMS_ENABLED).
         _stt_kwargs = {}
         if STT_KEYTERMS_ENABLED:
             _keyterms = [t for t in ([business_name] + service_names) if t][:20]
@@ -966,7 +1002,33 @@ async def entrypoint(ctx: JobContext):
                     "[agent] STT keyterm prompting enabled count=%d", len(_keyterms)
                 )
         stt = deepgram.STT(model="nova-3", language="multi", **_stt_kwargs)
-        turn_detection = MultilingualModel()
+
+        # End-of-turn detection — see TURN_DETECTOR_MODE. Audio-native
+        # inference.TurnDetector by default (v1 on LiveKit Inference, local
+        # v1-mini fallback); the deprecated text MultilingualModel only when
+        # VOCO_TURN_DETECTOR=text. Construction is fail-open onto the text
+        # model so a bad env value or an SDK-side ValueError can never leave a
+        # call without a turn detector.
+        if TURN_DETECTOR_MODE == "text":
+            turn_detection = MultilingualModel()
+            logger.info("[agent] turn detector: text MultilingualModel (rollback mode)")
+        else:
+            try:
+                _td_kwargs = {"version": TURN_DETECTOR_VERSION}
+                if TURN_DETECTOR_UNLIKELY_THRESHOLD is not None:
+                    _td_kwargs["unlikely_threshold"] = TURN_DETECTOR_UNLIKELY_THRESHOLD
+                turn_detection = inference.TurnDetector(**_td_kwargs)
+                logger.info(
+                    "[agent] turn detector: audio inference.TurnDetector version=%s model=%s "
+                    "unlikely_threshold=%s",
+                    TURN_DETECTOR_VERSION, getattr(turn_detection, "model", "?"),
+                    TURN_DETECTOR_UNLIKELY_THRESHOLD if TURN_DETECTOR_UNLIKELY_THRESHOLD is not None else "sdk-default",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "[agent] audio turn detector unavailable (%s) — using text MultilingualModel", e
+                )
+                turn_detection = MultilingualModel()
 
         # LLM: non-reasoning gpt-4.1-mini for low TTFT + strong tool calling.
         # parallel_tool_calls=False keeps the booking flow strictly sequential
@@ -1017,9 +1079,12 @@ async def entrypoint(ctx: JobContext):
         # prewarm key preflight found ElevenLabs rejecting ELEVEN_API_KEY.
         try:
             _eleven_key_ok = ctx.proc.userdata.get("eleven_key_ok")
+            _eleven_voice_ids = ctx.proc.userdata.get("eleven_voice_ids")
         except Exception:  # noqa: BLE001
-            _eleven_key_ok = None
-        tts = _build_tts(voice_id, eleven_key_ok=_eleven_key_ok)
+            _eleven_key_ok, _eleven_voice_ids = None, None
+        tts = _build_tts(
+            voice_id, eleven_key_ok=_eleven_key_ok, eleven_voice_ids=_eleven_voice_ids
+        )
 
         # VAD: Silero defaults for barge-in. DO NOT port the realtime model's
         # 2.5s silence value here — Phase 64 did exactly that and added ~2s/turn.
@@ -1033,27 +1098,61 @@ async def entrypoint(ctx: JobContext):
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
+        # Turn handling (livekit-agents 1.8 `turn_handling` dict — the
+        # pre-1.8 flat kwargs min_endpointing_delay / allow_interruptions /
+        # preemptive_generation all map onto this). See the TURN_DETECTOR_MODE,
+        # ENDPOINTING_MODE and INTERRUPTION_MODE constants for the rationale.
+        turn_handling = {
+            "turn_detection": turn_detection,
+            "endpointing": {
+                "mode": ENDPOINTING_MODE,
+                "min_delay": MIN_ENDPOINTING_DELAY_S,
+                "max_delay": MAX_ENDPOINTING_DELAY_S,
+            },
+            # Callers must be able to barge in (emergencies). Echo defense for
+            # the OPENING line is the input-mute below, not disabling
+            # interruptions. "adaptive" ignores backchannels; min_words=2 is
+            # the second gate; a false interruption resumes the sentence.
+            "interruption": {
+                "enabled": True,
+                "mode": INTERRUPTION_MODE,
+                "min_words": MIN_INTERRUPTION_WORDS,
+                "min_duration": MIN_INTERRUPTION_DURATION_S,
+                "resume_false_interruption": True,
+                "false_interruption_timeout": FALSE_INTERRUPTION_TIMEOUT_S,
+            },
+            # P8.1: speculative LLM on interim transcripts (discarded if the
+            # final transcript differs) — cuts perceived response latency.
+            # VOCO_PREEMPTIVE_GENERATION=false reverts to the old behavior.
+            "preemptive_generation": {"enabled": PREEMPTIVE_GENERATION},
+        }
+        logger.info(
+            "[agent] turn_handling endpointing=%s/%.2f-%.2fs interruption=%s "
+            "min_words=%d preemptive=%s",
+            ENDPOINTING_MODE, MIN_ENDPOINTING_DELAY_S, MAX_ENDPOINTING_DELAY_S,
+            INTERRUPTION_MODE, MIN_INTERRUPTION_WORDS, PREEMPTIVE_GENERATION,
+        )
+
         session = AgentSession(
             stt=stt,
             llm=llm,
             tts=tts,
             vad=vad,
-            turn_detection=turn_detection,
-            # Callers must be able to barge in (emergencies). Echo defense for the
-            # OPENING line is the input-mute below, not disabling interruptions.
-            allow_interruptions=True,
-            # P8.1: speculative LLM+TTS on interim transcripts (discarded if the
-            # final transcript differs) — cuts perceived response latency.
-            # VOCO_PREEMPTIVE_GENERATION=false reverts to the old behavior.
-            preemptive_generation=PREEMPTIVE_GENERATION,
-            # 2026-08-25 latency pass: shrink the post-speech wait (SDK defaults
-            # 0.5/3.0 — see the constants above). Passed via the same kwarg
-            # style as the rest of this constructor; SDK 1.5.7 honors these
-            # directly (agent_session.py maps them onto turn_handling).
-            min_endpointing_delay=MIN_ENDPOINTING_DELAY_S,
-            max_endpointing_delay=MAX_ENDPOINTING_DELAY_S,
+            turn_handling=turn_handling,
         )
         deps["session"] = session
+
+        # Track the language the caller is actually speaking (Deepgram
+        # language="multi" reports it per final) so runtime fillers switch to
+        # Spanish when the conversation does. Fail-soft: unknown -> tenant locale.
+        @session.on("user_input_transcribed")
+        def _track_language(event):
+            try:
+                lang = getattr(event, "language", None)
+                if getattr(event, "is_final", False) and lang:
+                    deps["_active_language"] = str(lang).lower()
+            except Exception:
+                pass
 
         # ── Collect transcript in real-time ──
         transcript_turns = []
@@ -1327,6 +1426,16 @@ async def entrypoint(ctx: JobContext):
                 tool_call_log=deps.get("_tool_call_log", []) or [],
                 goodbye_handler=_goodbye_handler,
             )
+
+            # Stop the background audio track (typing / ambience) — bounded and
+            # best-effort; the player is created after this callback is
+            # registered, hence the holder lookup. Never blocks the pipeline.
+            try:
+                _player = background_audio_holder[0]
+                if _player is not None:
+                    await asyncio.wait_for(_player.aclose(), timeout=2.0)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[agent] background audio close skipped: %s", e)
 
             end_timestamp = int(time.time() * 1000)
             duration_sec = round((end_timestamp - start_timestamp) / 1000)
@@ -1604,26 +1713,51 @@ async def entrypoint(ctx: JobContext):
         )
         logger.info(f"[agent] Session started: room={call_id}")
 
-        # 2026-09-01: warm OpenAI's prompt cache with this call's exact
-        # instructions + tool schemas while the greeting plays (see the
-        # LLM_CACHE_WARM constant). agent.chat_ctx already holds the system
-        # instructions message (AgentActivity inserts it on start) and
-        # agent.tools is the list the activity sends, so the request prefix is
-        # byte-identical to turn 1's. Background + fail-open.
-        if LLM_CACHE_WARM:
+        # ── Background audio: typing while tools run (+ optional office ambience) ──
+        # Started as a background task so publishing the extra audio track never
+        # delays the greeting. The SDK's own thinking_sound hook is deliberately
+        # NOT used: it plays on every "thinking" state, i.e. before every
+        # sentence. ThinkingSoundController (lib/tool_filler) scopes the typing
+        # clip to tool execution only. Fail-open: any error leaves the call
+        # exactly as it was before this feature.
+        background_audio_holder: list = [None]
+
+        async def _start_background_audio():
+            if not (THINKING_SOUND_ENABLED or AMBIENT_SOUND_ENABLED):
+                return
             try:
-                create_background_task(
-                    _warm_prompt_cache(
-                        llm,
-                        agent.chat_ctx.copy(),
-                        agent.tools,
-                        timeout_s=LLM_CACHE_WARM_TIMEOUT_S,
-                        call_id=call_id,
-                    ),
-                    name="llm-cache-warm",
+                _ambient = (
+                    AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=AMBIENT_SOUND_VOLUME)
+                    if AMBIENT_SOUND_ENABLED
+                    else None
+                )
+                player = BackgroundAudioPlayer(ambient_sound=_ambient)
+                await player.start(room=ctx.room, agent_session=session)
+                background_audio_holder[0] = player
+                if THINKING_SOUND_ENABLED:
+                    typing_clips = [
+                        AudioConfig(
+                            BuiltinAudioClip.KEYBOARD_TYPING,
+                            volume=THINKING_SOUND_VOLUME,
+                            probability=0.5,
+                        ),
+                        AudioConfig(
+                            BuiltinAudioClip.KEYBOARD_TYPING2,
+                            volume=THINKING_SOUND_VOLUME,
+                            probability=0.5,
+                        ),
+                    ]
+                    ctl = ThinkingSoundController(player, typing_clips)
+                    ctl.attach(session)
+                    deps["_thinking_ctl"] = ctl
+                logger.info(
+                    "[agent] background audio started thinking_sound=%s ambient=%s",
+                    THINKING_SOUND_ENABLED, AMBIENT_SOUND_ENABLED,
                 )
             except Exception as e:  # noqa: BLE001
-                logger.warning("[agent] prompt cache warm not started: %s", e)
+                logger.warning("[agent] background audio unavailable (%s); continuing without", e)
+
+        create_background_task(_start_background_audio(), name="background-audio")
 
         # 2026-09-04: open the triage classifier's OpenAI connection now so the
         # post-call layer-2 call is not cold (see TRIAGE_LAYER2_WARM).
@@ -1694,10 +1828,160 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"[agent] greeting say failed: {e}")
 
-        # Re-enable caller audio once the greeting has fully played out. The
-        # GREETING_UNMUTE_TIMEOUT_S cap guarantees input is never left muted if a
-        # SIP playout stalls or drops mid-greeting. (If dispatch failed,
-        # greeting_handle is None and we unmute immediately.)
+        # ── Per-caller context: fetched WHILE the greeting plays ──
+        # P56 D-06/D-08 + Phase 62: merged Jobber/Xero caller-context and
+        # Voco's own caller history race concurrently inside a 2.5 s budget;
+        # on timeout/error either half silent-skips (Sentry-logged with hashed
+        # phone). Until 2026-09-09 this gather sat BEFORE session.start(), so
+        # the caller heard nothing while it ran. Now the greeting (~3 s) covers
+        # it: when the fetch lands, the full prompt (with the per-caller blocks
+        # prompt.py renders LAST, so the cached tenant-stable prefix is
+        # unchanged) replaces the base instructions via update_instructions(),
+        # and the prompt-cache warm request fires with the FINAL instructions.
+        # The caller is unmuted only once BOTH the greeting has played out AND
+        # this loader has finished (or CONTEXT_READY_TIMEOUT_S passed), so no
+        # first turn can ever run against half-built instructions.
+        prompt_ready = asyncio.Event()
+
+        async def _load_caller_context():
+            nonlocal customer_context, _ctx_unavailable, caller_history
+            try:
+                if not tenant_id:
+                    return
+                from .tools.check_caller_history import fetch_caller_history
+
+                async def _fetch_caller_history_bounded():
+                    if not from_number:
+                        return None
+                    try:
+                        return await asyncio.wait_for(
+                            fetch_caller_history(
+                                supabase, tenant_id, from_number, tenant_timezone
+                            ),
+                            timeout=2.5,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[agent] caller_history fetch timeout — proceeding without"
+                        )
+                        return None
+                    except Exception as e:
+                        logger.warning(
+                            "[agent] caller_history fetch failed: %s — proceeding without", e
+                        )
+                        return None
+
+                async def _fetch_customer_context_bounded():
+                    # v1: Jobber/Xero integrations are flagged OFF (see
+                    # homeservice_agent "My Prompts/Jobber-Xero-Disable.md").
+                    # Flip VOCO_INTEGRATIONS_ENABLED=true to restore.
+                    if not INTEGRATIONS_ENABLED:
+                        return None
+                    return await fetch_merged_customer_context_bounded(
+                        tenant_id, from_number, timeout_seconds=2.5
+                    )
+
+                async def _timed(coro):
+                    _t = time.perf_counter()
+                    _r = await coro
+                    return _r, int((time.perf_counter() - _t) * 1000)
+
+                _ctx_t0 = time.perf_counter()
+                (
+                    (customer_context, _ctx_ms),
+                    (caller_history, _hist_ms),
+                ) = await asyncio.gather(
+                    _timed(_fetch_customer_context_bounded()),
+                    _timed(_fetch_caller_history_bounded()),
+                )
+                _ctx_elapsed = time.perf_counter() - _ctx_t0
+                # LOW-14: distinguish a FAILED context fetch from a genuine
+                # no-match. The sentinel must not flow into the prompt builder
+                # or deps["customer_context"] (both expect dict|None).
+                _ctx_unavailable = customer_context is FETCH_UNAVAILABLE
+                if _ctx_unavailable:
+                    customer_context = None
+                # Pre-session fanout telemetry (2026-06-12 audit M11); only
+                # meaningful when integrations are enabled (the row describes
+                # the integration-context fetch).
+                if INTEGRATIONS_ENABLED:
+                    try:
+                        from .lib.telemetry import emit_integration_fetch_fanout
+
+                        create_background_task(emit_integration_fetch_fanout(
+                            supabase,
+                            tenant_id,
+                            duration_ms=max(_ctx_ms, _hist_ms),
+                            per_task_ms={
+                                "merged_context": _ctx_ms,
+                                "caller_history": _hist_ms,
+                            },
+                            call_id=None,
+                        ))
+                    except Exception as _fanout_exc:  # noqa: BLE001
+                        logger.debug("[agent] fanout telemetry skipped: %s", _fanout_exc)
+
+                deps["customer_context"] = customer_context
+                deps["customer_context_unavailable"] = _ctx_unavailable
+                deps["caller_history"] = caller_history
+
+                _sources = (customer_context or {}).get("_sources") or {}
+                _unique_providers = sorted(set(_sources.values()))
+                _history_state = (
+                    "repeat_caller" if caller_history else
+                    ("first_time_caller" if caller_history == {} else "none")
+                )
+                logger.info(
+                    "[agent] customer_context+caller_history fetch elapsed=%.3fs "
+                    "providers=%s field_sources=%s history=%s",
+                    _ctx_elapsed,
+                    _unique_providers or "none",
+                    _sources or "{}",
+                    _history_state,
+                )
+
+                if customer_context or caller_history:
+                    full_prompt = _render_prompt(
+                        customer_context=customer_context, caller_history=caller_history
+                    )
+                    await agent.update_instructions(full_prompt)
+                    logger.info(
+                        "[agent] instructions refreshed with caller context call=%s (+%d chars)",
+                        call_id, len(full_prompt) - len(system_prompt),
+                    )
+            except Exception as e:  # noqa: BLE001 — never touch the call path
+                logger.warning("[agent] caller context load failed (%s) — continuing without", e)
+            finally:
+                prompt_ready.set()
+                # 2026-09-01 prompt caching: warm OpenAI's cache with this
+                # call's FINAL instructions + tool schemas (see LLM_CACHE_WARM).
+                # agent.chat_ctx holds the (possibly refreshed) system message
+                # and agent.tools is the list the activity sends, so the request
+                # prefix is byte-identical to turn 1's. Background + fail-open.
+                if LLM_CACHE_WARM:
+                    try:
+                        create_background_task(
+                            _warm_prompt_cache(
+                                llm,
+                                agent.chat_ctx.copy(),
+                                agent.tools,
+                                timeout_s=LLM_CACHE_WARM_TIMEOUT_S,
+                                call_id=call_id,
+                            ),
+                            name="llm-cache-warm",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[agent] prompt cache warm not started: %s", e)
+
+        _context_task = create_background_task(_load_caller_context(), name="caller-context")
+
+        # Re-enable caller audio once the greeting has fully played out AND the
+        # per-caller context loader has finished (bounded by
+        # CONTEXT_READY_TIMEOUT_S so a slow fetch can only extend the mute by a
+        # bounded amount). The GREETING_UNMUTE_TIMEOUT_S cap guarantees input
+        # is never left muted if a SIP playout stalls or drops mid-greeting.
+        # (If dispatch failed, greeting_handle is None and we only wait on the
+        # context loader.)
         async def _unmute_after_greeting():
             try:
                 if greeting_handle is not None:
@@ -1712,15 +1996,29 @@ async def entrypoint(ctx: JobContext):
                 )
             except Exception as e:
                 logger.warning(f"[agent] greeting playout wait error: {e}")
-            finally:
-                try:
-                    session.input.set_audio_enabled(True)
-                    logger.info("[agent] input unmuted after greeting")
-                except Exception as e:
-                    logger.warning(f"[agent] could not unmute input after greeting: {e}")
-                # LK-B1: arm the no-input ("are you still there?") watchdog only
-                # AFTER the greeting window, so it never fires while input is muted.
-                _greeting_done[0] = True
+            try:
+                if not prompt_ready.is_set():
+                    _wait_t0 = time.perf_counter()
+                    await asyncio.wait_for(prompt_ready.wait(), timeout=CONTEXT_READY_TIMEOUT_S)
+                    logger.info(
+                        "[agent] unmute waited %dms for caller context after greeting",
+                        int((time.perf_counter() - _wait_t0) * 1000),
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[agent] caller context not ready %ss after greeting; unmuting anyway",
+                    CONTEXT_READY_TIMEOUT_S,
+                )
+            except Exception as e:
+                logger.warning(f"[agent] context-ready wait error: {e}")
+            try:
+                session.input.set_audio_enabled(True)
+                logger.info("[agent] input unmuted after greeting")
+            except Exception as e:
+                logger.warning(f"[agent] could not unmute input after greeting: {e}")
+            # LK-B1: arm the no-input ("are you still there?") watchdog only
+            # AFTER the greeting window, so it never fires while input is muted.
+            _greeting_done[0] = True
 
         _greeting_unmute_task = create_background_task(_unmute_after_greeting())
 

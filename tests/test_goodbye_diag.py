@@ -103,7 +103,12 @@ async def test_end_call_tool_writes_end_call_invoked_at(mock_deps_with_diag):
     recorded = mock_deps_with_diag["_diag_record"][0].get("end_call_invoked_at")
     assert isinstance(recorded, int), "end_call_invoked_at must be int ms"
     assert t_before - 500 <= recorded <= t_after + 500
-    assert isinstance(result, str)
+    # 2026-09-09: end_call returns None on purpose — in livekit-agents 1.8 a
+    # None tool output sets reply_required=False, so the SDK generates no
+    # follow-up reply that could be spoken over the hang-up (the goodbye was
+    # already awaited via RunContext.wait_for_playout inside the tool).
+    assert result is None
+    assert mock_deps_with_diag["call_end_reason"][0] == "agent_ended"
 
 
 # ── R-A1: conversation_item_added writes last_text_token_at on agent turns ──

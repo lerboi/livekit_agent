@@ -1,11 +1,21 @@
 """
 end_call tool -- graceful call termination.
-Ported from src/tools/end-call.js -- same logic, same behavior.
-Gemini generates the farewell, then we disconnect the SIP participant.
+
+2026-09-09 (livekit-agents 1.8): the goodbye and end_call now happen in the
+SAME turn. The tool awaits `RunContext.wait_for_playout()` — which resolves
+when the assistant speech spoken right before this tool call has finished
+playing (NOT the whole turn, so it cannot wait on itself) — and only then
+tears the line down. Before this the prompt asked the model to say goodbye,
+wait for the caller to say something, and call end_call in a separate turn:
+that cost an extra LLM round-trip, left an awkward silence, and if the caller
+stayed quiet the line simply sat open. Returning None suppresses the SDK's
+follow-up reply (reply_required = output is not None), so nothing can be
+spoken over the hang-up.
 """
 
 import asyncio
 import logging
+import os
 import time
 
 import sentry_sdk
@@ -16,14 +26,19 @@ from ..lib.background import create_background_task
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on waiting for the goodbye sentence to finish playing before the
+# disconnect proceeds anyway (a stalled TTS must never hold the line open).
+GOODBYE_PLAYOUT_TIMEOUT_S = float(os.environ.get("VOCO_GOODBYE_PLAYOUT_TIMEOUT_S", "20"))
+
 
 async def _delayed_disconnect(deps: dict) -> None:
     """Wait for the agent's current speech to finish playing, then tear down the call.
 
-    Uses livekit-agents 1.5.1 native `SpeechHandle.wait_for_playout()` via
-    `session.current_speech` for deterministic waiting — replaces the old fixed
-    12s `asyncio.sleep()` that cut off longer farewells and fired too early on
-    shorter ones. Capped at 20s as a hung-generation safety belt.
+    Uses `SpeechHandle.wait_for_playout()` via `session.current_speech` for
+    deterministic waiting (the watchdog / recovery callers rely on this; the
+    end_call tool itself has already awaited its own goodbye via
+    `RunContext.wait_for_playout()` by the time it schedules this). Capped at
+    20s as a hung-generation safety belt.
     """
     session = deps.get("session")
     try:
@@ -69,18 +84,36 @@ async def _delayed_disconnect(deps: dict) -> None:
         pass
 
 
+async def _wait_for_goodbye_playout(context) -> None:
+    """Block until the goodbye spoken in this turn has played out. Never raises.
+
+    Only a real RunContext (livekit-agents >= 1.8) exposes wait_for_playout;
+    unit tests pass SimpleNamespace / MagicMock contexts and skip the wait.
+    """
+    if not isinstance(context, RunContext):
+        return
+    try:
+        await asyncio.wait_for(context.wait_for_playout(), timeout=GOODBYE_PLAYOUT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[agent] end_call: goodbye playout wait exceeded %ss; disconnecting anyway",
+            GOODBYE_PLAYOUT_TIMEOUT_S,
+        )
+    except Exception as e:  # noqa: BLE001 — teardown must proceed regardless
+        logger.warning("[agent] end_call: goodbye playout wait error (%s); continuing", e)
+
+
 def create_end_call_tool(deps: dict):
     @function_tool(
         name="end_call",
         description=(
-            "Disconnect the phone line. "
-            "IMPORTANT: You must have ALREADY spoken your complete farewell BEFORE calling this. "
-            "Do NOT say goodbye and call this tool at the same time — finish speaking first, "
-            "then call this tool separately with no additional speech. "
+            "Hang up the line. Call this in the SAME turn as your goodbye, right after "
+            "the goodbye sentence — the line stays open until your goodbye has finished "
+            "playing, then disconnects. Never call it before the goodbye is spoken. "
             "Always capture caller information before ending if no booking was made."
         ),
     )
-    async def end_call(context: RunContext) -> str:
+    async def end_call(context: RunContext) -> None:
         # Phase 60.3 Stream A: capture end_call invocation timestamp on the
         # per-call diagnostic record (R-A4). diag_record is seeded in
         # agent.py entrypoint as deps["_diag_record"] = [{...}].
@@ -99,16 +132,15 @@ def create_end_call_tool(deps: dict):
             pass  # diagnostic breadcrumb must never block tool execution
 
         deps["call_end_reason"][0] = "agent_ended"
+
+        # Let the goodbye spoken in this same turn finish before anything else.
+        await _wait_for_goodbye_playout(context)
+
         # Held reference (lib/background) — a GC'd disconnect task would leave
         # the room open until the 10-min duration watchdog.
         create_background_task(_delayed_disconnect(deps))
-        # Let any in-flight sentence finish naturally (the disconnect task
-        # waits for playout). The directive only prevents Gemini from
-        # starting a NEW turn after the current one completes.
-        return (
-            "STATE:call_ending | DIRECTIVE:the line is about to disconnect; "
-            "do not start a new turn or produce further speech after your "
-            "current sentence completes."
-        )
+        # None = no follow-up LLM reply for this tool call (the line is going
+        # down; a generated "Goodbye!" would only ever be cut off mid-word).
+        return None
 
     return end_call

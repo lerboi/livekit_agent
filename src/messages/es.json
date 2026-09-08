@@ -18,6 +18,40 @@
     "no_input_prompt": "Disculpe, ¿sigue ahí?",
     "no_input_goodbye": "Estoy teniendo problemas para escucharle. Haré que alguien del equipo le devuelva la llamada en breve. Adiós."
   },
+  "tool_fillers": {
+    "generic": [
+      "Permítame revisar.",
+      "Un segundo, lo estoy consultando.",
+      "Déjeme ver.",
+      "Un momento, por favor.",
+      "Ya lo reviso.",
+      "Deme un segundo."
+    ],
+    "address": [
+      "Déjeme buscar esa dirección.",
+      "Estoy ubicando la dirección.",
+      "Un momento, busco esa dirección."
+    ],
+    "booking": [
+      "Muy bien, lo estoy agendando.",
+      "Déjeme ponerlo en la agenda.",
+      "Perfecto, reservando eso ahora."
+    ],
+    "lead": [
+      "Déjeme anotar sus datos.",
+      "Lo anoto para el equipo.",
+      "Un momento, tomo nota."
+    ],
+    "transfer": [
+      "Le comunico con el equipo.",
+      "Le conecto ahora, un momento."
+    ],
+    "still_working": [
+      "Ya casi.",
+      "Sigo en ello, un momento.",
+      "Casi listo."
+    ]
+  },
   "notifications": {
     "booking_confirmation": "Su cita con {business_name} esta confirmada para el {date} a las {time}. Direccion: {address}",
     "recovery_sms_attempted_routine": "Hola {first_name}, {business_name} recibio su llamada. Nos comunicaremos pronto para programar una cita.",

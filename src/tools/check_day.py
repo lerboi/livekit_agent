@@ -17,6 +17,7 @@ import time as _time
 
 from livekit.agents import function_tool, RunContext
 
+from ..lib.tool_filler import tool_filler
 from ..utils import format_slot_for_speech
 from ._availability_lib import (
     calc_slots_for_dates,
@@ -38,10 +39,9 @@ _SCHEMA = {
         "Check a specific day's availability. Use when the caller names a "
         "date but not a time yet. Returns up to 3 open windows for the day, "
         "each with a slot_token — offer two or three of them naturally; a "
-        "time the caller picks can be booked directly with its token. Speak "
-        "one short, varied filler first (never the same one twice in a call "
-        "— see TOOL NARRATION), then invoke in the same turn. This tool's return is a "
-        "state+directive string — do not read it aloud."
+        "time the caller picks can be booked directly with its token. Call it "
+        "directly, without announcing it — the system covers any wait. This "
+        "tool's return is a state+directive string — do not read it aloud."
     ),
     "parameters": {
         "type": "object",
@@ -75,7 +75,8 @@ def create_check_day_tool(deps: dict):
 
         logger.info("[63.1-DIAG] check_day ENTRY id=%s date=%r", call_id, date)
         try:
-            result = await _impl(deps, date)
+            async with tool_filler(context, deps, "generic"):
+                result = await _impl(deps, date)
             logger.info(
                 "[63.1-DIAG] check_day EXIT id=%s elapsed_ms=%d len=%d preview=%r",
                 call_id, int((_time.time() - t0) * 1000), len(result or ""), (result or "")[:180],

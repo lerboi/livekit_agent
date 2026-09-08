@@ -1,152 +1,157 @@
-"""Phase 60.2 post-mortem — assert _build_tool_narration_section() does NOT
-claim a runtime filler.
+"""Prompt contract tests for the 2026-09-09 rewrite (call-experience item 5).
 
-Fix H (runtime filler via context.session.say) was reverted because it cannot
-produce audio on a RealtimeModel-only AgentSession in livekit-agents 1.5.1
-(session.say requires a TTS, which is not attached when the session is wired
-as AgentSession(llm=RealtimeModel)). The narration section must instruct the
-model to speak its own filler — if it ever claims a runtime filler again,
-Gemini will go silent during tool execution and the race returns.
+History: Phase 60.2 reverted a runtime filler (session.say on a
+RealtimeModel-only session could not produce audio) and made the PROMPT own
+the filler ("never emit a tool call without speaking first"). Phase 60.3
+Branch P then made the goodbye a two-turn move (speak, wait, end_call in a
+separate turn) because end_call fired mid-farewell under the realtime model.
 
-Phase 60.3 Stream A Plan 3 (Branch P) additions — call_duration CRITICAL RULE:
-
-UAT #1 evidence (60.3-HUMAN-UAT.md, call-_+6587528516_KwsBVWBZkKps) showed
-Gemini invoked end_call during the goodbye turn rather than waiting for
-silence (end_call_invoked_at fired 11ms BEFORE last_text_token_at, and the
-caller heard "Alright, I'll get all" truncated mid-sentence). The UAT
-evidence also matches the upstream livekit/agents #5096 _SegmentSynchronizerImpl
-signature (text_done=false, audio_done=true) — the pipeline-sync race is
-systemic.
-
-Per Plan 2 ambiguity-resolution rule, Branch P (prompt-hardening) ships first:
-promote _build_call_duration_section to a CRITICAL RULE block with an explicit
-failure-mode example showing both the unsafe pattern (goodbye + end_call same
-turn) and the correct pattern (goodbye → silence → end_call separate turn).
-The section is reordered to position 5 in build_system_prompt (immediately
-after _build_outcome_words_section, before _build_tool_narration_section) so
-Gemini attends more strongly to it (RESEARCH §R-B5: top-of-prompt attention).
+Both are inverted here, on purpose and on a verified SDK basis (livekit-agents
+1.8, cascaded pipeline with a real TTS):
+- Latency cover is RUNTIME-owned again — `RunContext.with_filler()` speaks a
+  locale-correct line only when a tool is actually slow, and a typing sound
+  plays while a tool runs (src/lib/tool_filler.py). So the prompt must NOT
+  tell the model to speak a filler first (that would double-cover every tool
+  and cost a second LLM round-trip), and the tool descriptions must tell the
+  model to call the tool directly.
+- end_call awaits `RunContext.wait_for_playout()` — the goodbye spoken in the
+  same turn — before disconnecting, and returns None so no follow-up reply
+  can be spoken over the hang-up. So the prompt must teach goodbye + end_call
+  in the SAME turn.
 
 Invariants asserted here:
-1. _build_call_duration_section returns the literal substring
-   "ENDING THE CALL — CRITICAL RULE:" (case-sensitive).
-2. The returned block contains a concrete failure-mode example with both the
-   WRONG and RIGHT patterns.
-3. When assembled via build_system_prompt, the call_duration block appears
-   BEFORE the tool_narration block.
-4. The 9-minute and 10-minute duration bounds are preserved (existing
-   behavior must not regress).
-5. The section MUST NOT reintroduce the 60.2 Fix H "session.say"/"runtime
-   plays" pattern (Pitfall 6 — reverted for RealtimeModel-only sessions).
+1. No TOOL NARRATION section; no "speak first" instruction anywhere in the
+   assembled prompt; no literal filler bank for the model to recite.
+2. Tool descriptions for the availability/booking/address tools say to call
+   the tool directly without announcing it.
+3. ENDING THE CALL is a CRITICAL RULE block teaching the same-turn goodbye
+   with WRONG/RIGHT framing, keeps the 9/10-minute bounds, sits in the
+   top attention band (before OPENING), and never claims session.say.
 """
 from __future__ import annotations
 
-from src.prompt import (
-    _build_call_duration_section,
-    _build_tool_narration_section,
-    build_system_prompt,
-)
+import json
+
+from src.prompt import _build_call_duration_section, build_system_prompt
 
 
-def test_tool_narration_does_not_claim_runtime_filler():
-    # Phase 60.3 Plan 06: signature changed from () to (locale) for D7 locale
-    # parity. Passing locale='en' preserves the exact 60.2 Pitfall 6
-    # invariants being asserted here — this is a signature change, not a
-    # semantics change. EN body is verbatim-preserved.
-    section = _build_tool_narration_section("en")
-    assert isinstance(section, str)
-    lowered = section.lower()
-    assert "runtime automatically plays" not in lowered
-    assert "runtime filler" not in lowered
-    assert "do not speak your own filler" not in lowered
-    assert "do not generate your own filler" not in lowered
+def _assembled(**overrides) -> str:
+    kwargs = dict(locale="en", business_name="Voco", onboarding_complete=True)
+    kwargs.update(overrides)
+    return build_system_prompt(**kwargs)
 
 
-def test_tool_narration_instructs_model_to_speak_filler():
-    # Phase 60.3 Plan 06: signature changed from () to (locale) for D7 locale
-    # parity. Passing locale='en' preserves the exact 60.2 Pitfall 6
-    # invariants being asserted here — this is a signature change, not a
-    # semantics change. EN body is verbatim-preserved.
-    section = _build_tool_narration_section("en")
-    lowered = section.lower()
-    # The model IS the filler source — ensure the rule is present.
-    assert "speak" in lowered and "filler" in lowered
-    assert "never emit a tool call without speaking" in lowered
+# ── 1. Runtime-owned filler: the prompt no longer asks the model to speak first ──
 
 
-# --- Phase 60.3 Stream A Plan 3 (Branch P) — call_duration CRITICAL RULE ---
+def test_no_tool_narration_section_in_assembled_prompt():
+    p = _assembled()
+    assert "TOOL NARRATION" not in p
+    lowered = p.lower()
+    assert "never emit a tool call without speaking first" not in lowered
+    assert "speak one short, varied filler" not in lowered
+    assert "speak the filler" not in lowered
+    # No recitable filler bank left in the prompt (the runtime owns the lines).
+    for phrase in ("let me pull that up", "hang on, checking that slot", "locking that in for you now"):
+        assert phrase not in lowered, phrase
+
+
+def test_prompt_tells_model_tools_are_called_directly():
+    p = _assembled().lower()
+    # The scheduling rule and the address rule both say the wait is covered.
+    assert "without announcing it" in p
+    assert "the system covers the wait" in p
+
+
+def test_tool_descriptions_say_call_directly_without_announcing():
+    from src.tools.check_slot import _SCHEMA as check_slot_schema
+    from src.tools.check_day import _SCHEMA as check_day_schema
+    from src.tools.next_available_days import _SCHEMA as nad_schema
+    from src.tools.validate_address import _SCHEMA as validate_schema
+    from src.tools.book_appointment import _BOOK_APPOINTMENT_SCHEMA as book_schema
+
+    for schema in (check_slot_schema, check_day_schema, nad_schema, validate_schema, book_schema):
+        desc = schema["description"]
+        assert "without announcing it" in desc, schema["name"]
+        assert "TOOL NARRATION" not in desc, schema["name"]
+        assert "filler" not in desc.lower(), schema["name"]
+        # STATE+DIRECTIVE contract unchanged: never read the return aloud.
+        assert "state+directive" in desc.lower(), schema["name"]
+
+
+def test_runtime_filler_banks_exist_in_both_locales_and_never_name_a_time():
+    """The lines the runtime speaks live in the message bundles. They must
+    exist for EN and ES with the same bank names, and must never contain a
+    clock time / date word — the prompt's anti-fabrication rule forbids a
+    filler that primes 'four PM is available'."""
+    import pathlib
+
+    root = pathlib.Path(__file__).parent.parent / "src" / "messages"
+    en = json.loads((root / "en.json").read_text(encoding="utf-8"))["tool_fillers"]
+    es = json.loads((root / "es.json").read_text(encoding="utf-8"))["tool_fillers"]
+    assert set(en) == set(es)
+    assert {"generic", "address", "booking", "lead", "still_working"} <= set(en)
+    banned = ("am", "pm", "o'clock", "monday", "tuesday", "wednesday", "thursday", "friday",
+              "saturday", "sunday", "tomorrow", "today", "lunes", "martes", "mañana", "hoy")
+    for bundle in (en, es):
+        for name, lines in bundle.items():
+            assert isinstance(lines, list) and lines, name
+            assert len(set(lines)) == len(lines), f"duplicate filler in {name}"
+            for line in lines:
+                words = {w.strip(".,!?").lower() for w in line.split()}
+                assert not (words & set(banned)), (name, line)
+                assert not any(ch.isdigit() for ch in line), (name, line)
+
+
+# ── 3. Same-turn goodbye ───────────────────────────────────────────────────────
 
 
 def _t_stub(key: str) -> str:
-    """Minimal t() stub — _build_call_duration_section currently does not use t."""
     return key
 
 
 def test_call_duration_is_critical_rule_framed():
-    """Invariant 1: the section header is a CRITICAL RULE block."""
     section = _build_call_duration_section(_t_stub)
-    assert isinstance(section, str)
-    # Case-sensitive — the word "CRITICAL RULE" must appear in that exact form
-    # so the top-attention-band framing is consistent with the other CRITICAL RULE
-    # sections (OUTCOME WORDS, ADDRESS VALIDATION, NO DOUBLE-BOOKING). Corrections,
-    # Tool Narration, and Customer Context were de-inflated to plain headers
-    # (2026-06 emphasis trim) so "CRITICAL" stays meaningful on the must-wins.
     assert "ENDING THE CALL — CRITICAL RULE:" in section
 
 
-def test_call_duration_has_failure_mode_example():
-    """Invariant 2: the section contains a concrete failure-mode example
-    showing both the unsafe pattern (goodbye + end_call same turn) and the
-    correct pattern (goodbye → silence → end_call separate turn)."""
+def test_call_duration_teaches_same_turn_goodbye_with_failure_mode():
     section = _build_call_duration_section(_t_stub)
     lowered = section.lower()
-    # Anchor the example block — either "failure mode" framing or a WRONG:
-    # anti-pattern marker must be present.
-    assert ("failure mode" in lowered) or ("wrong:" in lowered)
-    # Both sides of the example must be shown: the mid-sentence cutoff
-    # (wrong) AND the separate-turn end_call invocation (right).
-    # The WRONG path shows end_call invoked mid-farewell.
+    assert "same turn" in lowered
     assert "end_call" in section
-    # The RIGHT path must describe silence/pause before end_call in a
-    # separate turn. Match any of the explicit markers the rewrite uses.
-    assert any(
-        marker in section
-        for marker in ("silence", "SILENCE", "separate turn", "separate step")
-    ), "failure-mode example must show the correct path (silence/separate turn)"
-    # The example must show both unsafe and correct patterns in the same
-    # block — check for explicit WRONG and RIGHT markers (or equivalent).
+    # The runtime guarantee the rule relies on is stated to the model.
+    assert "finished playing" in lowered
+    # WRONG / RIGHT framing retained.
     assert "WRONG" in section or "Failure mode" in section
     assert "RIGHT" in section or "Correct path" in section
-
-
-def test_call_duration_moved_above_tool_narration():
-    """Invariant 3: in the assembled prompt, call_duration appears BEFORE
-    tool_narration (top-attention-band placement)."""
-    assembled = build_system_prompt(
-        locale="en",
-        business_name="Voco",
-        onboarding_complete=True,
-    )
-    idx_call_duration = assembled.index("ENDING THE CALL — CRITICAL RULE")
-    idx_tool_narration = assembled.index("TOOL NARRATION:")
-    assert idx_call_duration < idx_tool_narration, (
-        "call_duration CRITICAL RULE must appear before tool_narration in the "
-        "assembled prompt (top-attention-band placement — RESEARCH §R-B5)"
-    )
+    # The old two-turn choreography is gone.
+    assert "separate turn" not in lowered
+    assert "let a brief silence pass" not in lowered
 
 
 def test_call_duration_preserves_9_and_10_minute_bounds():
-    """Invariant 4: the existing 9-minute wrap-up and 10-minute hard-max
-    behavior must not regress — keep "9 minutes" and "10 minutes" literals."""
     section = _build_call_duration_section(_t_stub)
     assert "9 minutes" in section
     assert "10 minutes" in section
 
 
-def test_call_duration_does_not_fabricate_session_say():
-    """Invariant 5 (Pitfall 6 guard): the section MUST NOT reintroduce the
-    60.2 Fix H "session.say"/"runtime plays" pattern — session.say cannot
-    produce audio on a RealtimeModel-only AgentSession in livekit-agents 1.5.1."""
-    section = _build_call_duration_section(_t_stub)
-    lowered = section.lower()
-    assert "session.say" not in lowered
-    assert "runtime plays" not in lowered
+def test_call_duration_in_top_attention_band():
+    assembled = _assembled()
+    assert assembled.index("ENDING THE CALL — CRITICAL RULE") < assembled.index("OPENING:")
+    assert assembled.index("ENDING THE CALL — CRITICAL RULE") < assembled.index("BOOKING:")
+
+
+def test_call_duration_does_not_claim_session_say():
+    section = _build_call_duration_section(_t_stub).lower()
+    assert "session.say" not in section
+    assert "runtime plays" not in section
+
+
+def test_final_recap_matches_same_turn_goodbye():
+    assembled = _assembled()
+    final = assembled[assembled.index("FINAL — NON-NEGOTIABLES"):]
+    lowered = final.lower()
+    assert "end_call" in final
+    assert "same turn" in lowered
+    assert "separate turn" not in lowered

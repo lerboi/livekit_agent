@@ -4,22 +4,32 @@ version = "1.0.0"
 description = "Voco AI voice receptionist — Twilio SIP + LiveKit + cascaded Deepgram STT / OpenAI gpt-4.1-mini LLM / ElevenLabs TTS"
 requires-python = ">=3.11"
 dependencies = [
-    # Pinned at 1.5.7 (2026-04-30) — patch bump on top of Phase 63's 1.5.6 mainline.
+    # Pinned at 1.8.0 (2026-09-09; was 1.5.7 since 2026-04-30). The bump unlocks
+    # three things src/agent.py now depends on: the audio-native
+    # `inference.TurnDetector` (v1, with the bundled v1-mini local fallback —
+    # the text `MultilingualModel` is deprecated for removal in SDK 2.0),
+    # `RunContext.with_filler()` / `RunContext.wait_for_playout()` (code-owned
+    # tool fillers + the same-turn goodbye in end_call), and
+    # `BackgroundAudioPlayer` (typing sound during tool calls). The unchanged
+    # 1.5.7 code base passed its full test suite on 1.8.0 before any of those
+    # were adopted.
     # Phase 66: voice brain migrated OpenAI gpt-realtime-2 (single speech-to-speech) ->
     # cascaded pipeline (Deepgram STT + OpenAI gpt-4.1-mini LLM + ElevenLabs Flash TTS).
-    # Every livekit-plugins-* is pinned to the SAME 1.5.7 line as livekit-agents so the
+    # Every livekit-plugins-* is pinned to the SAME line as livekit-agents so the
     # plugin __init__ signatures match what src/agent.py constructs (framework discipline:
     # pin drift across agents + plugins has historically broken constructor kwargs).
-    # livekit-plugins-openai now provides the LLM (openai.LLM), not the realtime model.
+    # livekit-plugins-openai provides the LLM (openai.LLM), not the realtime model.
     # livekit-plugins-google was dropped in Phase 65 (Calendar/Maps use google-auth /
     # google-api-python-client, which are separate deps below and STAY).
-    "livekit-agents==1.5.7",
-    "livekit-plugins-openai==1.5.7",
-    "livekit-plugins-deepgram==1.5.7",
-    "livekit-plugins-elevenlabs==1.5.7",
-    "livekit-plugins-silero==1.5.7",
-    "livekit-plugins-turn-detector==1.5.7",
-    "livekit-plugins-noise-cancellation>=0.2,<1",
+    # livekit-plugins-turn-detector stays installed ONLY as the VOCO_TURN_DETECTOR=text
+    # rollback path; the Dockerfile's `download-files` step still fetches its model.
+    "livekit-agents==1.8.0",
+    "livekit-plugins-openai==1.8.0",
+    "livekit-plugins-deepgram==1.8.0",
+    "livekit-plugins-elevenlabs==1.8.0",
+    "livekit-plugins-silero==1.8.0",
+    "livekit-plugins-turn-detector==1.8.0",
+    "livekit-plugins-noise-cancellation>=0.3,<1",
     "livekit-api>=1.0,<2",
     "supabase>=2.0,<3",
     "openai>=2.0,<3",
