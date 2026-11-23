@@ -30,6 +30,18 @@ def create_tools(deps: dict) -> list:
       monolithic check_availability; see
       .planning/research/check-availability-split-plan.md.
     """
+    if deps.get("agent_profile") == "scheduling":
+        # General scheduling agent (2026-11-23): availability + booking + end.
+        # No transfer, lead capture, address validation or caller history, so
+        # the tool surface (and the prompt bytes it costs every turn) is small.
+        return [
+            create_check_slot_tool(deps),
+            create_check_day_tool(deps),
+            create_next_available_days_tool(deps),
+            create_book_appointment_tool(deps),
+            create_end_call_tool(deps),
+        ]
+
     tools = [
         create_transfer_call_tool(deps),
         create_capture_lead_tool(deps),
@@ -41,7 +53,7 @@ def create_tools(deps: dict) -> list:
     # v1: Jobber/Xero integrations are flagged OFF, so the account-lookup tool is
     # not registered — no dead tool on the LLM's tool-selection surface and no
     # CUSTOMER CONTEXT block in the system prompt (prompt.py already omits it when
-    # customer_context is None). See My Prompts/Jobber-Xero-Disable.md.
+    # customer_context is None). See vault/Decisions/Decision - Jobber and Xero integrations frozen behind a flag for v1.md.
     if INTEGRATIONS_ENABLED:
         tools.append(create_check_customer_account_tool(deps))
 

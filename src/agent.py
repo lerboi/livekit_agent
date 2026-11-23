@@ -52,6 +52,7 @@ from livekit.agents import (
     WorkerOptions,
     room_io,
 )
+from livekit.agents import llm as _agents_llm
 from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
 # Deprecated text turn detector — kept importable ONLY as the
 # VOCO_TURN_DETECTOR=text rollback path (see TURN_DETECTOR_MODE). The import
@@ -63,7 +64,7 @@ from livekit import api, rtc
 
 from .lib.background import create_background_task
 from .lib.tool_filler import ThinkingSoundController
-from .prompt import build_system_prompt
+from .prompt import build_system_prompt, build_scheduling_prompt
 from .tools import create_tools
 from .tools.end_call import _delayed_disconnect
 from .supabase_client import get_supabase_admin, warm_supabase_connection
@@ -122,6 +123,29 @@ MAX_CALL_SECONDS = int(os.environ.get("VOCO_MAX_CALL_SECONDS", "600"))
 # any string; a wrong id fails at the first live call, not at import — confirm at
 # the UAT gate.
 LLM_MODEL = "gpt-4.1-mini"
+
+# 2026-11-23 fast path. Measured on a scripted call (vault Log 2026-11-23): the
+# voice-to-voice gap was ~1.7 s = 0.58 s end-of-turn + ~0.95 s LLM first token
+# + 0.10 s TTS. Three levers, each env-reversible without a deploy:
+#   * VOCO_AGENT_PROFILE=scheduling (default): a short general-scheduling prompt
+#     (~1 k tokens) and a 5-tool surface instead of the ~6.4 k-token
+#     home-service receptionist prompt. "home_service" restores the old agent.
+#   * VOCO_LLM_PROVIDER=groq (default): Groq-hosted open-weight model first
+#     (~0.2-0.3 s first token with a short prompt), gpt-4.1-mini as the
+#     FallbackAdapter second leg. "openai" uses gpt-4.1-mini only. Groq is only
+#     faster with the short prompt, so home_service keeps OpenAI.
+#   * VOCO_VAD_MIN_SILENCE_S: Silero's silence window before end-of-speech.
+#     The SDK default 0.55 s was the whole measured end-of-turn delay.
+AGENT_PROFILE = os.environ.get("VOCO_AGENT_PROFILE", "scheduling").strip().lower()
+LLM_PROVIDER = os.environ.get("VOCO_LLM_PROVIDER", "groq").strip().lower()
+GROQ_LLM_MODEL = os.environ.get("VOCO_GROQ_MODEL", "qwen/qwen3.8-27b").strip()
+GROQ_REASONING_EFFORT = os.environ.get("VOCO_GROQ_REASONING_EFFORT", "off").strip().lower()
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+LLM_FALLBACK_ATTEMPT_TIMEOUT_S = float(os.environ.get("VOCO_LLM_ATTEMPT_TIMEOUT_S", "4"))
+VAD_MIN_SILENCE_S = float(os.environ.get("VOCO_VAD_MIN_SILENCE_S", "0.3"))
+PREEMPTIVE_TTS = (
+    os.environ.get("VOCO_PREEMPTIVE_TTS", "true").strip().lower() != "false"
+)
 
 # Phase 66: ElevenLabs TTS model. Flash v2.5 streams first-byte ~75ms — the
 # sub-500ms TTS the Phase-64 revert doc named as the prerequisite for a viable
@@ -564,7 +588,7 @@ def prewarm(proc: JobProcess) -> None:
     in the shared inference executor; the constructor only reads a local
     languages.json.)
     """
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=VAD_MIN_SILENCE_S)
     # P1.10 (2026-09-04): open the Supabase TLS session now, so the first
     # tenant lookup of the next call reuses a warm keep-alive connection
     # instead of paying a Tokyo handshake. Never raises (see supabase_client).
@@ -819,6 +843,16 @@ async def entrypoint(ctx: JobContext):
         _today_line = f"\n\nToday is {local_now.strftime('%A, %B %d, %Y')}."
 
         def _render_prompt(*, customer_context, caller_history) -> str:
+            if AGENT_PROFILE == "scheduling":
+                # Tenant-stable and caller-independent by design (short prompt,
+                # no caller-history block) so the prefix stays cacheable.
+                return build_scheduling_prompt(
+                    business_name=business_name,
+                    tone_preset=tone_preset,
+                    working_hours=tenant.get("working_hours") if tenant else None,
+                    tenant_timezone=tenant_timezone,
+                    locale=locale,
+                ) + _today_line
             return build_system_prompt(
                 locale,
                 business_name=business_name,
@@ -941,6 +975,9 @@ async def entrypoint(ctx: JobContext):
             # lib/tool_filler so runtime fillers come out in the right language.
             "locale": locale,
             "_active_language": None,
+            # "scheduling" | "home_service" — tools/__init__ picks the tool
+            # surface from this; book_appointment skips address validation.
+            "agent_profile": AGENT_PROFILE,
         }
         tools = create_tools(deps)
 
@@ -1053,24 +1090,65 @@ async def entrypoint(ctx: JobContext):
         _cache_key = _prompt_cache_key(tenant_id)
         if _cache_key:
             _llm_kwargs["prompt_cache_key"] = _cache_key
-        llm = openai.LLM(**_llm_kwargs)
+        _openai_llm = openai.LLM(**_llm_kwargs)
+        llm = _openai_llm
+        _llm_legs = [("openai", _openai_llm)]
+        _groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if LLM_PROVIDER == "groq" and AGENT_PROFILE == "scheduling" and _groq_key:
+            try:
+                _groq_kwargs = dict(
+                    model=GROQ_LLM_MODEL,
+                    base_url=GROQ_BASE_URL,
+                    api_key=_groq_key,
+                    parallel_tool_calls=False,
+                    max_completion_tokens=500,
+                )
+                if GROQ_REASONING_EFFORT and GROQ_REASONING_EFFORT != "off":
+                    _groq_kwargs["reasoning_effort"] = GROQ_REASONING_EFFORT
+                _groq_llm = openai.LLM(**_groq_kwargs)
+                # Groq first; a failed or slow attempt (no chunk within the
+                # attempt timeout) fails over to gpt-4.1-mini for that turn.
+                llm = _agents_llm.FallbackAdapter(
+                    [_groq_llm, _openai_llm],
+                    attempt_timeout=LLM_FALLBACK_ATTEMPT_TIMEOUT_S,
+                )
+                _llm_legs = [("groq", _groq_llm), ("openai", _openai_llm)]
+                logger.info(
+                    "[agent] LLM: groq %s (reasoning=%s) -> fallback openai %s",
+                    GROQ_LLM_MODEL, GROQ_REASONING_EFFORT, LLM_MODEL,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("[agent] Groq LLM unavailable (%s) — using OpenAI only", e)
+                llm = _openai_llm
+                _llm_legs = [("openai", _openai_llm)]
+        else:
+            logger.info(
+                "[agent] LLM: openai %s (provider=%s profile=%s groq_key=%s)",
+                LLM_MODEL, LLM_PROVIDER, AGENT_PROFILE, bool(_groq_key),
+            )
 
         # Per-request LLM metrics -> Railway logs. This is the LLM-object event
         # (NOT the deprecated AgentSession "metrics_collected"); it carries ttft
         # + prompt_cached_tokens, the only place cache hits are visible. Expect
         # cached_tokens≈0 on the warm request, then ≈prompt size on turn 1 — if
         # turn 1 reads 0 the warm didn't land before the caller spoke.
-        @llm.on("metrics_collected")
-        def _on_llm_metrics(m):
-            try:
-                logger.info(
-                    "[agent] llm_metrics call=%s ttft=%.3f prompt_tokens=%d "
-                    "cached_tokens=%d completion_tokens=%d cancelled=%s",
-                    call_id, m.ttft, m.prompt_tokens, m.prompt_cached_tokens,
-                    m.completion_tokens, m.cancelled,
-                )
-            except Exception:
-                pass
+        def _make_llm_metrics_logger(_provider):
+            def _on_llm_metrics(m):
+                try:
+                    logger.info(
+                        "[agent] llm_metrics call=%s provider=%s ttft=%.3f prompt_tokens=%d "
+                        "cached_tokens=%d completion_tokens=%d cancelled=%s",
+                        call_id, _provider, m.ttft, m.prompt_tokens, m.prompt_cached_tokens,
+                        m.completion_tokens, m.cancelled,
+                    )
+                except Exception:
+                    pass
+            return _on_llm_metrics
+
+        # Attach to each underlying LLM (a FallbackAdapter re-emits nothing of
+        # its own that carries ttft), labelled so a fallback turn is visible.
+        for _provider, _leg in _llm_legs:
+            _leg.on("metrics_collected", _make_llm_metrics_logger(_provider))
 
         # TTS: ElevenLabs Flash v2.5 (~75ms first-byte) — the sub-500ms TTS that
         # makes this pipeline viable where Phase 64's GeminiTTS (~1.3s) did not.
@@ -1094,7 +1172,7 @@ async def entrypoint(ctx: JobContext):
         vad = ctx.proc.userdata.get("vad")
         if vad is None:
             logger.warning("[agent] prewarmed VAD missing — loading per-call")
-            vad = silero.VAD.load()
+            vad = silero.VAD.load(min_silence_duration=VAD_MIN_SILENCE_S)
 
         agent = VocoAgent(instructions=system_prompt, tools=tools)
 
@@ -1124,7 +1202,12 @@ async def entrypoint(ctx: JobContext):
             # P8.1: speculative LLM on interim transcripts (discarded if the
             # final transcript differs) — cuts perceived response latency.
             # VOCO_PREEMPTIVE_GENERATION=false reverts to the old behavior.
-            "preemptive_generation": {"enabled": PREEMPTIVE_GENERATION},
+            "preemptive_generation": {
+                "enabled": PREEMPTIVE_GENERATION,
+                # Also synthesize the speculative reply's audio early; it is
+                # discarded with the reply if the final transcript differs.
+                "preemptive_tts": PREEMPTIVE_TTS,
+            },
         }
         logger.info(
             "[agent] turn_handling endpointing=%s/%.2f-%.2fs interruption=%s "
@@ -1873,7 +1956,7 @@ async def entrypoint(ctx: JobContext):
 
                 async def _fetch_customer_context_bounded():
                     # v1: Jobber/Xero integrations are flagged OFF (see
-                    # homeservice_agent "My Prompts/Jobber-Xero-Disable.md").
+                    # homeservice_agent "vault/Decisions/Decision - Jobber and Xero integrations frozen behind a flag for v1.md").
                     # Flip VOCO_INTEGRATIONS_ENABLED=true to restore.
                     if not INTEGRATIONS_ENABLED:
                         return None
@@ -1960,16 +2043,25 @@ async def entrypoint(ctx: JobContext):
                 # prefix is byte-identical to turn 1's. Background + fail-open.
                 if LLM_CACHE_WARM:
                     try:
-                        create_background_task(
-                            _warm_prompt_cache(
-                                llm,
-                                agent.chat_ctx.copy(),
-                                agent.tools,
-                                timeout_s=LLM_CACHE_WARM_TIMEOUT_S,
-                                call_id=call_id,
-                            ),
-                            name="llm-cache-warm",
-                        )
+                        # Warm each underlying LLM directly, never through the
+                        # FallbackAdapter: a rejected warm request would mark the
+                        # primary unavailable and push turn 1 onto the fallback
+                        # (seen 2026-11-23: Groq/Qwen rejects a chat with no user
+                        # message, so the Groq warm gets a throwaway user turn).
+                        for _warm_provider, _warm_leg in _llm_legs:
+                            _warm_ctx = agent.chat_ctx.copy()
+                            if _warm_provider != "openai":
+                                _warm_ctx.add_message(role="user", content="Hello")
+                            create_background_task(
+                                _warm_prompt_cache(
+                                    _warm_leg,
+                                    _warm_ctx,
+                                    agent.tools,
+                                    timeout_s=LLM_CACHE_WARM_TIMEOUT_S,
+                                    call_id=f"{call_id} provider={_warm_provider}",
+                                ),
+                                name=f"llm-cache-warm-{_warm_provider}",
+                            )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("[agent] prompt cache warm not started: %s", e)
 
@@ -2186,7 +2278,7 @@ if __name__ == "__main__":
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            agent_name="voco-voice-agent",
+            agent_name=os.environ.get("VOCO_AGENT_NAME", "voco-voice-agent"),  # dev workers use another name so they never take production dispatches
             num_idle_processes=NUM_IDLE_PROCESSES,
         )
     )

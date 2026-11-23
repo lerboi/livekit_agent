@@ -253,8 +253,47 @@ _BOOK_APPOINTMENT_SCHEMA = {
 }
 
 
+# Scheduling profile (2026-11-23): no service address, no urgency. The tool
+# name is unchanged so logs, tests and post-call reconciliation still match.
+_BOOK_APPOINTMENT_SCHEDULING_SCHEMA = {
+    "name": "book_appointment",
+    "description": (
+        "Book the appointment after the caller has confirmed the time. Pass the "
+        "slot_token of the time the caller chose, exactly as check_slot or "
+        "check_day returned it; never invent or reconstruct it. Call it "
+        "directly, without announcing it. Do not say the appointment is booked "
+        "or confirmed before this tool returns success. The return is a "
+        "state+directive string; do not read it aloud."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "slot_token": {
+                "type": "string",
+                "description": "The slot_token returned by check_slot or check_day for the chosen time.",
+            },
+            "caller_name": {
+                "type": "string",
+                "description": "The caller's name. Empty string only if they declined to give it.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "What the appointment is for, in a few words, as the caller described it.",
+            },
+        },
+        "required": ["slot_token", "caller_name"],
+    },
+}
+
+
 def create_book_appointment_tool(deps: dict):
-    @function_tool(raw_schema=_BOOK_APPOINTMENT_SCHEMA)
+    _schema = (
+        _BOOK_APPOINTMENT_SCHEDULING_SCHEMA
+        if deps.get("agent_profile") == "scheduling"
+        else _BOOK_APPOINTMENT_SCHEMA
+    )
+
+    @function_tool(raw_schema=_schema)
     async def book_appointment(raw_arguments: dict, context: RunContext) -> str:
         # Runtime-owned latency cover (lib/tool_filler). Booking is the slowest
         # tool on the call (validation fallback + atomic RPC + post-book
@@ -286,6 +325,12 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
     # Combine street_name + unit_number + postal_code into service_address
     parts = [p for p in [street_name, unit_number, postal_code] if p]
     service_address = ", ".join(parts) if parts else "Address to be confirmed"
+    # Scheduling profile: appointments have no service address. Skip the
+    # Google address validation entirely and keep the reason for the notes.
+    _scheduling_profile = deps.get("agent_profile") == "scheduling"
+    appointment_reason = (raw_arguments.get("reason") or "").strip()
+    if _scheduling_profile and not parts:
+        service_address = "Not applicable"
 
     # ============================================================================
     # Phase 61 (D-B2): validate address BEFORE atomic_book_slot
@@ -317,6 +362,8 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
             deps.get("call_id"),
         )
         validation_result = cached_validation
+    elif _scheduling_profile and not parts:
+        validation_result = {"verdict": "skipped"}
     else:
         # Tenant region first; automatic caller-region (caller-ID) second
         # attempt only when the first verdict is unconfirmed/unsupported —
@@ -720,6 +767,12 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
             "\"looked up your address\""
         )
 
+    if _scheduling_profile and not parts:
+        return_msg = (
+            f"BOOKED: confirm the day and time [{slot_speech}] in ONE short "
+            f"sentence, then ask if there is anything else"
+        )
+
     deps["_last_booked_slot_key"] = _slot_key
     deps["_last_booked_slot_response"] = return_msg
     # Mirror the BOOKED verdict onto _last_tool_state (harmless bookkeeping;
@@ -781,6 +834,19 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
             )
         except Exception:
             pass  # non-critical — post-call pipeline has fallback
+
+    # Scheduling profile: keep what the appointment is for on the row (it has
+    # no service address to describe it). Non-critical.
+    if appointment_id and appointment_reason:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("appointments")
+                .update({"notes": appointment_reason[:500]})
+                .eq("id", appointment_id)
+                .execute()
+            )
+        except Exception as notes_err:  # noqa: BLE001
+            logger.warning("[book_appointment] could not save reason: %s", notes_err)
 
     # Test-call sandbox: the appointment row itself is created (realistic
     # flow; post_call auto-cancels it), but no external side effects — no

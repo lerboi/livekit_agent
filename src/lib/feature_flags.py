@@ -9,7 +9,7 @@ delete them (``tools.capture_lead`` depends on
 ``integrations.jobber._normalize_free_form``). Flip ``VOCO_INTEGRATIONS_ENABLED``
 to ``true`` (Railway env) to re-enable.
 
-See ``homeservice_agent/My Prompts/Jobber-Xero-Disable.md`` for the rationale and
+See ``homeservice_agent/vault/Decisions/Decision - Jobber and Xero integrations frozen behind a flag for v1.md`` for the rationale and
 the full re-enable checklist.
 
 Fail-closed: OFF unless the env var is explicitly the string ``true``.
