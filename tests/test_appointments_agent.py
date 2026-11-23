@@ -1359,3 +1359,9 @@ async def test_other_tools_and_plain_speech_never_get_a_goodbye():
     assert await _collect_goodbye(deps, text) == [text]
     assert await _collect_goodbye({}, _end_call_chunk()) != []  # no line configured: tool call passes through
     assert len(await _collect_goodbye({}, _end_call_chunk())) == 1
+
+
+def test_only_a_test_call_can_turn_the_typing_sound_off():
+    src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
+    assert 'is_test_call and room_meta.get("typing_sound") is False' in src
+    assert "if typing_sound:" in src and "if not (typing_sound or base.AMBIENT_SOUND_ENABLED):" in src

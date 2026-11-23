@@ -57,6 +57,7 @@ from .pipeline import (
     resolve_provider,
 )
 from .preamble import goodbye_with_end_call, strip_tool_preamble
+from .speech_filter import strip_tool_mentions
 from .prompt import build_prompt, date_context
 from .tools import create_tools
 
@@ -108,7 +109,10 @@ class AppointmentsAgent(Agent):
                     (tool_choice or {}).get("function", {}).get("name"), self._deps.get("call_id"),
                 )
                 async for chunk in goodbye_with_end_call(
-                    strip_tool_preamble(_run(tool_choice, nudge), self._deps), self._deps,
+                    strip_tool_mentions(
+                        strip_tool_preamble(_run(tool_choice, nudge), self._deps), self._deps,
+                    ),
+                    self._deps,
                 ):
                     yield chunk
                 return
@@ -116,8 +120,12 @@ class AppointmentsAgent(Agent):
         # preamble.py: speech in the same response as a tool call ("Let me
         # check that for you") is dropped, so tools really are called silently.
         # ... and a hang-up with no words gets the call's goodbye line first.
+        # speech_filter.py: a tool's name written into the reply is never spoken.
         async for chunk in goodbye_with_end_call(
-            strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps), self._deps,
+            strip_tool_mentions(
+                strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps), self._deps,
+            ),
+            self._deps,
         ):
             yield chunk
 
@@ -663,8 +671,14 @@ async def run_call(
         fallback=_model_names.get(llm_legs[1][0]) if len(llm_legs) > 1 else None,
     )
 
+    # The keyboard sound that covers a tool's wait. The Demo Studio can turn it
+    # off for a recording (server-set `typing_sound: false`, test calls only).
+    typing_sound = base.THINKING_SOUND_ENABLED and not (
+        is_test_call and room_meta.get("typing_sound") is False
+    )
+
     async def _start_background_audio():
-        if not (base.THINKING_SOUND_ENABLED or base.AMBIENT_SOUND_ENABLED):
+        if not (typing_sound or base.AMBIENT_SOUND_ENABLED):
             return
         try:
             ambient = (
@@ -674,7 +688,7 @@ async def run_call(
             player = BackgroundAudioPlayer(ambient_sound=ambient)
             await player.start(room=ctx.room, agent_session=session)
             background_audio[0] = player
-            if base.THINKING_SOUND_ENABLED:
+            if typing_sound:
                 clips = [
                     AudioConfig(clip, volume=base.THINKING_SOUND_VOLUME, probability=0.5)
                     for clip in (BuiltinAudioClip.KEYBOARD_TYPING, BuiltinAudioClip.KEYBOARD_TYPING2)

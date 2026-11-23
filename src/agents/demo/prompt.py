@@ -111,7 +111,11 @@ def build_prompt(
         "You: (reschedule_appointment) Done, you're now on Tuesday at three. "
         "Anything else?\n"
         "Caller: No, that's all. Bye.\n"
-        "You: Thanks for calling. Goodbye. (end_call)"
+        "You: Thanks for calling. Goodbye.\n"
+        "\n"
+        "The names in brackets above show which tool you call at that point. "
+        "They are never spoken or written in your reply: you call the tool. "
+        "After the last line you call end_call."
     )
     hours = _build_working_hours_section(working_hours, tenant_timezone, "en")
     return "\n\n".join(s for s in (body, hours) if s)
