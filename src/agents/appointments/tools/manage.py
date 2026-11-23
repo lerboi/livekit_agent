@@ -186,10 +186,17 @@ async def find_appointment_impl(deps: dict, caller_name: str) -> str:
     matches = matches[:MAX_MATCHES]
     listed = "; ".join(_describe(deps, row, i) for i, row in enumerate(matches, 1))
     if len(matches) == 1:
+        # The first clause matters: told only to "tell the caller what you
+        # found", gpt-4.1-mini described the appointment, then checked the new
+        # time and spoke again: two replies and two confirmations for one move
+        # (scripted calls, 2026-11-24).
         directive = (
-            "tell the caller the day and time you found. If they have not said"
-            " what they want to do with it, ask. To move it, get the new time"
-            " with check_slot or check_day first."
+            "if the caller already named the new time they want, say nothing"
+            " yet: call check_slot for it now, then ask once whether to move"
+            " the appointment there. Otherwise tell the caller the day and time"
+            " you found; if they have not said what they want to do with it,"
+            " ask. To move it, get the new time with check_slot or check_day"
+            " first."
         )
     else:
         directive = "tell the caller the appointments you found and ask which one they mean."

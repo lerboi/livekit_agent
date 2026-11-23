@@ -15,6 +15,7 @@ no such tool).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from livekit.agents import RunContext, function_tool
@@ -50,7 +51,10 @@ _CHECK_SLOT = {
             "time": {
                 "type": "string",
                 "pattern": r"^([01]?\d|2[0-3]):[0-5]\d$",
-                "description": "Time as HH:MM, 24-hour, in the business's local timezone.",
+                "description": (
+                    "Time as HH:MM, 24-hour, in the business's local timezone. "
+                    "Two in the afternoon is 14:00, not 2:00."
+                ),
             },
         },
         "required": ["date", "time"],
@@ -158,6 +162,43 @@ def _start_dt(slot: dict) -> datetime:
 
 # ── check_slot ─────────────────────────────────────────────────────────────
 
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _minutes(hhmm) -> int | None:
+    match = _HHMM_RE.match(str(hhmm or "").strip())
+    return int(match.group(1)) * 60 + int(match.group(2)) if match else None
+
+
+def afternoon_if_before_opening(tenant: dict, date: str, time_str: str) -> str:
+    """'2:00' -> '14:00' when the business is shut at two in the morning and
+    open at two in the afternoon; anything else is returned unchanged.
+
+    A caller who says "tomorrow at two" means the afternoon. On a scripted
+    call on 2026-11-24 the model passed "2:00" for it, was told two in the
+    morning was taken, and offered the caller eight or nine instead. Only a
+    time before that day's opening is moved, and only when twelve hours later
+    falls inside the day's hours, so a real morning time is never changed. The
+    agent says the time back ("two in the afternoon") before booking.
+    """
+    requested = _minutes(time_str)
+    if requested is None or requested >= 12 * 60:
+        return time_str
+    try:
+        weekday = _WEEKDAYS[datetime.strptime(date, "%Y-%m-%d").weekday()]
+    except ValueError:
+        return time_str
+    hours = ((tenant or {}).get("working_hours") or {}).get(weekday) or {}
+    opens, closes = _minutes(hours.get("open")), _minutes(hours.get("close"))
+    if not hours.get("enabled") or opens is None or closes is None:
+        return time_str
+    shifted = requested + 12 * 60
+    if requested < opens and opens <= shifted < closes:
+        return f"{shifted // 60:02d}:{shifted % 60:02d}"
+    return time_str
+
+
 async def check_slot_impl(deps: dict, date: str, time_str: str) -> str:
     if not date or not time_str:
         return state(deps, "STATE:missing_args | DIRECTIVE:ask the caller for a day and a time.")
@@ -169,6 +210,7 @@ async def check_slot_impl(deps: dict, date: str, time_str: str) -> str:
     today = lib.tenant_today(tz)
     if date < today:
         return _past_date(deps, date, today)
+    time_str = afternoon_if_before_opening(tenant, date, time_str)
     requested = lib.parse_hhmm_to_utc(time_str, date, tz)
     if requested is None:
         return state(deps, "STATE:bad_time | DIRECTIVE:ask the caller to say the time again.")

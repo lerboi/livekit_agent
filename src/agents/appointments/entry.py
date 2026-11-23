@@ -140,7 +140,11 @@ async def run_call(
 
     tenant = await _lookup_tenant(supabase, to_number)
     tenant_id = tenant.get("id") if tenant else None
-    business_name = (tenant or {}).get("business_name") or "Voco"
+    # A Demo Studio call may answer as a named business (lib/demo.py). `demo`
+    # is None on every production call, so this is the tenant's own name there.
+    business_name = (
+        (demo or {}).get("business_name") or (tenant or {}).get("business_name") or "Voco"
+    )
     locale = (tenant or {}).get("default_locale") or "en"
     tenant_timezone = (tenant or {}).get("tenant_timezone") or "UTC"
     logger.info(

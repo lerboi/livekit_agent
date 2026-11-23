@@ -9,6 +9,11 @@ no owner notifications). The ``demo`` block relaxes exactly two sandbox rules:
 * ``keep_booking`` = true: post-call does not auto-cancel the appointment
   (the Demo Studio's cleanup button removes it instead).
 
+It can also carry ``business_name``: the business the agent answers as on that
+call, for a recording that should not say the demo tenant's name. It changes
+the greeting and the name in the prompt and nothing else: the tenant, its
+hours, its calendar and every tool are the real ones.
+
 Room metadata is written by the admin-gated Next.js session route; a browser
 join token cannot change it. The block is ignored unless ``test_call`` is true,
 so nothing here can alter a production call.
@@ -18,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 from .background import create_background_task
@@ -39,11 +45,32 @@ def parse_demo(room_meta: dict | None, is_test_call: bool) -> dict | None:
     destination = str(raw.get("destination") or "voco").strip().lower()
     if destination not in _DESTINATIONS:
         destination = "voco"
-    return {
+    demo = {
         "task": str(raw.get("task") or "scheduling").strip().lower()[:40],
         "destination": destination,
         "keep_booking": raw.get("keep_booking") is True,
     }
+    business_name = clean_business_name(raw.get("business_name"))
+    if business_name:
+        demo["business_name"] = business_name
+    return demo
+
+
+_BUSINESS_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'.\-]{1,39}")
+
+
+def clean_business_name(value) -> str | None:
+    """The business a demo call answers as, or None.
+
+    A recorded demo names a believable business ("Brightside Dental") instead
+    of the demo tenant. The name goes into the greeting and the prompt, so it
+    is limited to a short run of plain name characters; anything else is
+    dropped and the call answers as the tenant.
+    """
+    if not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
+        return None
+    name = " ".join(value.split())
+    return name if _BUSINESS_NAME_RE.fullmatch(name) else None
 
 
 def demo_external_destination(deps: dict) -> str | None:

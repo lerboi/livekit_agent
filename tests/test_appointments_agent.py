@@ -1262,3 +1262,46 @@ def test_register_appointment_reuses_one_token_per_appointment():
     first = register_appointment(deps, {"id": "a", "start_time": "x"})
     again = register_appointment(deps, {"id": "a", "start_time": "y"})
     assert first == again and deps["_appt_tokens"][first]["appointment"]["start_time"] == "y"
+
+
+def test_prompt_moves_in_one_step_when_the_new_time_was_given():
+    """Production calls on 2026-11-24: asked to "make it Thursday at ten
+    instead", Qwen answered "where would you like it instead?" and
+    gpt-4.1-mini asked for confirmation twice."""
+    prompt = build_prompt(business_name="Acme Dental", working_hours=HOURS, tenant_timezone=TZ)
+    assert "If the caller already said the new time" in prompt
+    assert "(find_appointment) (check_slot)" in prompt
+
+
+def test_find_appointment_sends_a_named_new_time_straight_to_check_slot():
+    src = (_SRC / "agents" / "appointments" / "tools" / "manage.py").read_text(encoding="utf-8")
+    assert "if the caller already named the new time they want, say nothing" in src
+
+
+# ── "tomorrow at two" passed as 2:00 ────────────────────────────────────────
+
+
+def test_a_time_before_opening_is_read_as_the_afternoon():
+    tenant = {"working_hours": HOURS}  # 08:00 to 17:00 every day
+    date = "2026-11-25"
+    fix = availability.afternoon_if_before_opening
+    assert fix(tenant, date, "2:00") == "14:00"
+    assert fix(tenant, date, "02:30") == "14:30"
+    assert fix(tenant, date, "4:00") == "16:00"
+    # Real morning times, afternoon times and times shut either way are untouched.
+    for unchanged in ("8:00", "09:00", "11:30", "14:00", "5:00", "6:00", "7:00", "bad"):
+        assert fix(tenant, date, unchanged) == unchanged
+    # No hours for that day, or the day is closed: nothing to go on.
+    assert fix({}, date, "2:00") == "2:00"
+    closed = {"working_hours": {"wednesday": {"enabled": False, "open": "08:00", "close": "17:00"}}}
+    assert fix(closed, date, "2:00") == "2:00"
+
+
+@pytest.mark.asyncio
+async def test_check_slot_takes_two_as_two_in_the_afternoon(monkeypatch):
+    deps = _deps()
+    date = _day(2)
+    plain = await availability.check_slot_impl(deps, date, "14:00")
+    short = await availability.check_slot_impl(_deps(), date, "2:00")
+    assert plain.startswith("STATE:slot_ok") and short.startswith("STATE:slot_ok")
+    assert "2:00 PM" in short
