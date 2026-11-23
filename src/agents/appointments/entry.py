@@ -63,6 +63,13 @@ from .tools import create_tools
 logger = logging.getLogger("voco-agent")
 
 AGENT_NAME = "appointments"
+# The Demo Studio's "Warm" greeting (test calls only). The standard line is
+# two clipped statements, which the voice reads flat; this gives it a
+# sentence to open on. It still says the call is recorded.
+WARM_GREETING = (
+    "Hi, thanks for calling {business_name}! Just so you know, this call is "
+    "recorded. How can I help you today?"
+)
 _ENDING = ("agent_ended", "transferred", "max_duration")
 
 
@@ -294,7 +301,16 @@ async def run_call(
                 )
         except Exception as err:  # noqa: BLE001
             logger.warning("[appointments] voice list re-read failed: %s", err)
-    tts = base._build_tts(voice_id, eleven_key_ok=eleven_key_ok, eleven_voice_ids=eleven_voice_ids)
+    # Voice quality and greeting style: the Demo Studio's choices, from the
+    # server-set metadata of a test call. A production call gets neither.
+    voice_quality = str(room_meta.get("voice_quality") or "").strip().lower() if is_test_call else ""
+    if voice_quality not in base.VOICE_QUALITY:
+        voice_quality = ""
+    greeting_style = str(room_meta.get("greeting") or "").strip().lower() if is_test_call else ""
+    tts = base._build_tts(
+        voice_id, eleven_key_ok=eleven_key_ok, eleven_voice_ids=eleven_voice_ids,
+        quality=voice_quality or None,
+    )
     if vad is None:
         vad = silero.VAD.load(min_silence_duration=base.VAD_MIN_SILENCE_S)
 
@@ -641,6 +657,7 @@ async def run_call(
     publish_event(
         deps, "session",
         agent=agent_name,
+        voice_quality=voice_quality or "fast",
         llm=llm_legs[0][0],
         model=_model_names.get(llm_legs[0][0]),
         fallback=_model_names.get(llm_legs[1][0]) if len(llm_legs) > 1 else None,
@@ -675,6 +692,8 @@ async def run_call(
         base._msg(locale, "agent.greeting_onboarding").format(business_name=business_name)
         if tenant else base._msg(locale, "agent.greeting_default")
     )
+    if tenant and greeting_style == "warm" and locale == "en":
+        greeting_text = WARM_GREETING.format(business_name=business_name)
     try:
         session.input.set_audio_enabled(False)
     except Exception as err:  # noqa: BLE001

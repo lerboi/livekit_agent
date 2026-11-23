@@ -187,3 +187,58 @@ def test_build_tts_keeps_mapped_voice_when_present_or_unknown():
         agent._build_tts("voice-2", eleven_key_ok=None, eleven_voice_ids=None)
         assert seen["voice_id"] == "voice-2"
 
+
+
+# ── audio format and voice quality (2026-11-24) ─────────────────────────────
+
+
+def _built(quality=None):
+    seen, settings = {}, {}
+
+    class _FakeTTS:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    class _FakeSettings:
+        def __init__(self, **kw):
+            settings.update(kw)
+
+    with patch.object(agent.elevenlabs, "TTS", _FakeTTS), \
+            patch.object(agent.elevenlabs, "VoiceSettings", _FakeSettings), \
+            patch.object(agent, "openai") as oa:
+        oa.TTS.return_value = object()
+        agent._build_tts("voice-1", eleven_key_ok=None, quality=quality)
+    return seen, settings
+
+
+def test_every_call_asks_for_uncompressed_audio():
+    seen, _ = _built()
+    assert agent.ELEVENLABS_TTS_ENCODING == "pcm_24000"
+    assert seen["encoding"] == "pcm_24000"
+
+
+def test_production_voice_settings_are_unchanged_without_a_quality():
+    seen, settings = _built()
+    assert seen["model"] == "eleven_flash_v2_5"
+    assert settings == {"stability": agent.TTS_STABILITY, "similarity_boost": agent.TTS_SIMILARITY, "speed": agent.TTS_SPEED}
+    for name in ("fast", "nonsense"):
+        other_seen, other_settings = _built(name)
+        assert other_seen["model"] == seen["model"] and other_settings == settings
+
+
+def test_voice_quality_presets():
+    assert set(agent.VOICE_QUALITY) == {"fast", "natural", "turbo", "rich"}
+    seen, settings = _built("natural")
+    assert seen["model"] == "eleven_flash_v2_5" and settings["speed"] == 1.0
+    seen, settings = _built("turbo")
+    assert seen["model"] == "eleven_turbo_v2_5" and settings["speed"] == 1.0
+    seen, settings = _built("rich")
+    assert seen["model"] == "eleven_multilingual_v2" and settings["style"] == 0.2 and settings["stability"] == 0.4
+
+
+def test_only_test_calls_can_choose_voice_quality_or_greeting():
+    from pathlib import Path
+    src = (Path(__file__).parent.parent / "src" / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
+    assert 'str(room_meta.get("voice_quality") or "").strip().lower() if is_test_call else ""' in src
+    assert 'str(room_meta.get("greeting") or "").strip().lower() if is_test_call else ""' in src
+    assert "this call is" in src and "recorded" in src  # the warm greeting keeps the notice

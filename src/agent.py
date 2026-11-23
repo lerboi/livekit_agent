@@ -173,6 +173,28 @@ TTS_SPEED = float(os.environ.get("VOCO_TTS_SPEED", "1.08"))
 TTS_STABILITY = float(os.environ.get("VOCO_TTS_STABILITY", "0.45"))
 TTS_SIMILARITY = float(os.environ.get("VOCO_TTS_SIMILARITY", "0.75"))
 
+# 2026-11-24: the audio format ElevenLabs sends back. The plugin's default is
+# mp3_22050_32 (22 kHz MP3 at 32 kbps), whose compression gives the voice a
+# metallic edge on every call. pcm_24000 is uncompressed 24 kHz audio and is
+# available on every ElevenLabs plan (pcm_44100 needs Pro). Applies to every
+# agent in this worker. VOCO_TTS_ENCODING=mp3_22050_32 restores the old format.
+ELEVENLABS_TTS_ENCODING = os.environ.get("VOCO_TTS_ENCODING", "pcm_24000").strip() or "pcm_24000"
+
+# Named voice-quality settings a TEST call may ask for (room metadata
+# `voice_quality`, set by the Demo Studio; see src/lib/demo/voice-quality.js
+# in the Next app, which must list the same ids). Each entry overrides the
+# production values above; a production call never uses anything but "fast".
+VOICE_QUALITY = {
+    # What production calls use: Flash v2.5 at the brisk production pace.
+    "fast": {},
+    # Flash v2.5 at the voice's own pace.
+    "natural": {"speed": 1.0},
+    # Turbo v2.5: more expressive, a little slower to start speaking.
+    "turbo": {"model": "eleven_turbo_v2_5", "speed": 1.0},
+    # Multilingual v2: the most expressive, the slowest to start speaking.
+    "rich": {"model": "eleven_multilingual_v2", "speed": 1.0, "stability": 0.4, "style": 0.2},
+}
+
 # LK-B1: OpenAI TTS used as the ElevenLabs FALLBACK (FallbackAdapter below) so a
 # single ElevenLabs outage doesn't dead-air every call fleet-wide. OPENAI_API_KEY
 # is already a boot-preflight requirement (it powers the LLM). Env-overridable;
@@ -640,7 +662,8 @@ def _fetch_elevenlabs_voice_ids(timeout_s: float = 4.0) -> set[str] | None:
 
 
 def _build_tts(
-    voice_id: str, *, eleven_key_ok: bool | None, eleven_voice_ids: set[str] | None = None
+    voice_id: str, *, eleven_key_ok: bool | None, eleven_voice_ids: set[str] | None = None,
+    quality: str | None = None,
 ):
     """TTS for one call. ElevenLabs (with the pace/voice settings) wrapped in a
     FallbackAdapter over OpenAI TTS — unless the key preflight said ElevenLabs
@@ -671,22 +694,30 @@ def _build_tts(
     # voice_settings construction is fail-open: if the plugin's VoiceSettings
     # surface ever shifts on an upgrade, we fall back to the pre-2026-08-25
     # construction (voice defaults, natural pace) rather than breaking calls.
+    # ``quality``: a VOICE_QUALITY name (test calls only; callers pass None
+    # for production). Unknown names are the production settings.
+    _preset = VOICE_QUALITY.get(quality or "", {})
+    _model = _preset.get("model", ELEVENLABS_TTS_MODEL)
     try:
-        _voice_settings = elevenlabs.VoiceSettings(
-            stability=TTS_STABILITY,
+        _settings_kwargs = dict(
+            stability=_preset.get("stability", TTS_STABILITY),
             similarity_boost=TTS_SIMILARITY,
-            speed=TTS_SPEED,
+            speed=_preset.get("speed", TTS_SPEED),
         )
+        if "style" in _preset:
+            _settings_kwargs["style"] = _preset["style"]
+        _voice_settings = elevenlabs.VoiceSettings(**_settings_kwargs)
         _eleven_tts = elevenlabs.TTS(
-            model=ELEVENLABS_TTS_MODEL,
+            model=_model,
             voice_id=voice_id,
             voice_settings=_voice_settings,
+            encoding=ELEVENLABS_TTS_ENCODING,
         )
     except Exception as _vs_err:  # noqa: BLE001
         logger.warning(
             "[agent] VoiceSettings unavailable (%s); using voice defaults", _vs_err
         )
-        _eleven_tts = elevenlabs.TTS(model=ELEVENLABS_TTS_MODEL, voice_id=voice_id)
+        _eleven_tts = elevenlabs.TTS(model=_model, voice_id=voice_id)
     # LK-B1: wrap ElevenLabs in a FallbackAdapter that fails over to OpenAI TTS
     # mid-call if ElevenLabs errors/times out, so one vendor outage doesn't
     # leave the caller in silence on every call. Construction is wrapped: if
