@@ -1062,6 +1062,52 @@ async def test_guard_stands_down_after_a_completed_write():
     assert spoken == "You're booked for noon." and len(runs) == 1
 
 
+@pytest.mark.parametrize("text", [
+    "A pleasure. I can offer you Monday the thirtieth, Tuesday the first of December, or Wednesday the second.",
+    "We have availability tomorrow and Thursday.",
+    "Understood, Alex. I'll go ahead and book your product demo for Monday.",
+])
+def test_offered_days_and_promises_before_any_tool_are_ungrounded(text):
+    assert guard.ungrounded(text)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Understood, Alex. I'll go ahead and book your product demo for Monday the thirtieth.", True),
+    ("Okay, booking that in for you now.", True),
+    ("I will cancel that for you.", True),
+    ("Shall I book it?", False),
+    ("I'll book it for you, shall I?", False),
+    ("What day works for you?", False),
+])
+def test_a_promise_to_act_is_recognised(text, expected):
+    assert guard.promises_change(text) is expected
+
+
+async def test_a_promise_with_no_tool_call_is_dropped_and_answered_again():
+    # Production call, 2026-11-24: "I'll go ahead and book ..." and nothing was booked.
+    deps = {**_RETURNED, "_slot_tokens": {"slot_a": {"created_at": time.time()}}}
+    spoken, runs = await _collect(deps, [
+        ("Understood. ", "I'll go ahead and book ", "your demo for Monday. Anything else?"),
+        ("(book_appointment)",),
+    ])
+    assert spoken == "(book_appointment)"
+    assert runs == [(None, None), (None, guard.PROMISE_NUDGE)]
+    assert deps["_claim_guard_trips"] == 1
+
+
+async def test_a_promise_followed_by_its_tool_call_passes():
+    deps = {**_RETURNED, "_slot_tokens": {"slot_a": {"created_at": time.time()}}}
+    tool_chunk = SimpleNamespace(delta=SimpleNamespace(content="", tool_calls=[object()]))
+    runs = []
+
+    def run(tool_choice, nudge):
+        runs.append((tool_choice, nudge))
+        return _stream("I'll book that now.", tool_chunk)
+
+    out = [c async for c in guard.guarded_llm_stream(deps, run)]
+    assert out == ["I'll book that now.", tool_chunk] and len(runs) == 1
+
+
 async def test_guard_is_quiet_right_after_a_real_booking(writes):
     # Seen on the first live call: "You're all booked" after book_appointment
     # had returned BOOKED was dropped and re-generated.

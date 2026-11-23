@@ -109,15 +109,59 @@ _UNGROUNDED_RE = re.compile(
 # needs no tool.
 _HOURS_RE = re.compile(r"\b(?:open|opening|hours|close[sd]?|closing)\b", re.IGNORECASE)
 
+# "I can offer you Monday the thirtieth, Tuesday the first ...": days offered
+# with no lookup (a production call on 2026-11-24). An offer phrase and a day
+# in the same reply.
+_OFFER_RE = re.compile(
+    rf"\b(?:i\s+can\s+(?:offer|do)|i(?:{_APOS}ve|\s+have)\s+got|i\s+have|we\s+have"
+    rf"|we(?:{_APOS}ve|\s+have)\s+got|(?:is|are)\s+(?:available|free)|availability|openings?)\b",
+    re.IGNORECASE,
+)
+_DAY_RE = re.compile(
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow"
+    r"|january|february|march|april|june|july|august|september|october|november|december)\b",
+    re.IGNORECASE,
+)
+
+# "I'll go ahead and book your product demo for Monday": a promise with no
+# tool call behind it. Nothing was booked on that call.
+_PROMISE_RE = re.compile(
+    rf"\b(?:i(?:{_APOS}ll|\s+will|{_APOS}m\s+going\s+to|\s+am\s+going\s+to)\s+(?:go\s+ahead\s+and\s+|now\s+|just\s+)?"
+    r"(?:book|schedule|move|reschedule|cancel|lock|get\s+(?:you|that|it)\s+(?:booked|moved|cancell?ed|scheduled))"
+    r"|(?:booking|scheduling|moving|rescheduling|cancell?ing)\s+(?:that|it|you|your)\b)",
+    re.IGNORECASE,
+)
+
+PROMISE_NUDGE = (
+    "Your last reply told the caller you would make a booking change, but you "
+    "called no tool, so nothing happened. If the caller has agreed and you "
+    "have what the tool needs, call the tool now and confirm from its result. "
+    "If something is still missing, ask for it instead of promising."
+)
+
+
+def promises_change(text: str) -> bool:
+    """True when the text says the agent is about to book, move or cancel.
+    Offers put as questions ("Shall I book it?") do not count."""
+    if not text:
+        return False
+    match = _PROMISE_RE.search(text)
+    if not match:
+        return False
+    sentence_end = re.search(r"[.!?]", text[match.end():])
+    return not (sentence_end and sentence_end.group() == "?")
+
 
 def ungrounded(text: str) -> bool:
     """True when a reply made before any tool has returned says something only
     a tool could have told it."""
     if not text:
         return False
-    if claims_change(text):
+    if claims_change(text) or promises_change(text):
         return True
-    return bool(_UNGROUNDED_RE.search(text)) and not _HOURS_RE.search(text)
+    if _HOURS_RE.search(text):
+        return False
+    return bool(_UNGROUNDED_RE.search(text)) or bool(_OFFER_RE.search(text) and _DAY_RE.search(text))
 
 
 def tool_has_returned(deps: dict) -> bool:
@@ -171,6 +215,7 @@ async def guarded_llm_stream(
     text = ""
     released = False
     tripped = False
+    promised = False
     stream = run(None, None)
     try:
         async for chunk in stream:
@@ -185,6 +230,11 @@ async def guarded_llm_stream(
             elif claims_change(text):
                 tripped = True
                 break
+            elif promises_change(text):
+                # Keep reading: the tool call may follow the promise in the
+                # same response. Decided when the stream ends.
+                promised = True
+                continue
             elif len(text) >= WINDOW_CHARS:
                 released = True
             if released:
@@ -199,6 +249,20 @@ async def guarded_llm_stream(
                     await aclose()
                 except Exception:  # noqa: BLE001
                     pass
+
+    if promised and not released and not tripped:
+        # The reply promised a change and ended without a tool call. No tool
+        # is forced (the caller may not have agreed yet): the model is told
+        # that nothing happened and answers again.
+        deps["_claim_guard_trips"] = deps.get("_claim_guard_trips", 0) + 1
+        logger.warning(
+            "[claim-guard] reply promised a change with no tool call; dropped it "
+            "and answering again. call=%s text=%r",
+            deps.get("call_id"), text[:120],
+        )
+        async for chunk in run(None, PROMISE_NUDGE):
+            yield chunk
+        return
 
     if not tripped:
         for item in held:  # a short reply that ended inside the window
