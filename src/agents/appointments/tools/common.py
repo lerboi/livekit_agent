@@ -27,8 +27,13 @@ CONFIRM_GATE_ENABLED = os.environ.get("VOCO_CONFIRM_GATE", "true").strip().lower
 # ("Okay, booking that in for you") started as the booking finished, and the
 # caller waited about four more seconds for the confirmation behind it. The
 # typing sound covers the wait up to these points.
-LOOKUP_FILLER_DELAY_S = float(os.environ.get("VOCO_APPT_LOOKUP_FILLER_DELAY_S", "1.2"))
-WRITE_FILLER_DELAY_S = float(os.environ.get("VOCO_APPT_WRITE_FILLER_DELAY_S", "2.0"))
+#
+# The delay is idle time since the caller stopped speaking, not time since
+# the tool started: it has to outlast the model's first token as well as the
+# tool. On Railway (2026-11-24) a booking returned about 2.2 s after the
+# caller's "yes" and a 2.0 s delay still collided, on both models.
+LOOKUP_FILLER_DELAY_S = float(os.environ.get("VOCO_APPT_LOOKUP_FILLER_DELAY_S", "2.5"))
+WRITE_FILLER_DELAY_S = float(os.environ.get("VOCO_APPT_WRITE_FILLER_DELAY_S", "3.5"))
 
 # Said when a lookup or write fails for a technical reason. This agent has no
 # lead-capture or transfer tool, so the honest answer is "try again shortly".
