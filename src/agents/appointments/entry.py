@@ -56,7 +56,7 @@ from .pipeline import (
     build_turn_handling,
     resolve_provider,
 )
-from .preamble import strip_tool_preamble
+from .preamble import goodbye_with_end_call, strip_tool_preamble
 from .prompt import build_prompt, date_context
 from .tools import create_tools
 
@@ -100,13 +100,18 @@ class AppointmentsAgent(Agent):
                     "[appointments] turn policy requires %s. call=%s",
                     (tool_choice or {}).get("function", {}).get("name"), self._deps.get("call_id"),
                 )
-                async for chunk in strip_tool_preamble(_run(tool_choice, nudge), self._deps):
+                async for chunk in goodbye_with_end_call(
+                    strip_tool_preamble(_run(tool_choice, nudge), self._deps), self._deps,
+                ):
                     yield chunk
                 return
 
         # preamble.py: speech in the same response as a tool call ("Let me
         # check that for you") is dropped, so tools really are called silently.
-        async for chunk in strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps):
+        # ... and a hang-up with no words gets the call's goodbye line first.
+        async for chunk in goodbye_with_end_call(
+            strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps), self._deps,
+        ):
             yield chunk
 
 
@@ -225,6 +230,9 @@ async def run_call(
         "_calendar_provider": calendar_provider,
         "_calendar": None,
         "_calendar_task": None,
+        # Spoken before end_call when the model hangs up without a goodbye
+        # (preamble.goodbye_with_end_call). English calls only.
+        "_goodbye_text": f"Thanks for calling {business_name}. Goodbye." if locale == "en" else "",
     }
     tools = create_tools(deps)
 
@@ -269,6 +277,23 @@ async def run_call(
         vad = ctx.proc.userdata.get("vad")
     except Exception:  # noqa: BLE001
         eleven_key_ok, eleven_voice_ids, vad = None, None, None
+    if is_test_call and eleven_voice_ids is not None and voice_id not in eleven_voice_ids:
+        # The account's voice list is read once when the worker process
+        # starts. A voice added to the ElevenLabs account since then (to try
+        # it from the Demo Studio) is not in that copy: read the list again
+        # before _build_tts replaces the voice with the fallback. Test calls
+        # only, so a production call never waits on this.
+        try:
+            fresh = await asyncio.to_thread(base._fetch_elevenlabs_voice_ids)
+            if fresh:
+                eleven_voice_ids = fresh
+                ctx.proc.userdata["eleven_voice_ids"] = fresh
+                logger.info(
+                    "[appointments] voice list re-read for %s: %s",
+                    voice_id, "found" if voice_id in fresh else "still not in the account",
+                )
+        except Exception as err:  # noqa: BLE001
+            logger.warning("[appointments] voice list re-read failed: %s", err)
     tts = base._build_tts(voice_id, eleven_key_ok=eleven_key_ok, eleven_voice_ids=eleven_voice_ids)
     if vad is None:
         vad = silero.VAD.load(min_silence_duration=base.VAD_MIN_SILENCE_S)

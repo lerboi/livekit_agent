@@ -1307,3 +1307,55 @@ async def test_check_slot_takes_two_as_two_in_the_afternoon(monkeypatch):
     short = await availability.check_slot_impl(_deps(), date, "2:00")
     assert plain.startswith("STATE:slot_ok") and short.startswith("STATE:slot_ok")
     assert "2:00 PM" in short
+
+
+def test_a_test_call_re_reads_the_voice_list_for_a_voice_it_does_not_know():
+    """A voice added to the ElevenLabs account after the worker started must
+    be usable from the Demo Studio without a redeploy; production calls never
+    make this extra request."""
+    src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
+    assert "if is_test_call and eleven_voice_ids is not None and voice_id not in eleven_voice_ids:" in src
+    assert "await asyncio.to_thread(base._fetch_elevenlabs_voice_ids)" in src
+
+
+# ── a hang-up always has a goodbye ──────────────────────────────────────────
+
+
+async def _collect_goodbye(deps, *chunks):
+    from src.agents.appointments.preamble import goodbye_with_end_call
+
+    async def _stream():
+        for chunk in chunks:
+            yield chunk
+
+    return [c async for c in goodbye_with_end_call(_stream(), deps)]
+
+
+def _end_call_chunk(content=""):
+    return SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=[SimpleNamespace(name="end_call")]), usage=None)
+
+
+async def test_end_call_with_no_words_gets_the_goodbye_line_first():
+    deps = {"_goodbye_text": "Thanks for calling Brightside Dental. Goodbye."}
+    tool = _end_call_chunk()
+    out = await _collect_goodbye(deps, tool)
+    assert out == ["Thanks for calling Brightside Dental. Goodbye.", tool]
+
+
+async def test_end_call_that_already_says_goodbye_is_left_alone():
+    deps = {"_goodbye_text": "Thanks for calling Brightside Dental. Goodbye."}
+    text = SimpleNamespace(delta=SimpleNamespace(content="Thanks, Alex. Bye!", tool_calls=[]), usage=None)
+    tool = _end_call_chunk()
+    assert await _collect_goodbye(deps, text, tool) == [text, tool]
+    both = _end_call_chunk("Goodbye!")
+    assert await _collect_goodbye(deps, both) == [both]
+
+
+async def test_other_tools_and_plain_speech_never_get_a_goodbye():
+    deps = {"_goodbye_text": "Thanks for calling. Goodbye."}
+    book = SimpleNamespace(delta=SimpleNamespace(content="", tool_calls=[SimpleNamespace(name="book_appointment")]), usage=None)
+    text = SimpleNamespace(delta=SimpleNamespace(content="Anything else?", tool_calls=[]), usage=None)
+    assert await _collect_goodbye(deps, book) == [book]
+    assert await _collect_goodbye(deps, text) == [text]
+    assert await _collect_goodbye({}, _end_call_chunk()) != []  # no line configured: tool call passes through
+    assert len(await _collect_goodbye({}, _end_call_chunk())) == 1

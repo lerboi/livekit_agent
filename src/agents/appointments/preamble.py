@@ -122,3 +122,29 @@ async def strip_tool_preamble(stream, deps: dict | None = None):
         return
     for item in held:
         yield item
+
+
+async def goodbye_with_end_call(stream, deps: dict | None = None):
+    """Make sure the caller hears a goodbye before the line goes down.
+
+    The prompt asks for the goodbye and ``end_call`` in one response. The
+    model sometimes sends the tool call alone (production rehearsals and a
+    spoken take on 2026-11-24: the call ended in silence after "That's all,
+    thanks. Bye."). When a response calls ``end_call`` and has spoken nothing,
+    the call's goodbye line (``deps["_goodbye_text"]``) is put in front of the
+    tool call. ``end_call`` waits for that speech to finish before hanging up.
+    A response that already says something is left alone.
+    """
+    spoken = ""
+    done = False
+    async for chunk in stream:
+        if not done:
+            part, tool_names = _parts(chunk)
+            spoken += part
+            if "end_call" in tool_names:
+                done = True
+                goodbye = ((deps or {}).get("_goodbye_text") or "").strip()
+                if goodbye and not spoken.strip():
+                    logger.info("[appointments] end_call came with no goodbye; speaking the call's goodbye line")
+                    yield goodbye
+        yield chunk
