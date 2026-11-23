@@ -289,11 +289,14 @@ async def run_post_call_pipeline(params: dict):
     language_barrier = detected_language is not None and detected_language not in SUPPORTED_LANGUAGES
 
     # ── 6. Triage classification ──
+    # The appointments agent passes skip_triage: its calls are not emergencies
+    # to rank, so they keep the "routine" default and skip the classifier.
     triage_result = {"urgency": "routine", "confidence": "low", "layer": "layer1"}
-    try:
-        triage_result = await classify_call(supabase, transcript=transcript_text, tenant_id=tenant_id)
-    except Exception as e:
-        logger.error(f"[post-call] Triage classification failed: {e}", exc_info=True)
+    if not params.get("skip_triage"):
+        try:
+            triage_result = await classify_call(supabase, transcript=transcript_text, tenant_id=tenant_id)
+        except Exception as e:
+            logger.error(f"[post-call] Triage classification failed: {e}", exc_info=True)
 
     # If booking_succeeded, the reconciliation above wrote "booked"; use that
     # value here so the suggested_slots gate and the appointment lookup below
@@ -649,7 +652,8 @@ async def run_post_call_pipeline(params: dict):
     try:
         tool_call_log = params.get("tool_call_log", []) or []
         booked_via_tool = any(
-            entry.get("name") == "book_appointment" and entry.get("success") is True
+            entry.get("name") in ("book_appointment", "reschedule_appointment")
+            and entry.get("success") is True
             for entry in tool_call_log
         )
         if not booked_via_tool:

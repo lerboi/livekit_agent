@@ -206,9 +206,15 @@ async def tool_filler(
     *,
     interval: float | None = None,
     max_steps: int | None = None,
+    delay: float | None = None,
 ) -> AsyncIterator[None]:
     """Wrap a tool body: arms the typing sound and schedules an idle-gated
-    spoken filler for the duration of the block. Never raises."""
+    spoken filler for the duration of the block. Never raises.
+
+    ``delay`` overrides TOOL_FILLER_DELAY_S for this tool. A filler that
+    starts just as the tool returns makes the caller wait for the filler to
+    finish before they hear the answer, so a tool that usually returns in
+    under a second should use a delay longer than that."""
     ctl = deps.get("_thinking_ctl")
     if ctl is not None:
         try:
@@ -221,7 +227,7 @@ async def tool_filler(
         try:
             cm = context.with_filler(
                 lambda step: pick_filler(deps, bank, step),
-                delay=TOOL_FILLER_DELAY_S,
+                delay=TOOL_FILLER_DELAY_S if delay is None else delay,
                 interval=interval,
                 max_steps=max_steps,
             )

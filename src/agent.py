@@ -15,6 +15,7 @@ Architecture:
 
 import os
 import re
+import sys
 import json
 import time
 import hashlib
@@ -63,6 +64,7 @@ from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancella
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
+from .agents import APPOINTMENTS, select_agent
 from .lib.background import create_background_task
 from .lib.demo import parse_demo, publish_event
 from .lib.booking_claim_guard import guarded_llm_stream
@@ -796,6 +798,29 @@ async def entrypoint(ctx: JobContext):
             f"[agent] Call started: room={call_id} from={from_number} to={to_number} "
             f"test={is_test_call} demo={demo}"
         )
+
+        # ── Agent router ──
+        # This worker runs more than one agent (src/agents/__init__.py). The
+        # appointments agent is a separate package with its own prompt, tools
+        # and session wiring; it gets this module so both agents share one set
+        # of voice-tuning constants. Everything below this block is the
+        # receptionist and is not reached for an appointments call.
+        if select_agent(room_meta, is_test_call) == APPOINTMENTS:
+            from .agents.appointments.entry import run_call as run_appointments_call
+
+            logger.info(f"[agent] routing room={call_id} to the appointments agent")
+            await run_appointments_call(
+                ctx,
+                sys.modules[__name__],
+                participant=participant,
+                room_meta=room_meta,
+                is_test_call=is_test_call,
+                is_web_test=is_web_test,
+                demo=demo,
+                to_number=to_number,
+                from_number=from_number,
+            )
+            return
 
         # ── Tenant lookup (ONE round-trip: tenant row + its active services) ──
         # 2026-09-09 greet-first: the tenant row and the active services (intake
