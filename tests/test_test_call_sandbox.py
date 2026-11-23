@@ -81,15 +81,19 @@ def test_recovery_sms_gated_on_test_call():
 
 def test_calendar_push_and_caller_sms_gated_on_test_call():
     src = _read("tools/book_appointment.py")
-    skip_idx = src.find('if deps.get("is_test_call"):')
+    # 2026-11-23 Demo Studio: a test call skips the calendar push unless its
+    # server-set demo block names an external calendar; the caller SMS is
+    # skipped on EVERY test call. Behavioural coverage: tests/test_demo_studio.py.
+    skip_idx = src.find("if is_test_call and not demo_destination:")
     assert skip_idx != -1, "success path must short-circuit before external side effects"
-    # The skip return must come BEFORE the calendar push and the confirmation
-    # SMS dispatch in source order, so neither can fire on a test call.
-    assert skip_idx < src.find("create_background_task(_push_calendar_bg())"), (
-        "test-call skip must precede the calendar push"
-    )
-    assert skip_idx < src.find("create_background_task(_send_confirmation_sms_bg())"), (
-        "test-call skip must precede the caller confirmation SMS"
+    push_idx = src.find("create_background_task(_push_calendar_bg())")
+    sms_idx = src.find("create_background_task(_send_confirmation_sms_bg())")
+    # The skip return must come BEFORE the calendar push in source order.
+    assert skip_idx < push_idx, "test-call skip must precede the calendar push"
+    # A second unconditional test-call return sits between the push and the SMS.
+    sms_skip_idx = src.find("    if is_test_call:\n", push_idx)
+    assert push_idx < sms_skip_idx < sms_idx, (
+        "every test call must return before the caller confirmation SMS"
     )
 
 

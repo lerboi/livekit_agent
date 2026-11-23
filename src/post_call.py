@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
+from .lib.demo import keeps_booking
 from .lib.triage.classifier import classify_call
 from .lib.write_outcome import record_outcome, RecordOutcomeError
 from .lib.notifications import (
@@ -188,7 +189,14 @@ async def run_post_call_pipeline(params: dict):
     # union'd: appointments whose call_id FK was backfilled, plus the
     # appointment_ids recorded in the tool_call_log (covers rows whose FK
     # backfill lost the db_task race and stayed NULL).
-    if is_test_call and tenant_id:
+    # Demo Studio: a demo call (server-set room metadata, test calls only) with
+    # keep_booking leaves its appointment in place so it stays on the calendar
+    # for the recording; the Studio's cleanup button removes it. Billing, CRM
+    # writes and owner notifications below stay off: they gate on is_test_call.
+    _keep_demo_booking = keeps_booking(params.get("demo"), is_test_call)
+    if _keep_demo_booking:
+        logger.info("[post-call] Demo call: keeping the booking (no auto-cancel)")
+    if is_test_call and tenant_id and not _keep_demo_booking:
         try:
             _test_appt_ids: set = set()
             if call_uuid:

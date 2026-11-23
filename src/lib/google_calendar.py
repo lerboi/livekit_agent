@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from ..supabase_client import get_supabase_admin
+from .calendar_text import scheduling_event_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,15 @@ def _to_naive_local_iso(utc_iso: str, tenant_timezone: str) -> str:
     return dt.replace(tzinfo=None).isoformat()
 
 
-def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezone: str) -> None:
+def push_booking_to_calendar(
+    tenant_id: str, appointment_id: str, tenant_timezone: str, style: str | None = None
+) -> dict | None:
     """
     Push a booking to Google Calendar.
+
+    style="scheduling" writes the scheduling-profile event ("<caller>: <reason>",
+    no service address or urgency). Returns {"provider", "event_id", "html_link"}
+    when an event was created, else None.
     Same logic as src/lib/google-calendar.js pushBookingToCalendar().
     This is a best-effort operation -- failures are logged but never raised.
 
@@ -56,7 +63,7 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezon
 
         if not creds:
             # No calendar configured -- silently skip
-            return
+            return None
 
         # Fetch the appointment details
         appointment_response = (
@@ -71,7 +78,7 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezon
             appointment_response.data[0] if appointment_response.data else None
         )
         if not appointment:
-            return
+            return None
 
         # Fetch tenant business name
         tenant_response = (
@@ -111,6 +118,9 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezon
             description_parts.append(f"Notes: {appointment['notes']}")
 
         description = "\n".join(part for part in description_parts if part)
+
+        if style == "scheduling":
+            summary, description = scheduling_event_text(appointment)
 
         # Phase 60.4 D-A-01: timeZone is authoritative when dateTime is naive.
         # Pass naive local ISO + timeZone — NOT offset-suffixed ISO + timeZone,
@@ -184,6 +194,12 @@ def push_booking_to_calendar(tenant_id: str, appointment_id: str, tenant_timezon
             )
 
         logger.info("[agent] Calendar event created: %s", event_id)
+        return {
+            "provider": "google",
+            "event_id": event_id,
+            "html_link": event.get("htmlLink"),
+        }
 
     except Exception as err:
         logger.error("[agent] Calendar push failed (non-fatal): %s", str(err))
+        return None

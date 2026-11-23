@@ -53,6 +53,7 @@ from livekit.agents import (
     room_io,
 )
 from livekit.agents import llm as _agents_llm
+from livekit.agents import ModelSettings
 from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancellation
 # Deprecated text turn detector — kept importable ONLY as the
 # VOCO_TURN_DETECTOR=text rollback path (see TURN_DETECTOR_MODE). The import
@@ -63,6 +64,8 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
 from .lib.background import create_background_task
+from .lib.demo import parse_demo, publish_event
+from .lib.booking_claim_guard import guarded_llm_stream
 from .lib.tool_filler import ThinkingSoundController
 from .prompt import build_system_prompt, build_scheduling_prompt
 from .tools import create_tools
@@ -705,8 +708,24 @@ def _build_tts(
 class VocoAgent(Agent):
     """Voco AI receptionist agent with dynamic tools."""
 
-    def __init__(self, instructions: str, tools: list):
+    def __init__(self, instructions: str, tools: list, deps: dict | None = None):
         super().__init__(instructions=instructions, tools=tools)
+        self._deps = deps if deps is not None else {}
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        # Booking-claim guard (lib/booking_claim_guard): a reply that says the
+        # appointment is booked when no booking happened is dropped before it
+        # is spoken and re-run with book_appointment forced. Every other turn
+        # streams straight through the SDK's default node.
+        def _run(tool_choice):
+            settings = (
+                model_settings if tool_choice is None
+                else ModelSettings(tool_choice=tool_choice)
+            )
+            return Agent.default.llm_node(self, chat_ctx, tools, settings)
+
+        async for chunk in guarded_llm_stream(self._deps, _run):
+            yield chunk
 
     async def on_enter(self) -> None:
         # Greeting is handled at the entrypoint level after session.start()
@@ -766,7 +785,17 @@ async def entrypoint(ctx: JobContext):
         to_number = _normalize_phone(to_number)
         from_number = _normalize_phone(from_number)
 
-        logger.info(f"[agent] Call started: room={call_id} from={from_number} to={to_number} test={is_test_call}")
+        # Demo Studio: a server-set `demo` block on a test call can ask for the
+        # booking to be pushed to an external calendar and kept after the call.
+        # parse_demo returns None unless test_call is true, so room metadata
+        # can never relax the sandbox on a production call.
+        demo = parse_demo(room_meta, is_test_call)
+        is_web_test = is_test_call and room_meta.get("web_test") is True
+
+        logger.info(
+            f"[agent] Call started: room={call_id} from={from_number} to={to_number} "
+            f"test={is_test_call} demo={demo}"
+        )
 
         # ── Tenant lookup (ONE round-trip: tenant row + its active services) ──
         # 2026-09-09 greet-first: the tenant row and the active services (intake
@@ -978,6 +1007,15 @@ async def entrypoint(ctx: JobContext):
             # "scheduling" | "home_service" — tools/__init__ picks the tool
             # surface from this; book_appointment skips address validation.
             "agent_profile": AGENT_PROFILE,
+            # Demo Studio block (None except on demo test calls): see lib/demo.
+            "demo": demo,
+            # Room for the live `voco.events` text stream the admin pages
+            # render. Set only for web test rooms; publish_event is a no-op
+            # everywhere else.
+            "_events_room": ctx.room if is_web_test else None,
+            # Wall-clock time of the caller's last finished turn. Read by
+            # book_appointment's confirm-then-book gate.
+            "_last_user_turn_at": None,
         }
         tools = create_tools(deps)
 
@@ -1174,7 +1212,7 @@ async def entrypoint(ctx: JobContext):
             logger.warning("[agent] prewarmed VAD missing — loading per-call")
             vad = silero.VAD.load(min_silence_duration=VAD_MIN_SILENCE_S)
 
-        agent = VocoAgent(instructions=system_prompt, tools=tools)
+        agent = VocoAgent(instructions=system_prompt, tools=tools, deps=deps)
 
         # Turn handling (livekit-agents 1.8 `turn_handling` dict — the
         # pre-1.8 flat kwargs min_endpointing_delay / allow_interruptions /
@@ -1232,6 +1270,8 @@ async def entrypoint(ctx: JobContext):
         def _track_language(event):
             try:
                 lang = getattr(event, "language", None)
+                if getattr(event, "is_final", False):
+                    deps["_last_user_turn_at"] = time.time()
                 if getattr(event, "is_final", False) and lang:
                     deps["_active_language"] = str(lang).lower()
             except Exception:
@@ -1245,6 +1285,8 @@ async def entrypoint(ctx: JobContext):
             text = getattr(event.item, "text_content", None)
             if text:
                 role = "user" if getattr(event.item, "role", None) == "user" else "agent"
+                if role == "user":
+                    deps["_last_user_turn_at"] = time.time()
                 transcript_turns.append({
                     "role": role,
                     "content": text,
@@ -1440,6 +1482,26 @@ async def entrypoint(ctx: JobContext):
             except Exception:
                 pass
 
+        def _publish_tool_event(name, args, out):
+            # Live action feed for the admin pages (web test rooms only).
+            # Arguments are the model's own tool arguments (dates, times, a
+            # name); the tool's return is reduced to its STATE token.
+            if deps.get("_events_room") is None:
+                return
+            try:
+                parsed = json.loads(args) if isinstance(args, str) and args else (args or {})
+            except Exception:
+                parsed = {}
+            out_text = (getattr(out, "output", None) if out else None) or ""
+            state = out_text.split("|", 1)[0].strip()[:160]
+            publish_event(
+                deps, "tool",
+                name=name,
+                args=parsed if isinstance(parsed, dict) else {},
+                state=state,
+                is_error=bool(getattr(out, "is_error", False)) if out else False,
+            )
+
         @session.on("function_tools_executed")
         def _diag_tools_executed(event):
             try:
@@ -1447,6 +1509,7 @@ async def entrypoint(ctx: JobContext):
                 for fc, out in event.zipped():
                     name = getattr(fc, "name", "?")
                     args = getattr(fc, "arguments", None)
+                    _publish_tool_event(name, args, out)
                     args_preview = str(args)[:100] if args else ""
                     out_text = getattr(out, "output", None) if out else None
                     out_preview = (out_text or "")[:180].replace("\n", " \\n ")
@@ -1572,6 +1635,8 @@ async def entrypoint(ctx: JobContext):
                         "transcript_turns": transcript_turns,
                         "recording_storage_path": recording_path if egress_id else None,
                         "is_test_call": is_test_call,
+                        # Demo Studio: keep_booking skips the test-call auto-cancel.
+                        "demo": demo,
                         "disconnection_reason": call_end_reason[0],
                         # In-memory truth about what booking tools did during the call,
                         # used by post-call to reconcile the DB against mid-call races.

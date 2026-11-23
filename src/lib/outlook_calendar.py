@@ -6,6 +6,7 @@ import time
 import requests
 
 from ..supabase_client import get_supabase_admin
+from .calendar_text import scheduling_event_text
 from .google_calendar import _to_naive_local_iso
 
 logger = logging.getLogger("voco-agent")
@@ -46,9 +47,13 @@ def _get_valid_token(tenant_id, creds):
     return _refresh_outlook_token(tenant_id, creds)
 
 
-def push_booking_to_outlook(tenant_id, appointment_id):
+def push_booking_to_outlook(tenant_id, appointment_id, style=None):
     """
     Push a confirmed appointment to the tenant's Outlook calendar.
+
+    style="scheduling" writes the scheduling-profile event ("<caller>: <reason>",
+    no address or urgency). Returns {"provider", "event_id", "html_link"} when an
+    event was created, else None.
     Same best-effort pattern as google_calendar.push_booking_to_calendar().
     Failures are logged but never raised.
 
@@ -69,7 +74,7 @@ def push_booking_to_outlook(tenant_id, appointment_id):
         )
         creds = creds_response.data[0] if creds_response.data else None
         if not creds:
-            return  # No Outlook connected — silently skip
+            return None  # No Outlook connected — silently skip
 
         # 2. Load the appointment
         appt_response = (
@@ -81,7 +86,7 @@ def push_booking_to_outlook(tenant_id, appointment_id):
         )
         appt = appt_response.data[0] if appt_response.data else None
         if not appt:
-            return
+            return None
 
         # 3. Load business name and timezone
         tenant_response = (
@@ -119,7 +124,11 @@ def push_booking_to_outlook(tenant_id, appointment_id):
             "start": {"dateTime": _to_naive_local_iso(appt["start_time"], tz), "timeZone": tz},
             "end": {"dateTime": _to_naive_local_iso(appt["end_time"], tz), "timeZone": tz},
         }
-        if appt.get("service_address"):
+        if style == "scheduling":
+            _title, _body = scheduling_event_text(appt)
+            event_body["subject"] = _title
+            event_body["body"] = {"contentType": "text", "content": _body}
+        elif appt.get("service_address"):
             event_body["location"] = {"displayName": appt["service_address"]}
 
         # 5. Get valid token and create event
@@ -144,6 +153,12 @@ def push_booking_to_outlook(tenant_id, appointment_id):
             )
 
         logger.info("[agent] Outlook calendar event created: %s", event_id)
+        return {
+            "provider": "outlook",
+            "event_id": event_id,
+            "html_link": event.get("webLink"),
+        }
 
     except Exception as err:
         logger.error("[agent] Outlook calendar push failed (non-fatal): %s", str(err))
+        return None

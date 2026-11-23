@@ -6,6 +6,7 @@ All side effects (calendar sync, SMS, recovery SMS) run in-process.
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ from ..lib.booking import atomic_book_slot
 from ..lib.slot_calculator import calculate_available_slots
 from ..lib.notifications import send_caller_sms, send_caller_recovery_sms
 from ..lib.calendar_push import push_booking_to_calendar
+from ..lib.demo import demo_external_destination, publish_event
 from ..integrations.google_maps import validate_address_with_region_fallback
 from .validate_address import get_cached_validation
 from ..utils import (
@@ -27,6 +29,12 @@ from ..utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Code-level backstop for the prompt's confirm-then-book rule (scheduling
+# profile). VOCO_CONFIRM_GATE=false turns it off.
+CONFIRM_GATE_ENABLED = os.environ.get("VOCO_CONFIRM_GATE", "true").strip().lower() not in (
+    "0", "false", "off", "no",
+)
 
 
 # DB constraint `appointments_urgency_check` only accepts these three values.
@@ -451,6 +459,45 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
                 slot_token,
             )
 
+    # Confirm-then-book gate (scheduling profile). The prompt says to read the
+    # time back and wait for a yes; this backs it with code for the one case
+    # code can see: the model looked a time up and booked it in the same turn,
+    # so the caller has not spoken since that time was first offered. Blocks
+    # at most once per slot, so it can never loop. Inactive when the entrypoint
+    # has not recorded a caller turn (unit tests, other profiles).
+    if _token_resolved and _scheduling_profile and CONFIRM_GATE_ENABLED:
+        _last_user_turn_at = deps.get("_last_user_turn_at")
+        _first_offered_at = min(
+            (
+                e.get("created_at", 0)
+                for e in _tokens.values()
+                if e.get("slot_start_utc") == slot_start
+            ),
+            default=0,
+        )
+        _gated = deps.setdefault("_confirm_gate_slots", set())
+        if (
+            _last_user_turn_at is not None
+            and _first_offered_at > _last_user_turn_at
+            and slot_start not in _gated
+        ):
+            _gated.add(slot_start)
+            _tz = deps.get("tenant_timezone") or "UTC"
+            logger.info(
+                "[book_appointment] confirm gate: slot offered after the caller's "
+                "last turn; asking for confirmation first. call=%s", deps.get("call_id"),
+            )
+            state = (
+                "STATE:needs_confirmation"
+                f" time=[{format_slot_for_speech(slot_start, _tz)}]"
+                " | DIRECTIVE:nothing is booked yet. The caller has not confirmed"
+                " this time. Say the day and time back once and ask if you should"
+                " book it. When they say yes, call book_appointment again with the"
+                " same slot_token."
+            )
+            deps["_last_tool_state"] = state
+            return state
+
     if not slot_start or not slot_end:
         state = (
             "STATE:booking_invalid reason=missing_slot_fields"
@@ -805,25 +852,41 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
         "ts": datetime.now(timezone.utc).isoformat(),
     })
 
-    # Now safe to do the awaited follow-up work. Write booking_outcome immediately
-    # so it persists even if the caller hangs up during calendar push or SMS.
-    # If the calls row hasn't been inserted yet (db_task race), this matches zero
-    # rows silently; post-call reconciliation handles that case.
-    result_update = await asyncio.to_thread(
-        lambda: supabase.table("calls").update(
-            {"booking_outcome": "booked"}
-        ).eq("call_id", deps.get("call_id", "")).execute()
+    # Live event for the admin pages (web test rooms only; no-op otherwise).
+    publish_event(
+        deps, "booked",
+        appointment_id=appointment_id,
+        start=slot_start,
+        end=slot_end,
+        when=slot_speech,
+        caller_name=caller_name or None,
+        reason=appointment_reason or None,
     )
-    if not (result_update.data if result_update else None):
-        logger.warning(
-            "[booking] mid-call booking_outcome update matched zero rows "
-            "(race with db_task); will be reconciled in post-call. call_id=%s",
-            deps.get("call_id"),
+
+    # Follow-up writes. The caller is waiting on this tool's return, and each
+    # write is a round-trip to the database region, so the three independent
+    # ones run concurrently instead of one after another. booking_outcome is
+    # written now so it persists even if the caller hangs up during the
+    # calendar push or SMS; if the calls row hasn't been inserted yet (db_task
+    # race) it matches zero rows and post-call reconciliation handles it.
+    async def _write_booking_outcome():
+        result_update = await asyncio.to_thread(
+            lambda: supabase.table("calls").update(
+                {"booking_outcome": "booked"}
+            ).eq("call_id", deps.get("call_id", "")).execute()
         )
+        if not (result_update.data if result_update else None):
+            logger.warning(
+                "[booking] mid-call booking_outcome update matched zero rows "
+                "(race with db_task); will be reconciled in post-call. call_id=%s",
+                deps.get("call_id"),
+            )
 
     # Backfill appointment call_id if it was NULL at booking time
     # (call_uuid may not have been populated yet from the background DB task)
-    if appointment_id and deps.get("call_uuid"):
+    async def _backfill_call_id():
+        if not (appointment_id and deps.get("call_uuid")):
+            return
         try:
             await asyncio.to_thread(
                 lambda: supabase.table("appointments")
@@ -836,8 +899,11 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
             pass  # non-critical — post-call pipeline has fallback
 
     # Scheduling profile: keep what the appointment is for on the row (it has
-    # no service address to describe it). Non-critical.
-    if appointment_id and appointment_reason:
+    # no service address to describe it). Non-critical, but it must land
+    # before the calendar push below, which reads it for the event title.
+    async def _save_reason():
+        if not (appointment_id and appointment_reason):
+            return
         try:
             await asyncio.to_thread(
                 lambda: supabase.table("appointments")
@@ -848,11 +914,18 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
         except Exception as notes_err:  # noqa: BLE001
             logger.warning("[book_appointment] could not save reason: %s", notes_err)
 
+    await asyncio.gather(_write_booking_outcome(), _backfill_call_id(), _save_reason())
+
     # Test-call sandbox: the appointment row itself is created (realistic
     # flow; post_call auto-cancels it), but no external side effects — no
     # Google/Outlook calendar event (auto-cancel can't remove those) and no
     # SMS to the (possibly simulated) caller number.
-    if deps.get("is_test_call"):
+    # Demo Studio exception: a demo call (server-set room metadata, test calls
+    # only) may name an external calendar; then the push runs to exactly that
+    # provider. The caller SMS below stays off for every test call.
+    is_test_call = bool(deps.get("is_test_call"))
+    demo_destination = demo_external_destination(deps)
+    if is_test_call and not demo_destination:
         logger.info(
             "[book_appointment] test call — skipping calendar push + caller SMS "
             "for appointment=%s", appointment_id,
@@ -863,14 +936,41 @@ async def _book_appointment_impl(deps: dict, raw_arguments: dict, context: RunCo
     # (awaited side effects) caused the AI to go silent, which let the caller's speech
     # trigger duplicate invocations and a spurious recovery SMS.
     if appointment_id:
+        _push_style = "scheduling" if _scheduling_profile and not parts else None
+
         async def _push_calendar_bg():
+            pushed = None
             try:
-                await asyncio.to_thread(
-                    lambda: push_booking_to_calendar(tenant_id, appointment_id, tenant_timezone)
+                pushed = await asyncio.to_thread(
+                    lambda: push_booking_to_calendar(
+                        tenant_id, appointment_id, tenant_timezone,
+                        provider=demo_destination, style=_push_style,
+                    )
                 )
             except Exception as cal_err:
                 logger.error("[agent] Calendar push failed: %s", str(cal_err))
+            if pushed and pushed.get("event_id"):
+                publish_event(
+                    deps, "calendar_saved",
+                    appointment_id=appointment_id,
+                    provider=pushed.get("provider"),
+                    event_id=pushed.get("event_id"),
+                    link=pushed.get("html_link"),
+                )
+            elif demo_destination:
+                publish_event(
+                    deps, "calendar_failed",
+                    appointment_id=appointment_id,
+                    provider=demo_destination,
+                )
         create_background_task(_push_calendar_bg())
+
+    if is_test_call:
+        logger.info(
+            "[book_appointment] demo call — calendar push to %s, caller SMS "
+            "skipped for appointment=%s", demo_destination, appointment_id,
+        )
+        return return_msg
 
     # Caller SMS confirmation — truly fire-and-forget for the same reason.
     sms_locale = (tenant.get("default_locale") if tenant else None) or "en"
