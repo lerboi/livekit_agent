@@ -64,7 +64,7 @@ from livekit.plugins import openai, deepgram, elevenlabs, silero, noise_cancella
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import api, rtc
 
-from .agents import APPOINTMENTS, select_agent
+from .agents import APPOINTMENTS, DEMO, select_agent
 from .lib.background import create_background_task
 from .lib.demo import parse_demo, publish_event
 from .lib.booking_claim_guard import guarded_llm_stream
@@ -805,10 +805,15 @@ async def entrypoint(ctx: JobContext):
         # and session wiring; it gets this module so both agents share one set
         # of voice-tuning constants. Everything below this block is the
         # receptionist and is not reached for an appointments call.
-        if select_agent(room_meta, is_test_call) == APPOINTMENTS:
-            from .agents.appointments.entry import run_call as run_appointments_call
+        agent_kind = select_agent(room_meta, is_test_call)
+        if agent_kind in (APPOINTMENTS, DEMO):
+            if agent_kind == DEMO:
+                # The clinic front desk for the recorded demo (test calls only).
+                from .agents.demo.entry import run_call as run_appointments_call
+            else:
+                from .agents.appointments.entry import run_call as run_appointments_call
 
-            logger.info(f"[agent] routing room={call_id} to the appointments agent")
+            logger.info(f"[agent] routing room={call_id} to the {agent_kind} agent")
             await run_appointments_call(
                 ctx,
                 sys.modules[__name__],

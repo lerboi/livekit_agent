@@ -132,7 +132,7 @@ def test_env_default_moves_every_call(monkeypatch):
 
 def test_router_sits_before_the_receptionist_tenant_lookup():
     src = (_SRC / "agent.py").read_text(encoding="utf-8")
-    route = src.index("if select_agent(room_meta, is_test_call) == APPOINTMENTS:")
+    route = src.index("agent_kind = select_agent(room_meta, is_test_call)")
     assert src.index("demo = parse_demo(room_meta, is_test_call)") < route
     assert route < src.index("# ── Tenant lookup")
     block = src[route:src.index("# ── Tenant lookup")]
@@ -1220,7 +1220,9 @@ def test_unknown_model_names_are_skipped_and_groq_needs_its_key(monkeypatch):
 
 def test_only_test_calls_can_name_a_model():
     src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
-    assert 'resolve_provider(base, room_meta.get("llm") if is_test_call else None)' in src
+    # Room metadata names a model on test calls only; after it comes the model
+    # of an agent built on this one (the demo agent), then the worker's setting.
+    assert '(room_meta.get("llm") if is_test_call else None) or profile.get("llm")' in src
     assert "model=llm_provider" in src and "build_llm(base, tenant_id, llm_provider)" in src
 
 

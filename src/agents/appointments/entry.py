@@ -67,9 +67,12 @@ _ENDING = ("agent_ended", "transferred", "max_duration")
 
 
 class AppointmentsAgent(Agent):
-    def __init__(self, instructions: str, tools: list, deps: dict):
+    def __init__(self, instructions: str, tools: list, deps: dict, turn_policy=None):
         super().__init__(instructions=instructions, tools=tools)
         self._deps = deps
+        # Optional: ``turn_policy(deps, chat_ctx)`` returns (tool_choice, nudge)
+        # for a turn that must call a tool, or None (src/agents/demo/policy.py).
+        self._turn_policy = turn_policy
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         # Claim guard (guard.py): a reply that says a booking change is done
@@ -84,6 +87,22 @@ class AppointmentsAgent(Agent):
                 else ModelSettings(tool_choice=tool_choice)
             )
             return Agent.default.llm_node(self, ctx, tools, settings)
+
+        if self._turn_policy is not None:
+            required = None
+            try:
+                required = self._turn_policy(self._deps, chat_ctx)
+            except Exception as err:  # noqa: BLE001 - a policy must never break a turn
+                logger.warning("[appointments] turn policy failed: %s", err)
+            if required is not None:
+                tool_choice, nudge = required
+                logger.info(
+                    "[appointments] turn policy requires %s. call=%s",
+                    (tool_choice or {}).get("function", {}).get("name"), self._deps.get("call_id"),
+                )
+                async for chunk in strip_tool_preamble(_run(tool_choice, nudge), self._deps):
+                    yield chunk
+                return
 
         # preamble.py: speech in the same response as a tool call ("Let me
         # check that for you") is dropped, so tools really are called silently.
@@ -130,9 +149,16 @@ async def run_call(
     demo: dict | None,
     to_number: str,
     from_number: str,
+    profile: dict | None = None,
 ) -> None:
     """Run one call. ``base`` is the loaded ``src/agent.py`` module: it carries
     the shared voice tuning, the TTS builder and the greeting messages."""
+    # ``profile``: what another agent built on this one supplies
+    # (src/agents/demo/entry.py): agent_name, build_prompt, turn_policy,
+    # llm (its model when the call names none), keyterms.
+    profile = profile or {}
+    agent_name = profile.get("agent_name") or AGENT_NAME
+    prompt_builder = profile.get("build_prompt") or build_prompt
     call_id = ctx.room.name
     caller_identity = participant.identity or ""
     start_timestamp = int(time.time() * 1000)
@@ -148,17 +174,19 @@ async def run_call(
     locale = (tenant or {}).get("default_locale") or "en"
     tenant_timezone = (tenant or {}).get("tenant_timezone") or "UTC"
     logger.info(
-        "[appointments] call=%s business=%s (%s) test=%s demo=%s",
-        call_id, tenant_id or "NONE", business_name, is_test_call, demo,
+        "[appointments] call=%s agent=%s business=%s (%s) test=%s demo=%s",
+        call_id, agent_name, tenant_id or "NONE", business_name, is_test_call, demo,
     )
 
     # Which model runs this call. A test call's server-set metadata may name
     # one (the Demo Studio's Model switch); a production call always uses the
     # worker's setting. The prompt's closing notes follow the model.
-    llm_provider = resolve_provider(base, room_meta.get("llm") if is_test_call else None)
+    llm_provider = resolve_provider(
+        base, (room_meta.get("llm") if is_test_call else None) or profile.get("llm"),
+    )
 
     local_now = datetime.now(tz=ZoneInfo(tenant_timezone))
-    system_prompt = build_prompt(
+    system_prompt = prompt_builder(
         business_name=business_name,
         tone_preset=(tenant or {}).get("tone_preset", "professional"),
         working_hours=(tenant or {}).get("working_hours"),
@@ -170,7 +198,7 @@ async def run_call(
     may_write_calendar, calendar_provider = calendar_target(is_test_call, demo)
 
     deps = {
-        "agent": AGENT_NAME,
+        "agent": agent_name,
         "supabase": supabase,
         "tenant": tenant,
         "tenant_id": tenant_id,
@@ -233,7 +261,7 @@ async def run_call(
 
     # ── Voice pipeline (shared tuning: see pipeline.py) ──
     voice_id = _voice_for(base, tenant, room_meta, is_test_call)
-    stt = build_stt(base, [business_name])
+    stt = build_stt(base, [business_name] + list(profile.get("keyterms") or []))
     llm, llm_legs = build_llm(base, tenant_id, llm_provider)
     try:
         eleven_key_ok = ctx.proc.userdata.get("eleven_key_ok")
@@ -261,7 +289,10 @@ async def run_call(
     for provider, leg in llm_legs:
         leg.on("metrics_collected", _log_llm_metrics(provider))
 
-    agent = AppointmentsAgent(instructions=system_prompt, tools=tools, deps=deps)
+    agent = AppointmentsAgent(
+        instructions=system_prompt, tools=tools, deps=deps,
+        turn_policy=profile.get("turn_policy"),
+    )
     session = AgentSession(
         stt=stt, llm=llm, tts=tts, vad=vad,
         turn_handling=build_turn_handling(base, build_turn_detector(base)),
@@ -584,7 +615,7 @@ async def run_call(
     _model_names = {"groq": base.GROQ_LLM_MODEL, "openai": base.LLM_MODEL}
     publish_event(
         deps, "session",
-        agent=AGENT_NAME,
+        agent=agent_name,
         llm=llm_legs[0][0],
         model=_model_names.get(llm_legs[0][0]),
         fallback=_model_names.get(llm_legs[1][0]) if len(llm_legs) > 1 else None,

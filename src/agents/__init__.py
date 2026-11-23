@@ -9,6 +9,10 @@ it asks ``select_agent`` which agent should take the call:
 * ``appointments``: the dedicated appointments agent in
   ``src/agents/appointments``: book, look up, move and cancel appointments in
   the business's connected calendar.
+* ``demo``: the clinic front desk for the recorded product demo, in
+  ``src/agents/demo``: its own prompt and turn policy on top of the
+  appointments agent's tools and call wiring. Test calls only: it cannot be
+  made the default.
 
 Selection:
 
@@ -25,12 +29,16 @@ import os
 
 RECEPTIONIST = "receptionist"
 APPOINTMENTS = "appointments"
-AGENTS = (RECEPTIONIST, APPOINTMENTS)
+DEMO = "demo"
+# Agents a production call may get (VOCO_DEFAULT_AGENT).
+DEFAULT_AGENTS = (RECEPTIONIST, APPOINTMENTS)
+# Agents a test call's server-set metadata may ask for.
+AGENTS = DEFAULT_AGENTS + (DEMO,)
 
 
 def default_agent() -> str:
     value = os.environ.get("VOCO_DEFAULT_AGENT", RECEPTIONIST).strip().lower()
-    return value if value in AGENTS else RECEPTIONIST
+    return value if value in DEFAULT_AGENTS else RECEPTIONIST
 
 
 def select_agent(room_meta: dict | None, is_test_call: bool) -> str:
