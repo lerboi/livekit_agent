@@ -7,8 +7,11 @@
 * exactly one time is on offer and has not been acted on,
 
 it returns the tool the turn must call: ``reschedule_appointment`` when the
-caller's appointment was looked up since the last change (they are moving it),
-otherwise ``book_appointment``. The model still writes the arguments, and the
+caller has an appointment and is moving it (they asked to move or change it
+since the last booking change, or it was looked up since then), otherwise
+``book_appointment``. Without the first test a move could become a second
+booking next to the first whenever the model checked the new time without
+looking the appointment up. The model still writes the arguments, and the
 tool still does its own checks (the token must be one it issued; a time the
 caller has not had a turn to accept is refused once). Nothing is decided here
 that the caller did not just say yes to.
@@ -35,6 +38,14 @@ _BUT_RE = re.compile(
     re.IGNORECASE,
 )
 MAX_YES_WORDS = 8
+# The caller wants an existing appointment at another time.
+_MOVE_RE = re.compile(
+    r"\b(?:move|moving|reschedul\w*|change|changing|push|shift|swap|switch|instead|postpone"
+    r"|bring it forward|another (?:time|day)|different (?:time|day)|can(?:'|’)?t make|cannot make"
+    r"|won(?:'|’)?t make)\b",
+    re.IGNORECASE,
+)
+_DONE_PREFIXES = ("BOOKED", "RESCHEDULED", "CANCELLED")
 
 
 def is_plain_yes(text: str) -> bool:
@@ -69,7 +80,21 @@ def _looked_up_since_last_write(deps: dict) -> bool:
     return False
 
 
-def pending_tool(deps: dict) -> str | None:
+def asked_to_move_since_last_write(chat_ctx) -> bool:
+    """The caller has asked to move or change an appointment since the last
+    completed booking change (or since the call began)."""
+    for item in reversed(getattr(chat_ctx, "items", None) or []):
+        if getattr(item, "type", "message") == "function_call_output":
+            if str(getattr(item, "output", "") or "").startswith(_DONE_PREFIXES):
+                return False
+            continue
+        text = _user_text(item)
+        if text and _MOVE_RE.search(text):
+            return True
+    return False
+
+
+def pending_tool(deps: dict, chat_ctx=None) -> str | None:
     """The write the single time on offer is for, or None when none is."""
     token = deps.get("_last_offered_token")
     if not token or token not in (deps.get("_slot_tokens") or {}):
@@ -78,7 +103,9 @@ def pending_tool(deps: dict) -> str | None:
         entry["appointment"].get("status") == "confirmed"
         for entry in (deps.get("_appt_tokens") or {}).values()
     )
-    if has_appointment and _looked_up_since_last_write(deps):
+    if has_appointment and (
+        _looked_up_since_last_write(deps) or asked_to_move_since_last_write(chat_ctx)
+    ):
         return "reschedule_appointment"
     return "book_appointment"
 
@@ -88,7 +115,7 @@ def confirm_pending_write(deps: dict, chat_ctx):
     text = _user_text(_last_item(chat_ctx))
     if text is None or not is_plain_yes(text):
         return None
-    tool = pending_tool(deps)
+    tool = pending_tool(deps, chat_ctx)
     if tool is None:
         return None
     return {"type": "function", "function": {"name": tool}}, None

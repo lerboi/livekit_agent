@@ -175,3 +175,60 @@ def test_the_shared_agent_applies_a_turn_policy_only_when_given_one():
     src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
     assert "if self._turn_policy is not None:" in src
     assert 'turn_policy=profile.get("turn_policy")' in src
+
+
+# ── a move is never a second booking ────────────────────────────────────────
+
+
+def _done(text):
+    return SimpleNamespace(type="function_call_output", output=text)
+
+
+def test_a_requested_move_is_a_move_even_when_the_appointment_was_not_looked_up():
+    """The model checked the new time without calling find_appointment: the
+    yes must still move the appointment booked earlier on the call."""
+    deps = _offered(
+        _appt_tokens={"appt_1": {"appointment": {"id": "a1", "status": "confirmed"}, "own": True}},
+        _tool_call_log=[{"name": "book_appointment", "success": True}, {"name": "check_slot", "success": True}],
+    )
+    ctx = _ctx(
+        _user("Can I book a cleaning for tomorrow at two?"),
+        _done("BOOKED: confirm the day and time"),
+        _agent("You're booked. Anything else?"),
+        _user("Actually, sorry, I've got a meeting then. Could you move it to Friday at ten?"),
+        _done("STATE:slot_ok token=slot_a"),
+        _agent("Friday at ten is free. Shall I move it there?"),
+        _user("Yes, please."),
+    )
+    assert confirm_pending_write(deps, ctx)[0]["function"]["name"] == "reschedule_appointment"
+
+
+@pytest.mark.parametrize("ask", [
+    "Can we reschedule to Friday at ten?", "I can't make it, how about Friday at ten?",
+    "Could we do Friday at ten instead?", "I need to change my appointment to Friday at ten.",
+])
+def test_ways_of_asking_for_a_move(ask):
+    deps = _offered(_appt_tokens={"appt_1": {"appointment": {"id": "a1", "status": "confirmed"}, "own": True}})
+    ctx = _ctx(_done("BOOKED: ok"), _user(ask), _agent("Friday at ten is free. Shall I move it there?"), _user("Yes."))
+    assert confirm_pending_write(deps, ctx)[0]["function"]["name"] == "reschedule_appointment"
+
+
+def test_a_move_request_from_before_the_last_change_does_not_count():
+    """The move already happened; a further time on offer is a new booking."""
+    deps = _offered(
+        _appt_tokens={"appt_1": {"appointment": {"id": "a1", "status": "confirmed"}, "own": True}},
+        _tool_call_log=[{"name": "find_appointment", "success": True}, {"name": "reschedule_appointment", "success": True}],
+    )
+    ctx = _ctx(
+        _user("Could you move it to Friday at ten?"),
+        _done("RESCHEDULED: confirm the new day"),
+        _user("Also, can I book a check-up for my son on Monday at nine?"),
+        _agent("Monday at nine is free. Shall I book it?"),
+        _user("Yes, please."),
+    )
+    assert confirm_pending_write(deps, ctx)[0]["function"]["name"] == "book_appointment"
+
+
+def test_a_move_request_with_no_appointment_is_a_booking():
+    ctx = _ctx(_user("Could we do Friday at ten instead?"), _agent("Friday at ten is free. Shall I book it?"), _user("Yes."))
+    assert confirm_pending_write(_offered(), ctx)[0]["function"]["name"] == "book_appointment"
