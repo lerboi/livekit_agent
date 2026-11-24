@@ -84,6 +84,15 @@ def test_prompt_is_a_clinic_front_desk_that_never_asks_the_reason():
         assert tool in prompt
 
 
+def test_prompt_asks_for_a_time_instead_of_offering_two():
+    """A day with no time: the agent asks what time, then checks that time."""
+    prompt = build_prompt(business_name="Brightside Dental")
+    assert "Ask what time they would like" in prompt
+    assert "Never pick or suggest times yourself." in prompt
+    assert "offer the two times" not in prompt
+    assert "What time would you like on Wednesday?" in prompt
+
+
 def test_prompt_is_the_same_for_every_call_and_model():
     a = build_prompt(business_name="Brightside Dental", model="openai")
     b = build_prompt(business_name="Brightside Dental", model="groq")
@@ -255,3 +264,78 @@ def test_the_fixed_lines_match_the_register_and_keep_the_recording_notice():
     assert "Have a lovely day" in PROFILE["goodbye"]
     src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
     assert 'profile.get("greeting")' in src and 'profile.get("goodbye")' in src
+
+
+# ── a day with no time: ask, never choose ───────────────────────────────────
+
+import asyncio
+import time as _time
+
+from src.agents.appointments.tools.availability import (
+    asked_what_is_free,
+    check_day_impl,
+    check_slot_impl,
+    names_a_time,
+    time_not_given,
+)
+
+
+def _said(*texts, **extra):
+    deps = {"_ask_for_time": True, "_caller_texts": [(_time.time(), t) for t in texts]}
+    deps.update(extra)
+    return deps
+
+
+@pytest.mark.parametrize("text", [
+    "Can I book a cleaning for tomorrow at two?", "Three o'clock.", "3:30 please", "at 2PM",
+    "Half past nine", "Could you move it to Friday at ten?", "Noon works", "At one, please",
+])
+def test_a_time_of_day_is_recognised(text):
+    assert names_a_time(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Can I book a cleaning for tomorrow?", "Monday the seventh of December", "On December 7",
+    "The 4th of December, 2026", "Friday afternoon", "Can I book one for Tuesday?", "",
+])
+def test_a_day_or_a_date_is_not_a_time(text):
+    assert not names_a_time(text)
+
+
+def test_the_demo_profile_asks_for_a_time():
+    assert PROFILE["ask_for_time"] is True
+
+
+def test_check_slot_refuses_a_time_the_caller_never_said():
+    deps = _said("Hi, it's Sam Wong. Can I book a check-up for tomorrow?")
+    out = asyncio.run(check_slot_impl(deps, "2026-12-04", "08:00"))
+    assert out.startswith("STATE:time_not_given") and "Ask what time" in out
+    # Once per date: a time this test could not read costs one question only.
+    assert time_not_given(deps, "2026-12-04") is False
+
+
+def test_check_day_does_not_offer_times_unless_the_caller_asked_what_is_free():
+    deps = _said("Can I book a check-up for tomorrow?")
+    out = asyncio.run(check_day_impl(deps, "2026-12-04"))
+    assert out.startswith("STATE:time_not_given") and "do not suggest times" in out
+    asking = _said("What times do you have tomorrow?")
+    assert asked_what_is_free(asking) and not asked_what_is_free(deps)
+
+
+def test_a_time_the_caller_said_is_checked():
+    assert time_not_given(_said("Can I book a cleaning for tomorrow at two?"), "2026-12-04") is False
+    assert time_not_given(_said("Tomorrow please", "Three o'clock."), "2026-12-04") is False
+
+
+def test_what_was_said_before_the_last_booking_change_does_not_count():
+    deps = _said("Tomorrow at two, please.")
+    deps["_last_write_at"] = _time.time() + 1
+    deps["_caller_texts"].append((_time.time() + 2, "Could you move it to Friday?"))
+    assert time_not_given(deps, "2026-11-27") is True
+
+
+def test_other_agents_are_not_gated():
+    deps = _said("Can I book something for tomorrow?")
+    deps["_ask_for_time"] = False
+    assert time_not_given(deps, "2026-12-04") is False
+    assert time_not_given({"_ask_for_time": True, "_caller_texts": []}, "2026-12-04") is False

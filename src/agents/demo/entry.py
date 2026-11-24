@@ -18,6 +18,9 @@ PROFILE = {
     # model. Production rehearsals on 2026-11-24: gpt-4.1-mini 4 of 5 (the miss
     # was a misheard name), Groq Qwen 3 of 5 with replies no recording could use.
     "llm": "openai",
+    # A day with no time: the agent asks what time the caller would like, and
+    # check_slot refuses a time the caller never said (2026-11-25).
+    "ask_for_time": True,
     # The fixed lines, in the same register as the prompt. The greeting still
     # says the call is recorded.
     "greeting": "Thank you for calling {business_name}. This call is recorded. How may I help you today?",

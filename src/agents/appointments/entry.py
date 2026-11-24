@@ -241,6 +241,11 @@ async def run_call(
         "_events_room": ctx.room if is_web_test else None,
         # When the caller last finished speaking: the confirm gates read it.
         "_last_user_turn_at": None,
+        # What the caller has said, as (time, text), and whether check_slot
+        # must refuse a time the caller never said (tools/availability.py
+        # time_not_given; the demo agent turns it on).
+        "_caller_texts": [],
+        "_ask_for_time": bool(profile.get("ask_for_time")),
         # The calendar this call may write to (None = none, or not yet known).
         "_calendar_provider": calendar_provider,
         "_calendar": None,
@@ -343,6 +348,28 @@ async def run_call(
     for provider, leg in llm_legs:
         leg.on("metrics_collected", _log_llm_metrics(provider))
 
+    def _log_tts_metrics(m):
+        # One line per spoken sentence. ``s_per_char`` is how long the audio
+        # runs for each character of text: when a caller reports a voice that
+        # turned slow or slurred, a jump in it says the speech was generated
+        # that way, and a steady value says the fault is after this process
+        # (network or the listener's device).
+        try:
+            chars = m.characters_count or 0
+            logger.info(
+                "[agent] tts_metrics call=%s label=%s ttfb=%.3f gen=%.2f audio=%.2f chars=%d "
+                "s_per_char=%.3f cancelled=%s",
+                call_id, m.label, m.ttfb, m.duration, m.audio_duration, chars,
+                (m.audio_duration / chars) if chars else 0.0, m.cancelled,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        tts.on("metrics_collected", _log_tts_metrics)
+    except Exception:  # noqa: BLE001
+        pass
+
     agent = AppointmentsAgent(
         instructions=system_prompt, tools=tools, deps=deps,
         turn_policy=profile.get("turn_policy"),
@@ -361,6 +388,9 @@ async def run_call(
         try:
             if getattr(event, "is_final", False):
                 deps["_last_user_turn_at"] = time.time()
+                heard = getattr(event, "transcript", None)
+                if heard:
+                    deps["_caller_texts"].append((time.time(), heard))
                 lang = getattr(event, "language", None)
                 if lang:
                     deps["_active_language"] = str(lang).lower()
@@ -375,6 +405,7 @@ async def run_call(
         role = "user" if getattr(event.item, "role", None) == "user" else "agent"
         if role == "user":
             deps["_last_user_turn_at"] = time.time()
+            deps["_caller_texts"].append((time.time(), text))
         transcript_turns.append({"role": role, "content": text, "timestamp": int(time.time() * 1000)})
         try:
             m = getattr(event.item, "metrics", None) or {}
@@ -833,6 +864,15 @@ async def run_call(
                 )
         except Exception as err:  # noqa: BLE001
             logger.error("[appointments] could not start the recording: %s", err)
+            # Tell the admin page why there will be no audio to download. On
+            # 2026-11-25 LiveKit refused every recording with "egress minutes
+            # exceeded" (the plan's monthly quota) and the page could only say
+            # "No recording available".
+            text = str(err).lower()
+            publish_event(
+                deps, "recording_failed",
+                reason="quota" if ("egress minutes" in text or "resource_exhausted" in text) else "error",
+            )
 
     create_background_task(_start_recording(), name="recording-start")
 

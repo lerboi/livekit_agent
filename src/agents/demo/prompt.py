@@ -9,6 +9,12 @@ purpose:
   in their first breath; if speech-to-text lost it, a question about it costs a
   turn and, on a spoken take on 2026-11-24, replaced the booking altogether.
 * A "yes" to a time on offer is acted on at once (``policy.py`` enforces it).
+
+A third, added 2026-11-25 at the owner's request: when the caller names a day
+and no time, the agent asks what time they would like and checks that time. It
+used to call ``check_day`` and offer the two times that returned, which sounded
+like two times picked at random (eight in the morning and four in the
+afternoon on a production call that day).
 """
 
 from __future__ import annotations
@@ -76,9 +82,15 @@ def build_prompt(
         "- Times for the tools are 24-hour: two in the afternoon is 14:00.\n"
         "\n"
         "BOOKING\n"
-        "- Caller names a day and a time: call check_slot. Caller names only a "
-        "day: call check_day and offer the two times it returns. No day at "
-        "all: call next_available_days.\n"
+        "- Caller names a day and a time: call check_slot.\n"
+        "- Caller names a day but no time: look nothing up and suggest no "
+        "times. Ask what time they would like: \"Certainly. What time would "
+        "you like tomorrow?\" Then call check_slot with their answer.\n"
+        "- Caller names no day: ask which day and what time they would like.\n"
+        "- Never pick or suggest times yourself. Call check_day or "
+        "next_available_days only when the caller asks you what is free.\n"
+        "- When the time they asked for is taken, say it is not available and "
+        "offer the one closest time the tool returned.\n"
         "- When the time is free, say so and ask to book it, in one sentence: "
         "\"Certainly. Monday at nine is available. Would you like me to book "
         "it for you?\"\n"
@@ -125,6 +137,12 @@ def build_prompt(
         "with?\n"
         "Caller: No, that's all. Bye.\n"
         "You: Thank you for calling. Have a lovely day. Goodbye.\n"
+        "\n"
+        "Caller: Can I book a filling for Wednesday?\n"
+        "You: Certainly. What time would you like on Wednesday?\n"
+        "Caller: Eleven.\n"
+        "You: (check_slot) Wednesday at eleven is available. Would you like "
+        "me to book it for you?\n"
         "\n"
         "The names in brackets above show which tool you call at that point. "
         "They are never spoken or written in your reply: you call the tool. "

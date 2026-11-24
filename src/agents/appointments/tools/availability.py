@@ -199,9 +199,87 @@ def afternoon_if_before_opening(tenant: dict, date: str, time_str: str) -> str:
     return time_str
 
 
+_MONTHS = (
+    "january|february|march|april|may|june|july|august|september|october|november|december"
+    "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+)
+# Numbers that are part of a date, not a time of day: "the 7th", "December 7",
+# "7 December", "2026".
+_DATE_NUMBER_RE = re.compile(
+    rf"\b\d{{1,2}}(?:st|nd|rd|th)\b|\b(?:{_MONTHS})\.?\s+\d{{1,2}}\b"
+    rf"|\b\d{{1,2}}\s+(?:of\s+)?(?:{_MONTHS})\b|\b(?:19|20)\d{{2}}\b",
+    re.IGNORECASE,
+)
+_SPOKEN_TIME_RE = re.compile(
+    r"(?<!\d)\d{1,2}(?:[:.]\d{2})?(?!\d)"
+    r"|\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midday|midnight)\b"
+    r"|\bone\s+(?:o\W?clock|thirty|fifteen|forty|p\.?m|a\.?m)|\bat\s+one\b"
+    r"|\bhalf\s+past\b|\bquarter\s+(?:past|to)\b|o['’ ]?clock",
+    re.IGNORECASE,
+)
+
+
+def names_a_time(text: str) -> bool:
+    """Whether something a caller said contains a time of day ("at two",
+    "3:30", "ten o'clock"). A day, a date or "the afternoon" is not one."""
+    return bool(_SPOKEN_TIME_RE.search(_DATE_NUMBER_RE.sub(" ", text or "")))
+
+
+_WHAT_IS_FREE_RE = re.compile(
+    r"\bwhat\s+(?:times?|slots?|do\s+you\s+have|have\s+you\s+got|is\s+(?:free|available|open))"
+    r"|\bwhich\s+times?\b|\bwhen\s+(?:are|is|do|can)\s+you\b|\bavailab\w+|\bopenings?\b"
+    r"|\b(?:earliest|soonest|next\s+free|any\s+time|anytime|whenever)\b",
+    re.IGNORECASE,
+)
+
+
+def asked_what_is_free(deps: dict) -> bool:
+    """The caller has asked which times are open (since the last booking
+    change), so listing times answers them."""
+    since = deps.get("_last_write_at", 0)
+    return any(
+        _WHAT_IS_FREE_RE.search(text or "")
+        for at, text in (deps.get("_caller_texts") or []) if at > since
+    )
+
+
+def time_not_given(deps: dict, date: str) -> bool:
+    """True, once per date, when this call must ask the caller for a time
+    (``deps["_ask_for_time"]``, set by the demo agent) and the caller has not
+    said one since the last booking change.
+
+    The demo agent's prompt tells the model to ask "what time would you like?"
+    when the caller names only a day. On a scripted call on 2026-11-25 it
+    called check_slot with a time of its own choosing ("08:00") instead. The
+    second check_slot for the same date goes through, so a time this test
+    cannot read (another language, an unusual phrasing) costs one question,
+    never the booking.
+    """
+    if not deps.get("_ask_for_time"):
+        return False
+    since = deps.get("_last_write_at", 0)
+    said = [text for at, text in (deps.get("_caller_texts") or []) if at > since]
+    if not said or any(names_a_time(text) for text in said):
+        return False
+    asked = deps.setdefault("_time_asked_dates", set())
+    if date in asked:
+        return False
+    asked.add(date)
+    return True
+
+
 async def check_slot_impl(deps: dict, date: str, time_str: str) -> str:
     if not date or not time_str:
         return state(deps, "STATE:missing_args | DIRECTIVE:ask the caller for a day and a time.")
+    if time_not_given(deps, date):
+        lib.log_tool_call(deps, {"name": "check_slot", "success": True, "result": "time_not_given"})
+        return state(
+            deps,
+            f"STATE:time_not_given date={date}"
+            " | DIRECTIVE:nothing was checked: the caller has not said a time, so"
+            " you may not choose one. Ask what time they would like on that day,"
+            " in one short sentence, then call check_slot with their answer.",
+        )
     ctx = await _context(deps)
     if isinstance(ctx, str):
         return ctx
@@ -307,6 +385,17 @@ async def check_day_impl(deps: dict, date: str, part_of_day: str = "") -> str:
     deps.pop("_last_offered_token", None)
     if not date:
         return state(deps, "STATE:missing_args | DIRECTIVE:ask the caller which day.")
+    if not asked_what_is_free(deps) and time_not_given(deps, date):
+        # The demo agent does not offer times of its own choosing: a caller
+        # who named a day and no time is asked what time they would like.
+        lib.log_tool_call(deps, {"name": "check_day", "success": True, "result": "time_not_given"})
+        return state(
+            deps,
+            f"STATE:time_not_given date={date}"
+            " | DIRECTIVE:nothing was looked up: do not suggest times. Ask what"
+            " time the caller would like on that day, in one short sentence,"
+            " then call check_slot with their answer.",
+        )
     ctx = await _context(deps)
     if isinstance(ctx, str):
         return ctx
