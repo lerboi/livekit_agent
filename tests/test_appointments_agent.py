@@ -1365,3 +1365,31 @@ def test_only_a_test_call_can_turn_the_typing_sound_off():
     src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
     assert 'is_test_call and room_meta.get("typing_sound") is False' in src
     assert "if typing_sound:" in src and "if not (typing_sound or base.AMBIENT_SOUND_ENABLED):" in src
+
+
+async def test_find_appointment_prefers_the_one_booked_on_this_call(monkeypatch):
+    """Booked on this call, then "move it": an older appointment under the same
+    name must not make the agent ask which one."""
+    from src.agents.appointments.tools import manage
+    from src.agents.appointments.tools.common import register_appointment
+
+    deps = _deps()
+    mine = {"id": "new-1", "start_time": _utc(_day(6), "09:00"), "end_time": _utc(_day(6), "10:00"),
+            "caller_name": "Alex Tan", "notes": "cleaning", "status": "confirmed"}
+    older = {"id": "old-1", "start_time": _utc(_day(3), "10:00"), "end_time": _utc(_day(3), "11:00"),
+             "caller_name": "Alex Tan", "notes": "cleaning", "status": "confirmed"}
+    register_appointment(deps, mine, own=True)
+
+    async def upcoming(_deps_arg):
+        return [older, dict(mine)]
+
+    monkeypatch.setattr(manage.store, "upcoming", upcoming)
+    out = await manage.find_appointment_impl(deps, "Alex Tan")
+    assert out.startswith("STATE:appointment_found count=1 booked_on_this_call=true other_upcoming=1")
+    assert "which is the one the caller means" in out
+    assert len(deps["_appt_tokens"]) == 1  # the older appointment got no token
+
+    # With nothing booked on this call, both are listed and the agent asks.
+    fresh = _deps()
+    out = await manage.find_appointment_impl(fresh, "Alex Tan")
+    assert out.startswith("STATE:appointment_found count=2 | ")

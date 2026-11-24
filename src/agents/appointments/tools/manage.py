@@ -174,6 +174,16 @@ async def find_appointment_impl(deps: dict, caller_name: str) -> str:
         # when given, narrows it; it never widens it.
         matches = named or rows
 
+    # An appointment booked earlier on this same call is the one a caller means
+    # by "move it" or "cancel it". Older appointments under the same name are
+    # counted, not listed: on a production call on 2026-11-25 the agent had
+    # just booked Tuesday at nine, was asked to "move it", found a second
+    # appointment under the name and asked the caller which one they meant.
+    others = 0
+    if own:
+        others = len([m for m in matches if m["id"] not in own_ids])
+        matches = [m for m in matches if m["id"] in own_ids]
+
     lib.log_tool_call(deps, {"name": "find_appointment", "success": True, "matches": len(matches)})
     if not matches:
         return state(
@@ -200,9 +210,19 @@ async def find_appointment_impl(deps: dict, caller_name: str) -> str:
         )
     else:
         directive = "tell the caller the appointments you found and ask which one they mean."
+    note = ""
+    if others:
+        note = (
+            f" booked_on_this_call=true other_upcoming={others}"
+        )
+        directive = (
+            "this is the appointment booked earlier on this call, which is the"
+            " one the caller means. Do not mention their other appointments"
+            " unless they say they mean a different one. " + directive
+        )
     return state(
         deps,
-        f"STATE:appointment_found count={len(matches)} | APPOINTMENTS: {listed} | DIRECTIVE:{directive}",
+        f"STATE:appointment_found count={len(matches)}{note} | APPOINTMENTS: {listed} | DIRECTIVE:{directive}",
     )
 
 
