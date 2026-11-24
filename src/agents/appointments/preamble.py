@@ -124,6 +124,59 @@ async def strip_tool_preamble(stream, deps: dict | None = None):
         yield item
 
 
+def _without_tool_calls(chunk, keep=SPEAK_WITH):
+    """The chunk with its tool calls removed, except those in ``keep``; None
+    if nothing is left. Returns (chunk_or_None, removed names)."""
+    delta = getattr(chunk, "delta", None)
+    calls = getattr(delta, "tool_calls", None) or []
+    removed = [getattr(c, "name", "") for c in calls if getattr(c, "name", "") not in keep]
+    if not removed:
+        return chunk, []
+    try:
+        delta.tool_calls = [c for c in calls if getattr(c, "name", "") in keep]
+    except Exception:  # noqa: BLE001
+        return chunk, []
+    if delta.tool_calls or getattr(delta, "content", None) or getattr(chunk, "usage", None) is not None:
+        return chunk, removed
+    return None, removed
+
+
+async def speak_or_act(stream, deps: dict | None = None):
+    """One reply per caller turn: a response that has spoken does not also
+    call a tool.
+
+    A response may carry speech and a tool call together. ``strip_tool_preamble``
+    drops the speech when it is a short lead-in. When the speech is a whole
+    reply, it has already gone out, and the tool call that follows it makes
+    the agent answer a second time once the tool returns, with the caller
+    having said nothing in between. Spoken takes on 2026-11-25: "What time
+    would you like tomorrow?" came with a check_slot for a time of the model's
+    own choosing, and was followed by "I'm sorry, may I know what time you
+    would like?"; "Two is not available, twelve or one are free. Which would
+    you prefer?" came with a check_slot for twelve, and was followed by
+    "Twelve noon is available. Would you like me to book it?".
+
+    Here the tool call is dropped instead: the caller answers the reply they
+    heard, and the model acts on that answer in the next turn. ``end_call`` is
+    kept (the goodbye and the hang-up belong together).
+    """
+    spoke = False
+    async for chunk in stream:
+        part, tool_names = _parts(chunk)
+        if spoke and tool_names and not isinstance(chunk, str):
+            chunk, removed = _without_tool_calls(chunk)
+            if removed:
+                logger.info(
+                    "[appointments] reply had already spoken; dropped its tool call %s. call=%s",
+                    ",".join(removed), (deps or {}).get("call_id"),
+                )
+            if chunk is None:
+                continue
+        if part.strip():
+            spoke = True
+        yield chunk
+
+
 async def goodbye_with_end_call(stream, deps: dict | None = None):
     """Make sure the caller hears a goodbye before the line goes down.
 

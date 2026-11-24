@@ -57,7 +57,7 @@ from .pipeline import (
     resolve_provider,
     resolve_stt_language,
 )
-from .preamble import goodbye_with_end_call, strip_tool_preamble
+from .preamble import goodbye_with_end_call, speak_or_act, strip_tool_preamble
 from .speech_filter import strip_tool_mentions
 from .prompt import build_prompt, date_context
 from .tools import create_tools
@@ -111,7 +111,7 @@ class AppointmentsAgent(Agent):
                 )
                 async for chunk in goodbye_with_end_call(
                     strip_tool_mentions(
-                        strip_tool_preamble(_run(tool_choice, nudge), self._deps), self._deps,
+                        speak_or_act(strip_tool_preamble(_run(tool_choice, nudge), self._deps), self._deps), self._deps,
                     ),
                     self._deps,
                 ):
@@ -121,10 +121,11 @@ class AppointmentsAgent(Agent):
         # preamble.py: speech in the same response as a tool call ("Let me
         # check that for you") is dropped, so tools really are called silently.
         # ... and a hang-up with no words gets the call's goodbye line first.
-        # speech_filter.py: a tool's name written into the reply is never spoken.
+        # speech_filter.py: bracketed notes and tool names are never spoken.
+        # speak_or_act: a response that has spoken does not also call a tool.
         async for chunk in goodbye_with_end_call(
             strip_tool_mentions(
-                strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps), self._deps,
+                speak_or_act(strip_tool_preamble(guarded_llm_stream(self._deps, _run), self._deps), self._deps), self._deps,
             ),
             self._deps,
         ):
