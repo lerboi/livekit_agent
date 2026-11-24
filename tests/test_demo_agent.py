@@ -232,3 +232,26 @@ def test_a_move_request_from_before_the_last_change_does_not_count():
 def test_a_move_request_with_no_appointment_is_a_booking():
     ctx = _ctx(_user("Could we do Friday at ten instead?"), _agent("Friday at ten is free. Shall I book it?"), _user("Yes."))
     assert confirm_pending_write(_offered(), ctx)[0]["function"]["name"] == "book_appointment"
+
+
+# ── register: respectful and professional ───────────────────────────────────
+
+
+def test_prompt_asks_for_a_respectful_professional_register():
+    prompt = build_prompt(business_name="Brightside Dental")
+    assert "courteous, respectful and professional" in prompt
+    assert "Be polite and respectful in every reply." in prompt
+    assert "Would you like me to book it for you?" in prompt
+    assert "Is there anything else I can help you with?" in prompt
+    # The casual lines the first version taught by example are gone.
+    for casual in ("Shall I book it?", "Done, you're now on", "You're booked for Monday at nine, Dana."):
+        assert casual not in prompt
+
+
+def test_the_fixed_lines_match_the_register_and_keep_the_recording_notice():
+    assert PROFILE["greeting"].format(business_name="Brightside Dental") == (
+        "Thank you for calling Brightside Dental. This call is recorded. How may I help you today?"
+    )
+    assert "Have a lovely day" in PROFILE["goodbye"]
+    src = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
+    assert 'profile.get("greeting")' in src and 'profile.get("goodbye")' in src

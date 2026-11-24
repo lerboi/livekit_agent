@@ -18,6 +18,10 @@ PROFILE = {
     # model. Production rehearsals on 2026-11-24: gpt-4.1-mini 4 of 5 (the miss
     # was a misheard name), Groq Qwen 3 of 5 with replies no recording could use.
     "llm": "openai",
+    # The fixed lines, in the same register as the prompt. The greeting still
+    # says the call is recorded.
+    "greeting": "Thank you for calling {business_name}. This call is recorded. How may I help you today?",
+    "goodbye": "Thank you for calling {business_name}. Have a lovely day. Goodbye.",
     # Extra speech-to-text keyterms next to the business name.
     "keyterms": list(SERVICES) + ["appointment"],
 }

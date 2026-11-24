@@ -247,7 +247,12 @@ async def run_call(
         "_calendar_task": None,
         # Spoken before end_call when the model hangs up without a goodbye
         # (preamble.goodbye_with_end_call). English calls only.
-        "_goodbye_text": f"Thanks for calling {business_name}. Goodbye." if locale == "en" else "",
+        "_goodbye_text": (
+            (profile.get("goodbye") or "Thanks for calling {business_name}. Goodbye.").format(
+                business_name=business_name,
+            )
+            if locale == "en" else ""
+        ),
     }
     tools = create_tools(deps)
 
@@ -706,6 +711,9 @@ async def run_call(
         base._msg(locale, "agent.greeting_onboarding").format(business_name=business_name)
         if tenant else base._msg(locale, "agent.greeting_default")
     )
+    if tenant and locale == "en" and profile.get("greeting"):
+        # An agent built on this one may have its own opening line.
+        greeting_text = profile["greeting"].format(business_name=business_name)
     if tenant and greeting_style == "warm" and locale == "en":
         greeting_text = WARM_GREETING.format(business_name=business_name)
     try:
