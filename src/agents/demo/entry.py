@@ -21,6 +21,10 @@ PROFILE = {
     # A day with no time: the agent asks what time the caller would like, and
     # check_slot refuses a time the caller never said (2026-11-25).
     "ask_for_time": True,
+    # English only unless the Demo Studio's Language switch says otherwise.
+    # With every language allowed, a spoken take on 2026-11-25 heard three
+    # short English replies as "Apa", "I'm thinking it..." and "How about it?".
+    "stt_language": "en",
     # The fixed lines, in the same register as the prompt. The greeting still
     # says the call is recorded.
     "greeting": "Thank you for calling {business_name}. This call is recorded. How may I help you today?",

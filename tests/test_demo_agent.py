@@ -339,3 +339,26 @@ def test_other_agents_are_not_gated():
     deps["_ask_for_time"] = False
     assert time_not_given(deps, "2026-12-04") is False
     assert time_not_given({"_ask_for_time": True, "_caller_texts": []}, "2026-12-04") is False
+
+
+# -- what speech-to-text listens for ------------------------------------------
+
+from src.agents.appointments.pipeline import resolve_stt_language
+
+
+def test_the_demo_agent_listens_for_english_unless_told_otherwise():
+    assert PROFILE["stt_language"] == "en"
+    assert resolve_stt_language(None, PROFILE["stt_language"]) == "en"
+    assert resolve_stt_language("multi", PROFILE["stt_language"]) == "multi"
+
+
+def test_other_agents_keep_listening_for_every_language():
+    assert resolve_stt_language(None, None) == "multi"
+    assert resolve_stt_language("en", None) == "en"
+    assert resolve_stt_language("klingon", None) == "multi"
+    assert resolve_stt_language("klingon", "en") == "en"
+
+
+def test_only_a_test_call_can_choose_the_language():
+    source = (_SRC / "agents" / "appointments" / "entry.py").read_text(encoding="utf-8")
+    assert 'room_meta.get("stt_language") if is_test_call else None' in source

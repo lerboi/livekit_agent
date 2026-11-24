@@ -55,6 +55,7 @@ from .pipeline import (
     build_turn_detector,
     build_turn_handling,
     resolve_provider,
+    resolve_stt_language,
 )
 from .preamble import goodbye_with_end_call, strip_tool_preamble
 from .speech_filter import strip_tool_mentions
@@ -294,7 +295,13 @@ async def run_call(
 
     # ── Voice pipeline (shared tuning: see pipeline.py) ──
     voice_id = _voice_for(base, tenant, room_meta, is_test_call)
-    stt = build_stt(base, [business_name] + list(profile.get("keyterms") or []))
+    # What speech-to-text listens for. A test call's server-set metadata may
+    # say (the Demo Studio's Language switch); otherwise the profile's own
+    # setting; otherwise every language, as on production calls.
+    stt_language = resolve_stt_language(
+        room_meta.get("stt_language") if is_test_call else None, profile.get("stt_language"),
+    )
+    stt = build_stt(base, [business_name] + list(profile.get("keyterms") or []), stt_language)
     llm, llm_legs = build_llm(base, tenant_id, llm_provider)
     try:
         eleven_key_ok = ctx.proc.userdata.get("eleven_key_ok")
@@ -702,6 +709,7 @@ async def run_call(
         deps, "session",
         agent=agent_name,
         voice_quality=voice_quality or "fast",
+        stt_language=stt_language,
         llm=llm_legs[0][0],
         model=_model_names.get(llm_legs[0][0]),
         fallback=_model_names.get(llm_legs[1][0]) if len(llm_legs) > 1 else None,

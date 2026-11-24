@@ -21,12 +21,29 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 logger = logging.getLogger("voco-agent")
 
 
-def build_stt(cfg, keyterms: list[str]):
+# What speech-to-text listens for: "multi" (any language, switching mid-call;
+# what every production call uses) or "en" (English only).
+STT_LANGUAGES = ("multi", "en")
+
+
+def resolve_stt_language(requested=None, default=None) -> str:
+    """``requested`` (a test call's server-set metadata), then ``default`` (an
+    agent profile's own setting), then "multi". Anything else is skipped."""
+    for candidate in (requested, default):
+        value = str(candidate or "").strip().lower()
+        if value in STT_LANGUAGES:
+            return value
+    return "multi"
+
+
+def build_stt(cfg, keyterms: list[str], language: str = "multi"):
     kwargs = {}
     terms = [t for t in keyterms if t][:20]
     if cfg.STT_KEYTERMS_ENABLED and terms:
         kwargs["keyterm"] = terms
-    return deepgram.STT(model="nova-3", language="multi", **kwargs)
+    return deepgram.STT(
+        model="nova-3", language=language if language in STT_LANGUAGES else "multi", **kwargs,
+    )
 
 
 def build_turn_detector(cfg):
